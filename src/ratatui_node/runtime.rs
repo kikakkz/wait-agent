@@ -850,27 +850,6 @@ impl SharedState {
     /// Remove all remote-peer sessions whose authority id matches the given
     /// node.  Called when a remote peer reconnects with a new node instance,
     /// which means any previous sessions hosted by that peer are stale.
-    pub(crate) fn remove_remote_sessions_for_node(&self, node_id: &str) {
-        let to_remove: Vec<String> = {
-            let guard = self
-                .sessions
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            guard
-                .values()
-                .filter(|record| {
-                    *record.address.transport() == SessionTransport::RemotePeer
-                        && record.address.authority_id() == node_id
-                })
-                .map(|record| record.address.qualified_target())
-                .collect()
-        };
-        for target_id in to_remove {
-            self.handle_session_exit(&target_id);
-        }
-    }
-
     /// Resize the active remote session, or open it with the given dimensions
     /// if this is the first time it is being viewed.
     pub(crate) fn resize_active_remote_session(&self, cols: u16, rows: u16) {

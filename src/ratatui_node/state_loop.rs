@@ -316,8 +316,6 @@ fn run_state_event_loop(
                     &connected_clients,
                     &mut reconnect_handles,
                     &mut outbound_dial_retry_handles,
-                    &snapshot_store,
-                    network_online,
                     node_id,
                 );
             }
@@ -326,6 +324,19 @@ fn run_state_event_loop(
                 if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
                     let _ = worker.cancel_tx.send(());
                 }
+            }
+
+            StateEvent::RemoteNodeReconnectFailed { node_id } => {
+                handle_remote_node_reconnect_failed(
+                    &shared,
+                    &client_writer,
+                    &connected_clients,
+                    &mut reconnect_handles,
+                    &mut outbound_dial_retry_handles,
+                    &snapshot_store,
+                    network_online,
+                    node_id,
+                );
             }
 
             StateEvent::RecordRemoteNodeConnection { node_id, info } => {
@@ -671,6 +682,7 @@ fn handle_remote_session_disconnected(
                                 node_id.clone(),
                                 request,
                                 ingress_tx,
+                                shared.state_sender(),
                             );
                             outbound_dial_retry_handles.insert(node_id, worker);
                         }
@@ -819,16 +831,13 @@ fn handle_remote_node_offline(
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
-    snapshot_store: &OutboundConnectionSnapshotStore,
-    network_online: bool,
     node_id: String,
 ) {
     ERROR_LOG.log(format!(
         "[ratatui-state-loop] remote node offline node={node_id}"
     ));
-    // Cancel any active reconnect workers for this node before the
-    // records are removed.  Failure to cancel would leave a worker
-    // running for a session that no longer exists.
+    // Cancel any active reconnect workers for this node; they were tied to the
+    // old transport and will be restarted by RemoteSessionDisconnected events.
     let affected: Vec<String> = {
         let guard = shared
             .sessions
@@ -849,6 +858,92 @@ fn handle_remote_node_offline(
             let _ = tx.send(());
         }
     }
+    // Keep remote_node_connections and the snapshot so retries can recover the
+    // endpoint and credentials. Mark sessions offline in the sidebar.
+    {
+        let mut guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for record in guard.values_mut() {
+            if *record.address.transport() == SessionTransport::RemotePeer
+                && record.address.authority_id() == node_id
+            {
+                record.availability = SessionAvailability::Offline;
+            }
+        }
+    }
+    // For outbound-dial peers, start a node-level retry worker so the control
+    // plane re-dials the remote waitagent without requiring SSH re-bootstrap.
+    if let std::collections::hash_map::Entry::Vacant(slot) =
+        outbound_dial_retry_handles.entry(node_id.clone())
+    {
+        if let Some(info) = shared.remote_node_connection(&node_id) {
+            if info.mode == RemoteNodeConnectionMode::OutboundDial {
+                let request = OutboundNodeSessionRequest {
+                    node_id: node_id.clone(),
+                    endpoint_uri: format!("tls://{}:{}", info.host, info.port),
+                    tls_pin_sha256: Some(info.tls_pin_sha256.clone())
+                        .filter(|s| !s.is_empty()),
+                };
+                let ingress_tx = {
+                    let guard = shared
+                        .ingress_internal_tx
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard.clone()
+                };
+                if let Some(ingress_tx) = ingress_tx {
+                    let worker = OutboundDialRetryWorker::start(
+                        node_id.clone(),
+                        request,
+                        ingress_tx,
+                        shared.state_sender(),
+                    );
+                    slot.insert(worker);
+                }
+            }
+        }
+    }
+    broadcast_snapshot(shared, client_writer, connected_clients);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_remote_node_reconnect_failed(
+    shared: &Arc<SharedState>,
+    client_writer: &ClientWriterHandle,
+    connected_clients: &HashSet<u64>,
+    reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
+    outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    network_online: bool,
+    node_id: String,
+) {
+    ERROR_LOG.log(format!(
+        "[ratatui-state-loop] remote node reconnect failed node={node_id}"
+    ));
+    let affected: Vec<String> = {
+        let guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .values()
+            .filter(|record| {
+                *record.address.transport() == SessionTransport::RemotePeer
+                    && record.address.authority_id() == node_id
+            })
+            .map(|record| record.address.qualified_target())
+            .collect()
+    };
+    for target_id in affected {
+        if let Some(tx) = reconnect_handles.remove(&target_id) {
+            let _ = tx.send(());
+        }
+        shared.handle_session_exit(&target_id);
+    }
     if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
         let _ = worker.cancel_tx.send(());
     }
@@ -860,7 +955,6 @@ fn handle_remote_node_offline(
         }
     }
     shared.remove_remote_node_connection(&node_id);
-    shared.remove_remote_sessions_for_node(&node_id);
     broadcast_snapshot(shared, client_writer, connected_clients);
 }
 
@@ -2351,7 +2445,7 @@ mod state_loop_tests {
     }
 
     #[test]
-    fn snapshot_removed_on_remote_node_offline_when_online() {
+    fn snapshot_kept_on_remote_node_offline_when_online() {
         let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
         let snapshot_path = std::env::temp_dir().join(format!(
             "waitagent-snapshot-node-online-{}",
@@ -2374,8 +2468,8 @@ mod state_loop_tests {
         let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
         assert_eq!(
             reloaded.load().expect("load should succeed").len(),
-            0,
-            "snapshot should be removed when remote node goes offline while network is online"
+            1,
+            "snapshot should be kept while retrying after remote node goes offline"
         );
 
         drop(tx);
@@ -2411,6 +2505,75 @@ mod state_loop_tests {
             entries.len(),
             1,
             "snapshot should be kept when remote node goes offline while control plane is offline"
+        );
+        assert_eq!(entries[0].authority_node_id, "peer#99999");
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_removed_on_remote_node_reconnect_failed_when_online() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-reconnect-failed-online-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let _ = tx.send(StateEvent::RemoteNodeReconnectFailed {
+            node_id: "peer#99999".to_string(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        assert_eq!(
+            reloaded.load().expect("load should succeed").len(),
+            0,
+            "snapshot should be removed when remote node reconnect fails while network is online"
+        );
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_kept_on_remote_node_reconnect_failed_when_offline() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-reconnect-failed-offline-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: false });
+        let _ = tx.send(StateEvent::RemoteNodeReconnectFailed {
+            node_id: "peer#99999".to_string(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        let entries = reloaded.load().expect("load should succeed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "snapshot should be kept when reconnect fails while control plane is offline"
         );
         assert_eq!(entries[0].authority_node_id, "peer#99999");
 

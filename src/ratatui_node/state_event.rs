@@ -106,6 +106,9 @@ pub(crate) enum StateEvent {
     /// This cancels any outbound-dial retry worker for the node and lets
     /// per-session reconnect workers proceed.
     RemoteNodeOnline { node_id: String },
+    /// The outbound-dial retry worker exhausted its budget without reconnecting
+    /// the node. The state loop should remove the node's sessions and snapshot.
+    RemoteNodeReconnectFailed { node_id: String },
     /// Record connection metadata for a remote peer so reconnect can reuse the
     /// endpoint, TLS pin, and operator key without re-bootstrapping.
     RecordRemoteNodeConnection {
