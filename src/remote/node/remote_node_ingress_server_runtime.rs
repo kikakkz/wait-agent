@@ -1601,15 +1601,22 @@ fn run_node_ingress_server_loop<
     let mut publication_revisions = ReceiverPublicationRevisionTable::default();
     let mut socket_discovery_retry_scheduled = false;
     let mut closed_session_instances = HashSet::<String>::new();
-    let mut outbound_guards = Vec::<GrpcRemoteNodeTransportGuard>::new();
+    let mut outbound_guards = HashMap::<String, GrpcRemoteNodeTransportGuard>::new();
+    let mut pending_outbound_guards = HashMap::<String, GrpcRemoteNodeTransportGuard>::new();
+    let mut pending_outbound_dials = HashSet::<String>::new();
     let outbound_transport = GrpcRemoteNodeTransport::new();
-    let (outbound_guard_tx, outbound_guard_rx) =
-        mpsc::channel::<Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError>>();
+    let (outbound_guard_tx, outbound_guard_rx) = mpsc::channel::<(
+        String,
+        Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError>,
+    )>();
 
     loop {
-        while let Ok(result) = outbound_guard_rx.try_recv() {
+        while let Ok((node_id, result)) = outbound_guard_rx.try_recv() {
+            pending_outbound_dials.remove(&node_id);
             match result {
-                Ok(guard) => outbound_guards.push(guard),
+                Ok(guard) => {
+                    pending_outbound_guards.insert(node_id, guard);
+                }
                 Err(error) => {
                     // The worker thread already logged the error; nothing else
                     // to do here.
@@ -1653,6 +1660,8 @@ fn run_node_ingress_server_loop<
                     authority_manager: &mut authority_manager,
                     sessions: &mut sessions,
                     pending_create_sessions: &mut pending_create_sessions,
+                    outbound_guards: &mut outbound_guards,
+                    pending_outbound_guards: &mut pending_outbound_guards,
                     registered_workspace_sockets: &registered_workspace_sockets,
                     publication_revisions: &mut publication_revisions,
                     internal_tx: internal_tx.clone(),
@@ -1689,6 +1698,18 @@ fn run_node_ingress_server_loop<
                 // Do not block the single ingress loop on the TCP/TLS handshake and
                 // server hello exchange. Spawn a short-lived worker and drain the
                 // resulting guard through outbound_guard_rx on the next iterations.
+                //
+                // Ignore duplicate requests for the same node: only one outbound dial
+                // may be in flight at a time, and a new dial is pointless while an
+                // active session already exists.
+                let node_id = request.node_id.clone();
+                if has_active_ingress_session_for_node(&sessions, &node_id)
+                    || pending_outbound_dials.contains(&node_id)
+                {
+                    continue;
+                }
+                pending_outbound_dials.insert(node_id.clone());
+
                 let outbound_transport = outbound_transport.clone();
                 let outbound_guard_tx = outbound_guard_tx.clone();
                 let outbound_transport_tx = outbound_transport_tx.clone();
@@ -1700,7 +1721,7 @@ fn run_node_ingress_server_loop<
                             "[remote-node-ingress] outbound connection failed: {error}"
                         ));
                     }
-                    let _ = outbound_guard_tx.send(result);
+                    let _ = outbound_guard_tx.send((node_id, result));
                 });
             }
             IngressServerEvent::Internal(event) => {
@@ -1791,6 +1812,8 @@ where
     authority_manager: &'a mut SessionSyncAuthorityManager<F, A>,
     sessions: &'a mut HashMap<String, ActiveNodeIngressSession>,
     pending_create_sessions: &'a mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
+    outbound_guards: &'a mut HashMap<String, GrpcRemoteNodeTransportGuard>,
+    pending_outbound_guards: &'a mut HashMap<String, GrpcRemoteNodeTransportGuard>,
     registered_workspace_sockets: &'a BTreeSet<String>,
     publication_revisions: &'a mut ReceiverPublicationRevisionTable,
     internal_tx: mpsc::Sender<InternalEvent>,
@@ -1815,6 +1838,8 @@ fn handle_transport_event<
         authority_manager,
         sessions,
         pending_create_sessions,
+        outbound_guards,
+        pending_outbound_guards,
         registered_workspace_sockets,
         publication_revisions,
         internal_tx,
@@ -1828,6 +1853,14 @@ fn handle_transport_event<
             closed_session_instances.remove(&session_instance_id);
 
             let node_id = session.node_id().to_string();
+
+            // If this session was opened by an outbound dial, the guard is waiting
+            // in pending_outbound_guards. Move it to outbound_guards keyed by the
+            // real session instance id so it can be dropped when the session closes.
+            if let Some(guard) = pending_outbound_guards.remove(&node_id) {
+                outbound_guards.insert(session_instance_id.clone(), guard);
+            }
+
             let was_offline = !has_active_ingress_session_for_node(sessions, &node_id);
 
             let mut active = ActiveNodeIngressSession {
@@ -1945,6 +1978,10 @@ fn handle_transport_event<
         } => {
             sessions.remove(&session_instance_id);
             closed_session_instances.insert(session_instance_id.clone());
+            // Drop the outbound transport guard for this session so the worker
+            // thread exits and the TCP connection is closed.
+            outbound_guards.remove(&session_instance_id);
+            pending_outbound_guards.remove(&node_id);
             // Do NOT stop authority hosts here. An authority target host's
             // lifetime belongs to the remote target session, not to the inbound
             // gRPC session that happens to be routing for it. Stopping the host
@@ -1965,10 +2002,12 @@ fn handle_transport_event<
             if let Some(session_instance_id) = session_instance_id {
                 sessions.remove(&session_instance_id);
                 closed_session_instances.insert(session_instance_id.clone());
+                outbound_guards.remove(&session_instance_id);
                 // Authority hosts are not tied to the inbound gRPC session; see
                 // the SessionClosed branch above.
             }
             if let Some(node_id) = node_id {
+                pending_outbound_guards.remove(&node_id);
                 mark_discovered_node_offline_if_last_ingress_session(
                     publication_runtime,
                     sessions,

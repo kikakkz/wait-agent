@@ -357,25 +357,26 @@ fn run_state_event_loop(
                 reconnect_snapshot_hosts(&shared, &remote_owner, &snapshot_store, &state_event_tx);
             }
 
-            StateEvent::SnapshotHostReconnectResult { profile_name, result } => {
-                match *result {
-                    Ok(outcome) => {
-                        apply_remote_host_connect_outcome(
-                            &shared,
-                            &snapshot_store,
-                            &profile_name,
-                            false,
-                            outcome,
-                        );
-                    }
-                    Err(error) => {
-                        ERROR_LOG.log(format!(
-                            "[ratatui-state-loop] snapshot reconnect failed for profile `{}`: {error}",
-                            profile_name
-                        ));
-                    }
+            StateEvent::SnapshotHostReconnectResult {
+                profile_name,
+                result,
+            } => match *result {
+                Ok(outcome) => {
+                    apply_remote_host_connect_outcome(
+                        &shared,
+                        &snapshot_store,
+                        &profile_name,
+                        false,
+                        outcome,
+                    );
                 }
-            }
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-state-loop] snapshot reconnect failed for profile `{}`: {error}",
+                        profile_name
+                    ));
+                }
+            },
         }
     }
     Ok(())
@@ -884,8 +885,7 @@ fn handle_remote_node_offline(
                 let request = OutboundNodeSessionRequest {
                     node_id: node_id.clone(),
                     endpoint_uri: format!("tls://{}:{}", info.host, info.port),
-                    tls_pin_sha256: Some(info.tls_pin_sha256.clone())
-                        .filter(|s| !s.is_empty()),
+                    tls_pin_sha256: Some(info.tls_pin_sha256.clone()).filter(|s| !s.is_empty()),
                 };
                 let ingress_tx = {
                     let guard = shared

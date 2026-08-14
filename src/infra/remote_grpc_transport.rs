@@ -5,7 +5,7 @@ use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
     NodeSessionService, NodeSessionServiceServer,
 };
 use crate::infra::remote_grpc_proto::v1::{
-    ClientHello, NodeSessionEnvelope, ProtocolVersion, RecoveryPolicy, ServerHello,
+    ClientHello, Heartbeat, NodeSessionEnvelope, ProtocolVersion, RecoveryPolicy, ServerHello,
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -30,6 +30,8 @@ use tower::Service;
 
 const SERVER_ID: &str = "waitagent-remote-ingress";
 const HEARTBEAT_INTERVAL_SECONDS: i64 = 15;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
 const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -355,14 +357,26 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 });
 
                 tokio::pin!(shutdown_rx);
+                let mut heartbeat = tokio::time::interval_at(
+                    tokio::time::Instant::now() + HEARTBEAT_INTERVAL,
+                    HEARTBEAT_INTERVAL,
+                );
                 loop {
                     tokio::select! {
                         _ = &mut shutdown_rx => {
                             break;
                         }
-                        result = inbound.message() => {
+                        _ = heartbeat.tick() => {
+                            if session.send(heartbeat_envelope(
+                                &request.node_id,
+                                &session_instance_id,
+                            )).is_err() {
+                                break;
+                            }
+                        }
+                        result = tokio::time::timeout(HEARTBEAT_TIMEOUT, inbound.message()) => {
                             match result {
-                                Ok(Some(envelope)) => {
+                                Ok(Ok(Some(envelope))) => {
                                     if event_tx.send(RemoteNodeTransportEvent::EnvelopeReceived {
                                         node_id: request.node_id.clone(),
                                         session_instance_id: session_instance_id.clone(),
@@ -375,14 +389,26 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                                         break;
                                     }
                                 }
-                                Ok(None) => {
+                                Ok(Ok(None)) => {
                                     break;
                                 }
-                                Err(error) => {
+                                Ok(Err(error)) => {
                                     let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                                         node_id: Some(request.node_id.clone()),
                                         session_instance_id: Some(session_instance_id.clone()),
                                         message: error.to_string(),
+                                    });
+                                    break;
+                                }
+                                Err(_) => {
+                                    ERROR_LOG.log_error(format!(
+                                        "client reader: heartbeat timeout for node {} session {}",
+                                        request.node_id, session_instance_id
+                                    ));
+                                    let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                        node_id: Some(request.node_id.clone()),
+                                        session_instance_id: Some(session_instance_id.clone()),
+                                        message: "heartbeat timeout".to_string(),
                                     });
                                     break;
                                 }
@@ -691,38 +717,65 @@ impl NodeSessionService for TransportNodeSessionService {
         let event_tx = self.event_tx.clone();
         let writer_node_id = node_id.clone();
         tokio::spawn(async move {
+            let mut heartbeat = tokio::time::interval_at(
+                tokio::time::Instant::now() + HEARTBEAT_INTERVAL,
+                HEARTBEAT_INTERVAL,
+            );
             loop {
-                match inbound.message().await {
-                    Ok(Some(envelope)) => {
-                        if event_tx
-                            .send(RemoteNodeTransportEvent::EnvelopeReceived {
-                                node_id: node_id.clone(),
-                                session_instance_id: session_instance_id.clone(),
-                                envelope: Box::new(envelope),
-                            })
+                tokio::select! {
+                    _ = heartbeat.tick() => {
+                        if session.send(heartbeat_envelope(&node_id, &session_instance_id))
                             .is_err()
                         {
-                            ERROR_LOG.log_error(format!(
-                                "server reader: event_tx.send failed for node {}",
-                                node_id
-                            ));
                             break;
                         }
                     }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(error) => {
-                        ERROR_LOG.log_error(format!(
-                            "server reader: inbound error for node {}: {}",
-                            node_id, error
-                        ));
-                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
-                            node_id: Some(node_id.clone()),
-                            session_instance_id: Some(session_instance_id.clone()),
-                            message: error.to_string(),
-                        });
-                        break;
+                    result = tokio::time::timeout(HEARTBEAT_TIMEOUT, inbound.message()) => {
+                        match result {
+                            Ok(Ok(Some(envelope))) => {
+                                if event_tx
+                                    .send(RemoteNodeTransportEvent::EnvelopeReceived {
+                                        node_id: node_id.clone(),
+                                        session_instance_id: session_instance_id.clone(),
+                                        envelope: Box::new(envelope),
+                                    })
+                                    .is_err()
+                                {
+                                    ERROR_LOG.log_error(format!(
+                                        "server reader: event_tx.send failed for node {}",
+                                        node_id
+                                    ));
+                                    break;
+                                }
+                            }
+                            Ok(Ok(None)) => {
+                                break;
+                            }
+                            Ok(Err(error)) => {
+                                ERROR_LOG.log_error(format!(
+                                    "server reader: inbound error for node {}: {}",
+                                    node_id, error
+                                ));
+                                let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                    node_id: Some(node_id.clone()),
+                                    session_instance_id: Some(session_instance_id.clone()),
+                                    message: error.to_string(),
+                                });
+                                break;
+                            }
+                            Err(_) => {
+                                ERROR_LOG.log_error(format!(
+                                    "server reader: heartbeat timeout for node {} session {}",
+                                    node_id, session_instance_id
+                                ));
+                                let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                    node_id: Some(node_id.clone()),
+                                    session_instance_id: Some(session_instance_id.clone()),
+                                    message: "heartbeat timeout".to_string(),
+                                });
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -801,6 +854,19 @@ fn server_hello_envelope(
                 replay_supported: true,
             }),
             operator_challenge: operator_challenge.unwrap_or_default(),
+        })),
+    }
+}
+
+fn heartbeat_envelope(node_id: &str, session_instance_id: &str) -> NodeSessionEnvelope {
+    NodeSessionEnvelope {
+        message_id: format!("heartbeat-{}", now_millis()),
+        sent_at: Some(timestamp_now()),
+        session_instance_id: session_instance_id.to_string(),
+        correlation_id: None,
+        route: None,
+        body: Some(Body::Heartbeat(Heartbeat {
+            runtime_id: node_id.to_string(),
         })),
     }
 }
