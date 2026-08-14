@@ -1026,8 +1026,34 @@ impl Service<tonic::transport::Uri> for TlsPinConnector {
                     (host.to_string(), port)
                 })
                 .unwrap_or_else(|| (authority.to_string(), 443));
-            let stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-            let tls_stream = connector.connect(server_name, stream).await?;
+            let stream = match tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect((host.as_str(), port)),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "tls-pin tcp connect timed out",
+                    ))
+                }
+            };
+            let tls_stream =
+                match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, stream))
+                    .await
+                {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "tls-pin handshake timed out",
+                        ))
+                    }
+                };
             Ok(hyper_util::rt::tokio::TokioIo::new(tls_stream))
         })
     }
