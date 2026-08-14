@@ -61,7 +61,7 @@ tonic = { version = "0.12", features = ["transport", "tls"] }
 tower = "0.4"
 hyper-util = "0.1"
 unicode-width = "0.1.14"
-keyring = { version = "3", features = ["linux-native-sync-persistent", "apple-native", "windows-native"] }
+keyring = { version = "3", features = ["linux-native", "apple-native", "windows-native"] }
 
 [features]
 # Enable to compile the loom model tests in src/ratatui_node/loom_tests.rs.
