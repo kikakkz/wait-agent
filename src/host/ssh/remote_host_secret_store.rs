@@ -393,10 +393,6 @@ impl RemoteHostSecretStore for KeyringRemoteHostSecretStore {
         match entry.get_password() {
             Ok(value) => Ok(Some(RemoteHostSecretValue::new(value))),
             Err(keyring::Error::NoEntry) => Ok(None),
-            // If the OS keyring backend is unreachable (e.g., no D-Bus session
-            // bus on a headless server), treat it the same as "no secret saved"
-            // so the UI can still open. Saving will still fail with an error.
-            Err(keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)) => Ok(None),
             Err(error) => Err(RemoteHostSecretStoreError::new(format!(
                 "keyring lookup failed: {error}"
             ))),
