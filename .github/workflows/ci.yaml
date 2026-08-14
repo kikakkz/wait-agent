@@ -23,7 +23,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bison pkg-config libevent-dev libncurses-dev \
-            build-essential automake autoconf
+            build-essential automake autoconf \
+            libdbus-1-dev
 
       - name: Install Rust toolchain
         run: |
@@ -48,7 +49,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bison pkg-config libevent-dev libncurses-dev \
-            build-essential automake autoconf
+            build-essential automake autoconf \
+            libdbus-1-dev
 
       - name: Install Rust toolchain
         run: rustup show
@@ -68,7 +70,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bison pkg-config libevent-dev libncurses-dev \
-            build-essential automake autoconf
+            build-essential automake autoconf \
+            libdbus-1-dev
 
       - name: Install Rust toolchain
         run: rustup show
