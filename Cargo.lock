@@ -3369,7 +3369,7 @@ dependencies = [
 
 [[package]]
 name = "waitagent"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "aes",
  "alacritty_terminal",
