@@ -343,7 +343,27 @@ fn run_state_event_loop(
             }
 
             StateEvent::ReconnectSnapshotHosts => {
-                reconnect_snapshot_hosts(&shared, &remote_owner, &snapshot_store);
+                reconnect_snapshot_hosts(&shared, &remote_owner, &snapshot_store, &state_event_tx);
+            }
+
+            StateEvent::SnapshotHostReconnectResult { profile_name, result } => {
+                match *result {
+                    Ok(outcome) => {
+                        apply_remote_host_connect_outcome(
+                            &shared,
+                            &snapshot_store,
+                            &profile_name,
+                            false,
+                            outcome,
+                        );
+                    }
+                    Err(error) => {
+                        ERROR_LOG.log(format!(
+                            "[ratatui-state-loop] snapshot reconnect failed for profile `{}`: {error}",
+                            profile_name
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1708,28 +1728,11 @@ fn handle_remote_host_connect_result(
     client_writer.send(ClientWriterRequest::Write { client_id, payload });
 }
 
-fn connect_remote_host_by_profile_name(
-    shared: &Arc<SharedState>,
-    remote_owner: &RemoteRuntimeOwnerRuntime,
-    profile_name: &str,
-    snapshot_store: &OutboundConnectionSnapshotStore,
-    activate: bool,
-) -> Result<RemoteHostConnectedOutcome, String> {
-    let outcome = perform_remote_host_connect(shared, remote_owner, profile_name)?;
-    apply_remote_host_connect_outcome(
-        shared,
-        snapshot_store,
-        profile_name,
-        activate,
-        outcome.clone(),
-    );
-    Ok(outcome)
-}
-
 fn reconnect_snapshot_hosts(
     shared: &Arc<SharedState>,
     remote_owner: &RemoteRuntimeOwnerRuntime,
     snapshot_store: &OutboundConnectionSnapshotStore,
+    state_event_tx: &mpsc::Sender<StateEvent>,
 ) {
     let entries = match snapshot_store.load() {
         Ok(entries) => entries,
@@ -1769,18 +1772,17 @@ fn reconnect_snapshot_hosts(
             continue;
         }
 
-        if let Err(error) = connect_remote_host_by_profile_name(
-            shared,
-            remote_owner,
-            &entry.profile_name,
-            snapshot_store,
-            false,
-        ) {
-            ERROR_LOG.log(format!(
-                "[ratatui-state-loop] snapshot reconnect failed for profile `{}`: {error}",
-                entry.profile_name
-            ));
-        }
+        let shared = Arc::clone(shared);
+        let remote_owner = remote_owner.clone();
+        let profile_name = entry.profile_name.clone();
+        let tx = state_event_tx.clone();
+        std::thread::spawn(move || {
+            let result = perform_remote_host_connect(&shared, &remote_owner, &profile_name);
+            let _ = tx.send(StateEvent::SnapshotHostReconnectResult {
+                profile_name,
+                result: Box::new(result),
+            });
+        });
     }
 }
 

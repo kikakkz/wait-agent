@@ -122,6 +122,12 @@ pub(crate) enum StateEvent {
     /// Sent once at startup and again after the control plane recovers from a
     /// network outage.
     ReconnectSnapshotHosts,
+    /// The asynchronous snapshot reconnect operation finished. The state loop
+    /// applies session/active-target mutations on success or logs the error.
+    SnapshotHostReconnectResult {
+        profile_name: String,
+        result: Box<Result<RemoteHostConnectedOutcome, String>>,
+    },
     /// The asynchronous remote-host connect operation finished. The state loop
     /// applies session/active-target mutations and reports success or error to
     /// the originating client.
