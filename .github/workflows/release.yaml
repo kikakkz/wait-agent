@@ -96,7 +96,8 @@ jobs:
               apt-get update
               apt-get install -y \
                 ca-certificates curl git bison pkg-config libevent-dev libncurses-dev \
-                build-essential automake autoconf cmake ninja-build nasm clang
+                build-essential automake autoconf cmake ninja-build nasm clang \
+                libdbus-1-dev
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain 1.86.0
               . "$HOME/.cargo/env"
