@@ -9,6 +9,7 @@ pub mod clipboard_classifier;
 pub mod clipboard_paste;
 pub mod clipboard_platform;
 pub mod clipboard_reader;
+pub mod inbound_connect_wait_worker;
 pub mod key_translation;
 pub mod local_session;
 pub mod logical_key;

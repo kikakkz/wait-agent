@@ -1,6 +1,8 @@
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::lifecycle::LifecycleError;
+use crate::ratatui_node::runtime::RemoteNodeConnectionInfo;
+use crate::ratatui_node::runtime::RemoteNodeConnectionMode;
 use crate::ratatui_node::state_event::StateEvent;
 use crate::ratatui_node::SharedState;
 use crate::remote::publication::remote_target_publication_backend::{
@@ -187,6 +189,30 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
             .state_sender()
             .send(StateEvent::RemoteNodeOnline {
                 node_id: node_id.to_string(),
+            });
+        Ok(())
+    }
+
+    fn record_inbound_remote_node_connection(
+        &self,
+        node_id: &str,
+        host: &str,
+        port: u16,
+        server_can_reach_peer: bool,
+    ) -> Result<(), LifecycleError> {
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::RecordRemoteNodeConnection {
+                node_id: node_id.to_string(),
+                info: RemoteNodeConnectionInfo {
+                    mode: RemoteNodeConnectionMode::InboundConnect,
+                    host: host.to_string(),
+                    port,
+                    tls_pin_sha256: String::new(),
+                    profile_name: String::new(),
+                    server_can_reach_peer,
+                },
             });
         Ok(())
     }

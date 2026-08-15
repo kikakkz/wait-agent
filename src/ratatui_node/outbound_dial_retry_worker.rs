@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-const MAX_RETRY_ATTEMPTS: u32 = 30;
+const MAX_RETRY_ATTEMPTS: u32 = 15;
 
 /// Background worker that re-establishes an outbound-dial gRPC node session to
 /// a remote peer after the connection drops.

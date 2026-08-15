@@ -271,6 +271,21 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         self.backend.signal_remote_node_online(node_id)
     }
 
+    pub fn record_inbound_remote_node_connection(
+        &self,
+        node_id: &str,
+        host: &str,
+        port: u16,
+        server_can_reach_peer: bool,
+    ) -> Result<(), LifecycleError> {
+        self.backend.record_inbound_remote_node_connection(
+            node_id,
+            host,
+            port,
+            server_can_reach_peer,
+        )
+    }
+
     pub fn mark_source_target_offline(
         &self,
         socket_name: &str,

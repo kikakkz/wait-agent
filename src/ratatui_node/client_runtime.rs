@@ -661,36 +661,49 @@ fn handle_crossterm_event(
                     KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         *sidebar_hidden = false;
                         *focus = Focus::Sidebar;
-                        if *selected_index >= snapshot.sessions.len()
-                            && !snapshot.sessions.is_empty()
-                        {
-                            *selected_index = snapshot.sessions.len() - 1;
-                        }
+                        clamp_to_selectable_session(&snapshot.sessions, selected_index);
                         send_main_pane_resize(stream, *sidebar_hidden);
                     }
                     KeyCode::Left if *focus == Focus::Sidebar => {
                         *focus = Focus::Main;
                     }
                     KeyCode::Up if *focus == Focus::Sidebar && *selected_index > 0 => {
-                        *selected_index -= 1;
+                        if let Some(idx) =
+                            prev_selectable_session_index(&snapshot.sessions, *selected_index)
+                        {
+                            *selected_index = idx;
+                        }
                     }
                     KeyCode::Down
                         if *focus == Focus::Sidebar
                             && *selected_index + 1 < snapshot.sessions.len() =>
                     {
-                        *selected_index += 1;
+                        if let Some(idx) =
+                            next_selectable_session_index(&snapshot.sessions, *selected_index)
+                        {
+                            *selected_index = idx;
+                        }
                     }
                     KeyCode::Enter if *focus == Focus::Sidebar => {
                         if let Some(session) = snapshot.sessions.get(*selected_index) {
-                            snapshot.active_target = Some(session.id.clone());
-                            ERROR_LOG
-                                .log(format!("[timing] client ACTIVATE_TARGET {}", session.id));
-                            let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
-                            let _ = stream.flush();
-                            *focus = Focus::Main;
-                            ERROR_LOG
-                                .log(format!("[ratatui-client] activate session: {}", session.id));
-                            send_main_pane_resize(stream, *sidebar_hidden);
+                            if is_session_selectable(session) {
+                                snapshot.active_target = Some(session.id.clone());
+                                ERROR_LOG
+                                    .log(format!("[timing] client ACTIVATE_TARGET {}", session.id));
+                                let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
+                                let _ = stream.flush();
+                                *focus = Focus::Main;
+                                ERROR_LOG.log(format!(
+                                    "[ratatui-client] activate session: {}",
+                                    session.id
+                                ));
+                                send_main_pane_resize(stream, *sidebar_hidden);
+                            } else {
+                                *status_message = Some((
+                                    "Selected session is offline".to_string(),
+                                    Instant::now(),
+                                ));
+                            }
                         }
                     }
                     KeyCode::Char('g') | KeyCode::Char('G')
@@ -699,11 +712,7 @@ fn handle_crossterm_event(
                         *sidebar_hidden = !*sidebar_hidden;
                         if !*sidebar_hidden {
                             *focus = Focus::Sidebar;
-                            if *selected_index >= snapshot.sessions.len()
-                                && !snapshot.sessions.is_empty()
-                            {
-                                *selected_index = snapshot.sessions.len() - 1;
-                            }
+                            clamp_to_selectable_session(&snapshot.sessions, selected_index);
                         }
                         send_main_pane_resize(stream, *sidebar_hidden);
                     }
@@ -2063,6 +2072,47 @@ fn render_sidebar_header(width: usize, dim_background: bool) -> Line<'static> {
     ])
 }
 
+fn is_session_selectable(session: &SessionView) -> bool {
+    session.availability == "online"
+}
+
+fn next_selectable_session_index(sessions: &[SessionView], current: usize) -> Option<usize> {
+    sessions
+        .iter()
+        .enumerate()
+        .skip(current + 1)
+        .find(|(_, session)| is_session_selectable(session))
+        .map(|(idx, _)| idx)
+}
+
+fn prev_selectable_session_index(sessions: &[SessionView], current: usize) -> Option<usize> {
+    sessions
+        .iter()
+        .enumerate()
+        .take(current)
+        .rev()
+        .find(|(_, session)| is_session_selectable(session))
+        .map(|(idx, _)| idx)
+}
+
+fn clamp_to_selectable_session(sessions: &[SessionView], selected_index: &mut usize) {
+    if sessions.is_empty() {
+        *selected_index = 0;
+        return;
+    }
+    if sessions.get(*selected_index).is_none() {
+        *selected_index = sessions.len() - 1;
+    }
+    if is_session_selectable(&sessions[*selected_index]) {
+        return;
+    }
+    if let Some(idx) = next_selectable_session_index(sessions, *selected_index)
+        .or_else(|| prev_selectable_session_index(sessions, *selected_index))
+    {
+        *selected_index = idx;
+    }
+}
+
 fn render_sidebar_lines<'a>(
     sessions: &'a [SessionView],
     selected_index: usize,
@@ -2161,14 +2211,15 @@ fn render_session_row(
     let label_width = width.saturating_sub(reserved);
     let label = session_row_primary_label(session, label_width);
 
-    let base_style = dim_style(
-        if is_selected && is_focused {
-            Style::default().bg(Color::Blue).fg(Color::White)
-        } else {
-            Style::default()
-        },
-        dim_background,
-    );
+    let mut base_style = if is_selected && is_focused {
+        Style::default().bg(Color::Blue).fg(Color::White)
+    } else {
+        Style::default()
+    };
+    if !is_session_selectable(session) {
+        base_style = base_style.fg(Color::DarkGray).add_modifier(Modifier::DIM);
+    }
+    let base_style = dim_style(base_style, dim_background);
 
     Line::from(vec![
         Span::styled(format!("{} {}", marker, label), base_style),

@@ -22,12 +22,13 @@ use crate::remote::node::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime
 use crate::remote::publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
 use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use std::collections::HashMap;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::agent_signal_env::AgentSignalEnv;
 use super::agent_signal_server::AgentSignalServer;
@@ -89,6 +90,38 @@ pub(crate) struct RemoteNodeConnectionInfo {
     pub port: u16,
     pub tls_pin_sha256: String,
     pub profile_name: String,
+    /// True if the control host can open a TCP connection to the peer's
+    /// listening port. Used to choose a shorter offline timeout for `--connect`
+    /// peers that are on the same LAN as the control host.
+    pub server_can_reach_peer: bool,
+}
+
+const PEER_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Probe whether the control host can open a TCP connection to the peer's
+/// listening port. This is intentionally a pure L4 check (no TLS, no
+/// application handshake) so it is fast and independent of credentials.
+pub(crate) fn probe_server_can_reach_peer(host: &str, port: u16) -> bool {
+    let addrs: Vec<SocketAddr> = match format!("{host}:{port}").to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(error) => {
+            ERROR_LOG.log(format!(
+                "[peer-reachability] failed to resolve {host}:{port}: {error}"
+            ));
+            return false;
+        }
+    };
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, PEER_REACHABILITY_PROBE_TIMEOUT) {
+            Ok(_stream) => return true,
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[peer-reachability] probe failed for {addr}: {error}"
+                ));
+            }
+        }
+    }
+    false
 }
 
 pub(crate) struct SharedState {

@@ -30,6 +30,7 @@ use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
 use crate::process::startup_lock::StartupLock;
 use crate::process::workspace::sidecar_process_runtime::spawn_waitagent_sidecar_child;
+use crate::ratatui_node::runtime::probe_server_can_reach_peer;
 use crate::remote::authority::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
@@ -1857,8 +1858,34 @@ fn handle_transport_event<
             // If this session was opened by an outbound dial, the guard is waiting
             // in pending_outbound_guards. Move it to outbound_guards keyed by the
             // real session instance id so it can be dropped when the session closes.
-            if let Some(guard) = pending_outbound_guards.remove(&node_id) {
+            let is_outbound_dial = pending_outbound_guards.remove(&node_id).map(|guard| {
                 outbound_guards.insert(session_instance_id.clone(), guard);
+            });
+
+            // For inbound `--connect` peers, probe whether the control host can
+            // reach the peer's listening port. The result is recorded so the
+            // state loop can choose a shorter offline timeout for LAN peers.
+            if is_outbound_dial.is_none() {
+                if let Some((host, port)) = parse_peer_node_id(&node_id) {
+                    let publication_runtime = publication_runtime.clone();
+                    let probe_node_id = node_id.clone();
+                    let probe_host = host.clone();
+                    thread::spawn(move || {
+                        let reachable = probe_server_can_reach_peer(&probe_host, port);
+                        if let Err(error) = publication_runtime
+                            .record_inbound_remote_node_connection(
+                                &probe_node_id,
+                                &probe_host,
+                                port,
+                                reachable,
+                            )
+                        {
+                            ERROR_LOG.log_error(format!(
+                                "ingress server: failed to record inbound peer reachability for {probe_node_id}: {error}"
+                            ));
+                        }
+                    });
+                }
             }
 
             let was_offline = !has_active_ingress_session_for_node(sessions, &node_id);
@@ -2200,6 +2227,14 @@ fn grpc_create_session_reply_request_id(envelope: &GrpcNodeSessionEnvelope) -> O
         Some(Body::CreateSessionRejected(payload)) => Some(payload.request_id.clone()),
         _ => None,
     }
+}
+
+/// Parse a peer node id of the form `{host}#{port}` into its components.
+/// Returns `None` if the id does not follow this convention.
+fn parse_peer_node_id(node_id: &str) -> Option<(String, u16)> {
+    let (host, port) = node_id.rsplit_once('#')?;
+    let port = port.parse().ok()?;
+    Some((host.to_string(), port))
 }
 
 fn map_outbound_grpc_envelope_for_local_request(
