@@ -1497,3 +1497,31 @@ fn engine_scrollback_drain_handles_trim() {
     assert_eq!(drained[0], "line0005  ");
     assert_eq!(drained[9_999], "line10004 ");
 }
+
+#[test]
+fn engine_resize_same_size_preserves_scroll_region() {
+    let size = TerminalSize {
+        rows: 10,
+        cols: 20,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    let mut engine = TerminalEngine::new(size);
+
+    // DECSTBM: set scroll region to rows 2-8 (1-indexed).
+    engine.feed(b"\x1b[2;8r");
+    let before = engine.snapshot();
+    assert_eq!(before.scroll_top, 1);
+    assert_eq!(before.scroll_bottom, 7);
+
+    engine.resize(size);
+    let after = engine.snapshot();
+    assert_eq!(
+        after.scroll_top, 1,
+        "same-size resize should preserve scroll_top"
+    );
+    assert_eq!(
+        after.scroll_bottom, 7,
+        "same-size resize should preserve scroll_bottom"
+    );
+}

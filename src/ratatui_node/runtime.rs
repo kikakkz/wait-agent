@@ -907,11 +907,12 @@ impl SharedState {
             // Drop the remote_sessions lock before doing I/O or calling into
             // the observer.  The opened flag guarantees the mirror is opened
             // exactly once even if resize races with activation.
+            // `RatatuiRemoteSession::resize` itself suppresses duplicate same-size
+            // resizes and updates the local observer only when the size changes.
             if !session.is_opened() {
                 session.open_mirror(cols, rows);
             } else {
                 session.resize(cols, rows);
-                session.resize_local_screen(cols, rows);
             }
         }
     }

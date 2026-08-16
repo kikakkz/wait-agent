@@ -1129,6 +1129,17 @@ fn handle_client_command(
         }
 
         ClientCommand::Resize { cols, rows } => {
+            let same_size = {
+                let guard = shared
+                    .resize
+                    .last_client_resize
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *guard == Some((cols, rows))
+            };
+            if same_size {
+                return CommandOutcome::Ok;
+            }
             ERROR_LOG.log(format!(
                 "[ratatui-state-loop] resize command cols={cols} rows={rows}"
             ));
@@ -1625,7 +1636,11 @@ fn activate_target(
 
         // Open the remote mirror immediately using the last known main-pane
         // size so the first rendered frame has the correct dimensions.
-        if *record.address.transport() == SessionTransport::RemotePeer {
+        // Skip the resize when we are re-activating the already-active target;
+        // the remote PTY already has the correct dimensions.
+        if *record.address.transport() == SessionTransport::RemotePeer
+            && previous_target.as_deref() != Some(target_id)
+        {
             let (cols, rows) = shared
                 .resize
                 .last_client_resize
@@ -1652,7 +1667,7 @@ fn activate_target(
                     .unwrap_or_else(|e| e.into_inner());
                 guard.contains_key(&session_id)
             };
-            if is_host {
+            if is_host && previous_target.as_deref() != Some(target_id) {
                 let (cols, rows) = shared
                     .resize
                     .last_client_resize

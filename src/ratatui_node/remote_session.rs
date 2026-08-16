@@ -42,6 +42,10 @@ pub struct RatatuiRemoteSession {
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
+    /// Last terminal size actually sent to the remote peer. Used to suppress
+    /// duplicate `ApplyResize` frames when the control plane receives resize
+    /// events without the dimensions changing.
+    last_sent_size: Mutex<Option<(u16, u16)>>,
     shared: Arc<SharedState>,
     /// Optional one-shot channel signaled when the authority transport handshake
     /// completes or fails. Used by the reconnect worker to wait for the new
@@ -109,6 +113,7 @@ impl RatatuiRemoteSession {
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
+            last_sent_size: Mutex::new(None),
             shared: shared.clone(),
             connected_tx: Mutex::new(connection_tx),
         });
@@ -212,15 +217,28 @@ impl RatatuiRemoteSession {
             console_id: Some(payload.console_id.clone()),
             payload: ControlPlanePayload::OpenMirrorRequest(payload),
         };
-        let _ = write_authority_transport_frame(
+        match write_authority_transport_frame(
             writer,
             &AuthorityTransportFrame::ControlPlane(Box::new(envelope)),
-        );
-        let _ = writer.flush();
-        ERROR_LOG.log(format!(
-            "[timing] remote send_open_mirror target={} writer flushed",
-            self.target_id
-        ));
+        ) {
+            Ok(()) => {
+                let _ = writer.flush();
+                *self
+                    .last_sent_size
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some((cols, rows));
+                ERROR_LOG.log(format!(
+                    "[timing] remote send_open_mirror target={} writer flushed",
+                    self.target_id
+                ));
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] send_open_mirror target={} failed: {error}",
+                    self.target_id
+                ));
+            }
+        }
     }
 
     /// Return whether the remote mirror has already been opened.
@@ -319,13 +337,27 @@ impl RatatuiRemoteSession {
     }
 
     /// Forward a terminal resize to the remote session.
-    pub fn resize(&self, cols: u16, rows: u16) {
+    ///
+    /// Returns `true` if an `ApplyResize` frame was actually sent. If the
+    /// requested size matches the last size sent to this peer, the call is a
+    /// no-op to avoid forcing the remote PTY (and full-screen applications like
+    /// kimi) to redraw the whole screen.
+    pub fn resize(&self, cols: u16, rows: u16) -> bool {
+        {
+            let guard = self
+                .last_sent_size
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *guard == Some((cols, rows)) {
+                return false;
+            }
+        }
         ERROR_LOG.log(format!(
             "[ratatui-remote-session] send apply_resize cols={cols} rows={rows}"
         ));
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
-            return;
+            return false;
         };
         let payload = ApplyResizePayload {
             session_id: self.session_id.clone(),
@@ -350,11 +382,27 @@ impl RatatuiRemoteSession {
             console_id: Some(payload.resize_authority_console_id.clone()),
             payload: ControlPlanePayload::ApplyResize(payload),
         };
-        let _ = write_authority_transport_frame(
+        match write_authority_transport_frame(
             writer,
             &AuthorityTransportFrame::ControlPlane(Box::new(envelope)),
-        );
-        let _ = writer.flush();
+        ) {
+            Ok(()) => {
+                let _ = writer.flush();
+                *self
+                    .last_sent_size
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some((cols, rows));
+                self.resize_local_screen(cols, rows);
+                true
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] resize target={} cols={cols} rows={rows} failed: {error}",
+                    self.target_id
+                ));
+                false
+            }
+        }
     }
 
     /// Forward a pasted file to the remote session.
@@ -722,6 +770,8 @@ mod remote_session_tests {
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::ratatui_node::runtime::SharedState;
+    use std::io::{ErrorKind, Read};
+    use std::os::unix::net::UnixStream;
 
     fn test_record(session_id: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
@@ -786,6 +836,63 @@ mod remote_session_tests {
         assert!(
             lines.iter().any(|line| line.contains("HELLO WORLD")),
             "observer screen should contain bootstrap content, got: {lines:?}"
+        );
+
+        let socket_path =
+            authority_transport_socket_path(&socket_name, &session.session_id, &session.target_id);
+        session.stop();
+        crate::infra::best_effort::remove_file(&socket_path);
+    }
+
+    fn drain_stream(stream: &mut UnixStream) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("stream read failed: {error}"),
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn remote_session_resize_dedups_same_size() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let record = test_record("sess-resize-dedup");
+        let socket_name = shared.workspace_id();
+        let session = RatatuiRemoteSession::open(&record, &socket_name, &network, &shared, None)
+            .expect("open remote session");
+
+        let (mut server, client) = UnixStream::pair().expect("stream pair");
+        server.set_nonblocking(true).expect("set nonblocking");
+        *session.writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
+
+        assert!(session.resize(80, 24), "first resize should send a frame");
+        let first_frame = drain_stream(&mut server);
+        assert!(!first_frame.is_empty(), "first resize should produce data");
+
+        assert!(
+            !session.resize(80, 24),
+            "same-size resize should be deduped"
+        );
+        let duplicate = drain_stream(&mut server);
+        assert!(
+            duplicate.is_empty(),
+            "duplicate same-size resize should not produce data, got {duplicate:?}"
+        );
+
+        assert!(
+            session.resize(100, 50),
+            "different-size resize should send a frame"
+        );
+        let different = drain_stream(&mut server);
+        assert!(
+            !different.is_empty(),
+            "different-size resize should produce data"
         );
 
         let socket_path =

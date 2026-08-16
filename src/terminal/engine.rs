@@ -685,6 +685,9 @@ impl ScreenBuffer {
     /// Truncates or pads the cell grid in place without reflowing content.
     /// Callers rely on the remote peer repainting the screen after SIGWINCH.
     fn resize(&mut self, size: TerminalSize) {
+        if self.size == size {
+            return;
+        }
         let mut next = blank_cells(size);
 
         for row in 0..usize::min(self.cells.len(), next.len()) {
