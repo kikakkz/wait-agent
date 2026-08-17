@@ -6,7 +6,7 @@ use crate::host::ssh::remote_host_history_store::{
     RemotePortPreference,
 };
 use crate::host::ssh::remote_host_secret_store::{
-    KeyringRemoteHostSecretStore, RemoteHostSecretStore,
+    KeyringRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use crate::host::ssh::remote_install_proxy_store::{
     no_proxy_for_install, RemoteInstallProxyProfile, RemoteInstallProxySettings,
@@ -3334,17 +3334,96 @@ fn delete_selected_host(
     Ok(request)
 }
 
+fn ensure_connectable_profile<S: RemoteHostSecretStore>(
+    state: &ConnectRemoteHostState,
+    secret_store: &S,
+    history_store: &RemoteHostHistoryStore,
+) -> Result<RemoteHostProfile, String>
+where
+    S::Error: std::fmt::Display,
+{
+    if let Some(profile) = state
+        .selected_profile()
+        .filter(|profile| saved_profile_can_connect_by_id(state, profile))
+    {
+        return Ok(profile.clone());
+    }
+
+    let profile_name = save_profile_name_for_state(state);
+
+    let ssh_password_secret_id = if state.auth == AuthChoice::Password {
+        let id = secret_id_for_profile_name(&profile_name, "ssh-password")?;
+        secret_store
+            .put_secret(&id, RemoteHostSecretValue::new(state.ssh_password.clone()))
+            .map_err(|error| format!("failed to save SSH password: {error}"))?;
+        Some(id)
+    } else {
+        None
+    };
+
+    let sudo_password_secret_id = match state.sudo_mode {
+        SudoMode::None => None,
+        SudoMode::SameAsSsh => ssh_password_secret_id.clone(),
+        SudoMode::Loading => {
+            return Err("Saved credentials are still loading.".to_string());
+        }
+        SudoMode::Replace | SudoMode::Saved => {
+            let id = secret_id_for_profile_name(&profile_name, "sudo-password")?;
+            let password = if state.sudo_mode == SudoMode::SameAsSsh {
+                state.ssh_password.clone()
+            } else {
+                state.sudo_password.clone()
+            };
+            secret_store
+                .put_secret(&id, RemoteHostSecretValue::new(password))
+                .map_err(|error| format!("failed to save sudo password: {error}"))?;
+            Some(id)
+        }
+    };
+
+    let auth = if state.auth == AuthChoice::Password {
+        RemoteHostAuthProfile::Password {
+            password_secret_id: ssh_password_secret_id,
+        }
+    } else {
+        RemoteHostAuthProfile::Key {
+            key_path: std::path::PathBuf::from(state.key_path.clone()),
+        }
+    };
+
+    let profile = RemoteHostProfile {
+        name: profile_name,
+        host: state.host.clone(),
+        ssh_user: state.ssh_user.clone(),
+        auth,
+        sudo_password_secret_id,
+        preferred_remote_port: remote_port_preference_from_state(state),
+        last_remote_port: state.last_remote_port,
+        last_endpoint: None,
+        last_connected_at: None,
+        use_install_proxy: state.use_install_proxy,
+        tls_pin_sha256: None,
+        host_kind: state.host_kind,
+    };
+
+    history_store
+        .upsert_profile(profile.clone())
+        .map_err(|error| format!("failed to save host profile: {error}"))?;
+
+    Ok(profile)
+}
+
 fn run_ratatui_connect(
     state: &ConnectRemoteHostState,
     port: u16,
     socket_path: &std::path::Path,
 ) -> Result<String, String> {
-    let Some(profile) = state
-        .selected_profile()
-        .filter(|profile| saved_profile_can_connect_by_id(state, profile))
-    else {
-        return Err("ratatui mode only supports saved profiles with saved credentials".to_string());
-    };
+    validate(state)?;
+    let profile = ensure_connectable_profile(
+        state,
+        &KeyringRemoteHostSecretStore,
+        &RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path()),
+    )?;
 
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|error| format!("failed to connect to ratatui node on port {port}: {error}"))?;
@@ -3568,6 +3647,46 @@ fn save_profile_name_for_state(state: &ConnectRemoteHostState) -> String {
 
 fn default_profile_name_for(ssh_user: &str, host: &str) -> String {
     format!("{ssh_user}@{host}")
+}
+
+fn secret_id_for_profile_name(
+    profile_name: &str,
+    purpose: &str,
+) -> Result<RemoteHostSecretId, String> {
+    let segment = profile_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let collapsed = segment
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let segment = if collapsed.is_empty() {
+        "remote".to_string()
+    } else {
+        collapsed
+    };
+    RemoteHostSecretId::new(format!("waitagent.remote-host.{segment}.{purpose}"))
+        .map_err(|error| error.to_string())
+}
+
+fn remote_port_preference_from_state(state: &ConnectRemoteHostState) -> RemotePortPreference {
+    let trimmed = state.remote_port_preference.trim();
+    if trimmed.is_empty() || trimmed == "auto" {
+        RemotePortPreference::Auto
+    } else {
+        trimmed
+            .parse::<u16>()
+            .map(RemotePortPreference::Port)
+            .unwrap_or(RemotePortPreference::Auto)
+    }
 }
 
 fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostState) -> bool {
@@ -5439,5 +5558,194 @@ mod tests {
         let tabs = host_kind_tabs(&state);
         assert!(tabs[0].label == "LAN" && !tabs[0].selected);
         assert!(tabs[1].label == "Cloud" && tabs[1].selected);
+    }
+
+    fn test_secret_store() -> crate::host::ssh::remote_host_secret_store::MemoryRemoteHostSecretStore
+    {
+        crate::host::ssh::remote_host_secret_store::MemoryRemoteHostSecretStore::default()
+    }
+
+    fn test_history_store() -> (RemoteHostHistoryStore, std::path::PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "waitagent-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("remote-hosts.toml");
+        (RemoteHostHistoryStore::new(&path), temp_dir)
+    }
+
+    #[test]
+    fn ensure_connectable_profile_saves_new_host_password_and_same_as_ssh_sudo() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.host = "192.168.1.11".to_string();
+        state.ssh_user = "k".to_string();
+        state.ssh_password = "ssh-secret".to_string();
+        state.password_mode = PasswordMode::Enter;
+        state.sudo_mode = SudoMode::SameAsSsh;
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+
+        assert_eq!(profile.name, "k@192.168.1.11");
+        assert_eq!(profile.host, "192.168.1.11");
+        assert_eq!(profile.ssh_user, "k");
+        assert_eq!(profile.host_kind, RemoteHostKind::Lan);
+        assert!(
+            matches!(profile.auth, RemoteHostAuthProfile::Password { .. }),
+            "expected password auth"
+        );
+
+        let ssh_id = crate::host::ssh::remote_host_secret_store::RemoteHostSecretId::new(
+            "waitagent.remote-host.k-192-168-1-11.ssh-password",
+        )
+        .unwrap();
+        let stored = secret_store
+            .get_secret(&ssh_id)
+            .unwrap()
+            .expect("ssh secret saved");
+        assert_eq!(stored.expose_secret(), "ssh-secret");
+        assert_eq!(profile.sudo_password_secret_id, Some(ssh_id));
+
+        let history = history_store.load().unwrap();
+        assert_eq!(history.hosts.len(), 1);
+        assert_eq!(history.hosts[0].name, "k@192.168.1.11");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ensure_connectable_profile_saves_new_host_with_replace_sudo_password() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.host = "192.168.1.12".to_string();
+        state.ssh_user = "k".to_string();
+        state.ssh_password = "ssh-secret".to_string();
+        state.password_mode = PasswordMode::Enter;
+        state.sudo_password = "sudo-secret".to_string();
+        state.sudo_mode = SudoMode::Replace;
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+
+        let ssh_id = crate::host::ssh::remote_host_secret_store::RemoteHostSecretId::new(
+            "waitagent.remote-host.k-192-168-1-12.ssh-password",
+        )
+        .unwrap();
+        let sudo_id = crate::host::ssh::remote_host_secret_store::RemoteHostSecretId::new(
+            "waitagent.remote-host.k-192-168-1-12.sudo-password",
+        )
+        .unwrap();
+
+        assert_eq!(
+            profile.auth,
+            RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id.clone()),
+            }
+        );
+        assert_eq!(profile.sudo_password_secret_id, Some(sudo_id.clone()));
+
+        assert_eq!(
+            secret_store
+                .get_secret(&ssh_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "ssh-secret"
+        );
+        assert_eq!(
+            secret_store
+                .get_secret(&sudo_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "sudo-secret"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ensure_connectable_profile_saves_new_cloud_host_with_key_auth() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.host = "cloud.example.com".to_string();
+        state.ssh_user = "k".to_string();
+        state.host_kind = RemoteHostKind::Cloud;
+        state.auth = AuthChoice::Key;
+        state.key_path = "/home/k/.ssh/cloud".to_string();
+        state.sudo_mode = SudoMode::None;
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+
+        assert_eq!(profile.name, "k@cloud.example.com");
+        assert_eq!(profile.host_kind, RemoteHostKind::Cloud);
+        assert_eq!(
+            profile.auth,
+            RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("/home/k/.ssh/cloud"),
+            }
+        );
+        assert_eq!(profile.sudo_password_secret_id, None);
+
+        let history = history_store.load().unwrap();
+        assert_eq!(history.hosts.len(), 1);
+        assert_eq!(history.hosts[0].host_kind, RemoteHostKind::Cloud);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ensure_connectable_profile_returns_existing_connectable_profile_unchanged() {
+        let existing = RemoteHostProfile {
+            name: "k@192.168.1.13".to_string(),
+            host: "192.168.1.13".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("/home/k/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: None,
+            host_kind: RemoteHostKind::Lan,
+        };
+
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![existing.clone()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        assert!(saved_profile_can_connect_by_id(
+            &state,
+            state.selected_profile().unwrap()
+        ));
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+
+        assert_eq!(profile, existing);
+        assert!(history_store.load().unwrap().hosts.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
