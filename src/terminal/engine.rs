@@ -11,6 +11,12 @@ use super::types::*;
 /// without bound; the plain and styled vecs are trimmed together.
 const MAX_SCROLLBACK_LINES: usize = 10_000;
 
+/// Maximum bytes to buffer during a synchronized update. If a remote peer
+/// forgets to send the closing sequence, flushing prevents unbounded memory.
+const MAX_SYNCHRONIZED_BUFFER_BYTES: usize = 256 * 1024;
+
+const SYNCHRONIZED_UPDATE_END: &[u8] = b"\x1b[?2026l";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum CharacterSet {
     #[default]
@@ -50,6 +56,12 @@ pub struct TerminalEngine {
     osc52_queue: Vec<String>,
     pending_escape: Vec<u8>,
     pending_utf8: Vec<u8>,
+    /// True while a synchronized update (DEC mode 2026) is in progress.
+    /// Bytes received during the update are buffered and applied atomically
+    /// when the closing `CSI ? 2026 l` is received.
+    synchronized_update: bool,
+    /// Buffered bytes received while `synchronized_update` is active.
+    synchronized_buffer: Vec<u8>,
 }
 
 impl TerminalEngine {
@@ -72,6 +84,8 @@ impl TerminalEngine {
             osc52_queue: Vec::new(),
             pending_escape: Vec::new(),
             pending_utf8: Vec::new(),
+            synchronized_update: false,
+            synchronized_buffer: Vec::new(),
         }
     }
 
@@ -91,16 +105,36 @@ impl TerminalEngine {
     }
 
     pub fn feed_and_collect_replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut replies = Vec::new();
+
+        if self.synchronized_update {
+            self.synchronized_buffer.extend_from_slice(bytes);
+            if self.should_flush_synchronized_buffer(bytes.len()) {
+                self.flush_synchronized_buffer(&mut replies);
+            }
+            return replies;
+        }
+
         let mut input = Vec::with_capacity(self.pending_escape.len() + bytes.len());
         input.extend_from_slice(&self.pending_escape);
         input.extend_from_slice(bytes);
         self.pending_escape.clear();
 
         let mut plain = Vec::new();
-        let mut replies = Vec::new();
         let mut index = 0;
 
         while index < input.len() {
+            if self.synchronized_update {
+                // A `CSI ? 2026 h` was processed inside this feed. Buffer the
+                // remaining bytes and apply them atomically when the update
+                // closes.
+                self.synchronized_buffer.extend_from_slice(&input[index..]);
+                if self.should_flush_synchronized_buffer(input.len() - index) {
+                    self.flush_synchronized_buffer(&mut replies);
+                }
+                return replies;
+            }
+
             match input[index] {
                 0x1b => {
                     self.flush_plain(&mut plain);
@@ -318,6 +352,34 @@ impl TerminalEngine {
             self.active_buffer_mut().put_char(ch, modes);
         }
         plain.clear();
+    }
+
+    /// Returns true if the synchronized buffer should be flushed, either because
+    /// it has grown too large or because the closing sequence `CSI ? 2026 l` is
+    /// present in the newly appended tail.
+    fn should_flush_synchronized_buffer(&self, appended_len: usize) -> bool {
+        if self.synchronized_buffer.len() > MAX_SYNCHRONIZED_BUFFER_BYTES {
+            return true;
+        }
+        let pattern_len = SYNCHRONIZED_UPDATE_END.len();
+        let start = self
+            .synchronized_buffer
+            .len()
+            .saturating_sub(appended_len + pattern_len - 1);
+        self.synchronized_buffer[start..]
+            .windows(pattern_len)
+            .any(|window| window == SYNCHRONIZED_UPDATE_END)
+    }
+
+    /// Apply the buffered synchronized-update bytes to the terminal state and
+    /// collect any generated replies. Clears the buffer and exits synchronized
+    /// mode before processing so nested synchronized updates are handled
+    /// correctly.
+    fn flush_synchronized_buffer(&mut self, replies: &mut Vec<u8>) {
+        let buffer = std::mem::take(&mut self.synchronized_buffer);
+        self.synchronized_update = false;
+        let flush_replies = self.feed_and_collect_replies(&buffer);
+        replies.extend_from_slice(&flush_replies);
     }
 
     fn write_modes(&self) -> WriteModes {
@@ -621,6 +683,7 @@ impl TerminalEngine {
                     };
                 }
                 2004 => self.bracketed_paste = enabled,
+                2026 => self.synchronized_update = enabled,
                 _ => {}
             }
         }

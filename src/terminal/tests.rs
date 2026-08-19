@@ -462,6 +462,85 @@ fn engine_replays_codex_update_menu_down_redraw_from_live_capture() {
 }
 
 #[test]
+fn engine_buffers_synchronized_update_until_closed() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 20,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"initial");
+    let before = engine.snapshot();
+    assert_eq!(before.lines[0].trim_end(), "initial");
+
+    // Start a synchronized update and perform a partial redraw.
+    engine.feed(b"\x1b[?2026h\x1b[2K\x1b[Hupdated");
+    let during = engine.snapshot();
+    assert_eq!(
+        during.lines[0].trim_end(),
+        "initial",
+        "snapshot should not change while synchronized update is open"
+    );
+
+    engine.feed(b"\x1b[?2026l");
+    let after = engine.snapshot();
+    assert_eq!(after.lines[0].trim_end(), "updated");
+}
+
+#[test]
+fn engine_handles_split_synchronized_update() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 20,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"base");
+
+    engine.feed(b"\x1b[?2026h\x1b[2K");
+    assert_eq!(engine.snapshot().lines[0].trim_end(), "base");
+
+    engine.feed(b"\x1b[Hredraw");
+    assert_eq!(engine.snapshot().lines[0].trim_end(), "base");
+
+    engine.feed(b"\x1b[?2026l");
+    assert_eq!(engine.snapshot().lines[0].trim_end(), "redraw");
+}
+
+#[test]
+fn engine_preserves_replies_across_synchronized_update() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 20,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    let replies = engine.feed_and_collect_replies(b"\x1b[?2026h\x1b[6n\x1b[?2026l");
+    assert!(
+        replies.starts_with(b"\x1b["),
+        "cursor-position reply should be generated after sync closes: {:?}",
+        replies
+    );
+}
+
+#[test]
+fn engine_applies_content_before_synchronized_update() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 20,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"before\x1b[?2026h\x1b[2K\x1b[Hafter\x1b[?2026l");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0].trim_end(), "after");
+}
+
+#[test]
 fn engine_handles_scroll_region_and_scroll_up() {
     let mut engine = TerminalEngine::new(TerminalSize {
         rows: 5,

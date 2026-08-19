@@ -1027,6 +1027,12 @@ fn run_event_loop(
 
         let dim_background = error_log_state.is_some() || settings_state.is_some();
         let mut cursor_state = None;
+
+        // Wrap the frame in a synchronized update so the local terminal renders
+        // the whole main pane atomically. Terminals that do not support
+        // DEC mode 2026 ignore these sequences.
+        let _ = io::stdout().write_all(b"\x1b[?2026h");
+        let _ = io::stdout().flush();
         terminal
             .draw(|frame| {
                 render(
@@ -1049,6 +1055,8 @@ fn run_event_loop(
             .map_err(|error| {
                 LifecycleError::Io("failed to draw ratatui frame".to_string(), error)
             })?;
+        let _ = io::stdout().write_all(b"\x1b[?2026l");
+        let _ = io::stdout().flush();
 
         // When the PTY hides its cursor, ratatui will hide the hardware cursor
         // and may leave it at an arbitrary cell. The IME candidate window still
