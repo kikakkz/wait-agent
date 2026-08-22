@@ -1,4 +1,5 @@
 use crate::domain::session_catalog::ManagedSessionTaskState;
+use serde_json::Value;
 
 /// Agent-specific keyword tables used by the shared prompt/confirm scanner.
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +106,18 @@ pub fn infer_task_state_from_lines(
     detect_confirm_from_lines(lines, keywords).or_else(|| detect_input_from_lines(lines, keywords))
 }
 
+/// Returns true when the hook payload's `tool_name` matches one of the
+/// provided interactive question tool names.
+///
+/// Kimi Code CLI and Claude Code use `AskUserQuestion`; OpenAI Codex uses
+/// `request_user_input`. Each detector passes its own known names.
+pub fn is_user_question_tool(payload: &Value, question_tool_names: &[&str]) -> bool {
+    payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| question_tool_names.contains(&name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +199,23 @@ mod tests {
 
         let lines = &["› old", "line", "line", "line", "plain"];
         assert_eq!(detect_input_from_lines(lines, &keywords), None);
+    }
+
+    #[test]
+    fn is_user_question_tool_matches_any_provided_name() {
+        let payload = serde_json::json!({ "tool_name": "request_user_input" });
+        assert!(is_user_question_tool(&payload, &["request_user_input"]));
+        assert!(is_user_question_tool(
+            &payload,
+            &["AskUserQuestion", "request_user_input"]
+        ));
+        assert!(!is_user_question_tool(&payload, &["AskUserQuestion"]));
+
+        let ask_payload = serde_json::json!({ "tool_name": "AskUserQuestion" });
+        assert!(is_user_question_tool(&ask_payload, &["AskUserQuestion"]));
+        assert!(!is_user_question_tool(
+            &ask_payload,
+            &["request_user_input"]
+        ));
     }
 }

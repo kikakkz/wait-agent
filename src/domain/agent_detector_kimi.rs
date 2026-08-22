@@ -1,5 +1,7 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
-use crate::domain::agent_detector_common::{detect_confirm_from_lines, AgentKeywords};
+use crate::domain::agent_detector_common::{
+    detect_confirm_from_lines, is_user_question_tool, AgentKeywords,
+};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use serde_json::Value;
@@ -132,7 +134,14 @@ impl AgentDetector for KimiDetector {
     fn signal_state_effect(&self, event: &str, payload: &Value) -> Option<AgentStateEffect> {
         let state = match event {
             "SessionStart" => ManagedSessionTaskState::Input,
-            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+            "PreToolUse" => {
+                if is_user_question_tool(payload, &["AskUserQuestion"]) {
+                    ManagedSessionTaskState::Confirm
+                } else {
+                    ManagedSessionTaskState::Running
+                }
+            }
+            "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" => {
                 ManagedSessionTaskState::Running
             }
             "PermissionRequest" => ManagedSessionTaskState::Confirm,
@@ -344,6 +353,42 @@ K2.7 Code thinking  [1 task running]"#;
         assert_ne!(
             detector.infer_task_state(Some("kimi"), pane_text),
             Some(ManagedSessionTaskState::Confirm)
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_for_ask_user_question_sets_confirm() {
+        let detector = KimiDetector;
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": { "questions": [] },
+        });
+        assert_eq!(
+            detector.signal_state_effect("PreToolUse", &payload),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Confirm))
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_for_other_tool_sets_running() {
+        let detector = KimiDetector;
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "ls" },
+        });
+        assert_eq!(
+            detector.signal_state_effect("PreToolUse", &payload),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Running))
+        );
+    }
+
+    #[test]
+    fn post_tool_use_clears_to_running() {
+        let detector = KimiDetector;
+        let payload = serde_json::json!({ "tool_name": "AskUserQuestion" });
+        assert_eq!(
+            detector.signal_state_effect("PostToolUse", &payload),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Running))
         );
     }
 }
