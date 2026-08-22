@@ -15,6 +15,7 @@ pub mod local_session;
 pub mod logical_key;
 pub mod network_probe;
 pub mod outbound_dial_retry_worker;
+pub mod peer_reachability_probe_worker;
 pub mod reconnect_worker;
 pub mod remote_session;
 pub mod runtime;

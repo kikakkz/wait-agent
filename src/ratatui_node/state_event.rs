@@ -120,6 +120,11 @@ pub(crate) enum StateEvent {
     /// Sent by `NetworkProbe` so the state loop can distinguish a transient
     /// control-plane outage from a permanent remote host failure.
     NetworkConnectivityChanged { online: bool },
+    /// A previously unreachable outbound-dial peer is now reachable at L4.
+    ///
+    /// Sent by `PeerReachabilityProbeWorker` so the state loop can reset the
+    /// retry worker and attempt an immediate reconnect.
+    RemoteNodeReachable { node_id: String },
     /// Reconnect to all outbound-dial hosts recorded in the persistent snapshot.
     ///
     /// Sent once at startup and again after the control plane recovers from a

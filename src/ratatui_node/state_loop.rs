@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::authority_host_io_loop::{
     AuthorityHostIoHandle, AuthorityHostIoLoop, AuthorityHostIoRequest,
@@ -22,6 +22,7 @@ use super::inbound_connect_wait_worker::InboundConnectWaitWorker;
 use super::key_translation::{translate_key, KeyTranslationMode};
 use super::logical_key::LogicalKey;
 use super::outbound_dial_retry_worker::OutboundDialRetryWorker;
+use super::peer_reachability_probe_worker::PeerReachabilityProbeWorker;
 use super::reconnect_worker::ReconnectWorker;
 use super::runtime::{RemoteNodeConnectionInfo, RemoteNodeConnectionMode, SharedState};
 use super::snapshot::{
@@ -112,6 +113,9 @@ fn run_state_event_loop(
     let mut outbound_dial_retry_handles: HashMap<String, OutboundDialRetryWorker> = HashMap::new();
     let mut inbound_connect_wait_handles: HashMap<String, InboundConnectWaitWorker> =
         HashMap::new();
+    let mut peer_reachability_handles: HashMap<String, PeerReachabilityProbeWorker> =
+        HashMap::new();
+    let mut last_retry_reset: HashMap<String, Instant> = HashMap::new();
     let mut network_online: bool = true;
 
     while let Ok(event) = rx.recv() {
@@ -321,6 +325,7 @@ fn run_state_event_loop(
                     &mut reconnect_handles,
                     &mut outbound_dial_retry_handles,
                     &mut inbound_connect_wait_handles,
+                    &mut peer_reachability_handles,
                     node_id,
                 );
             }
@@ -332,6 +337,30 @@ fn run_state_event_loop(
                 if let Some(worker) = inbound_connect_wait_handles.remove(&node_id) {
                     let _ = worker.cancel_tx.send(());
                 }
+                if let Some(worker) = peer_reachability_handles.remove(&node_id) {
+                    let _ = worker.cancel_tx.send(());
+                }
+                last_retry_reset.remove(&node_id);
+            }
+
+            StateEvent::RemoteNodeReachable { node_id } => {
+                // Debounce: ignore reachable bursts that arrive shortly after a
+                // reset, otherwise a peer whose gRPC handshake is still pending
+                // can cause repeated worker restarts.
+                const RESET_DEBOUNCE: Duration = Duration::from_secs(5);
+                let should_reset = last_retry_reset
+                    .get(&node_id)
+                    .map(|instant| instant.elapsed() >= RESET_DEBOUNCE)
+                    .unwrap_or(true);
+                if should_reset {
+                    last_retry_reset.insert(node_id.clone(), Instant::now());
+                    reset_outbound_dial_retry_worker(
+                        &shared,
+                        node_id,
+                        &mut outbound_dial_retry_handles,
+                        &state_event_tx,
+                    );
+                }
             }
 
             StateEvent::RemoteNodeReconnectFailed { node_id } => {
@@ -342,6 +371,7 @@ fn run_state_event_loop(
                     &mut reconnect_handles,
                     &mut outbound_dial_retry_handles,
                     &mut inbound_connect_wait_handles,
+                    &mut peer_reachability_handles,
                     &snapshot_store,
                     network_online,
                     node_id,
@@ -356,6 +386,37 @@ fn run_state_event_loop(
                 let was_online = network_online;
                 network_online = online;
                 if online && !was_online {
+                    // The control plane thinks it is back online.  Reset the
+                    // retry workers for all offline outbound-dial peers so they
+                    // try immediately instead of waiting out a long backoff.
+                    let offline_node_ids: std::collections::HashSet<String> = {
+                        let guard = shared
+                            .sessions
+                            .sessions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        guard
+                            .values()
+                            .filter(|record| {
+                                *record.address.transport() == SessionTransport::RemotePeer
+                                    && record.availability == SessionAvailability::Offline
+                            })
+                            .map(|record| record.address.authority_id().to_string())
+                            .collect()
+                    };
+                    for node_id in offline_node_ids {
+                        if shared
+                            .remote_node_connection(&node_id)
+                            .is_some_and(|info| info.mode == RemoteNodeConnectionMode::OutboundDial)
+                        {
+                            reset_outbound_dial_retry_worker(
+                                &shared,
+                                node_id,
+                                &mut outbound_dial_retry_handles,
+                                &state_event_tx,
+                            );
+                        }
+                    }
                     let _ = shared
                         .state_sender()
                         .send(StateEvent::ReconnectSnapshotHosts);
@@ -363,7 +424,14 @@ fn run_state_event_loop(
             }
 
             StateEvent::ReconnectSnapshotHosts => {
-                reconnect_snapshot_hosts(&shared, &remote_owner, &snapshot_store, &state_event_tx);
+                reconnect_snapshot_hosts(
+                    &shared,
+                    &remote_owner,
+                    &snapshot_store,
+                    &state_event_tx,
+                    &outbound_dial_retry_handles,
+                    &inbound_connect_wait_handles,
+                );
             }
 
             StateEvent::SnapshotHostReconnectResult {
@@ -842,6 +910,7 @@ fn handle_remote_node_offline(
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
     inbound_connect_wait_handles: &mut HashMap<String, InboundConnectWaitWorker>,
+    peer_reachability_handles: &mut HashMap<String, PeerReachabilityProbeWorker>,
     node_id: String,
 ) {
     ERROR_LOG.log(format!(
@@ -916,6 +985,24 @@ fn handle_remote_node_offline(
             }
         }
     }
+    // For outbound-dial peers, also start a per-peer L4 reachability probe so
+    // LAN flash drops that the public-DNS network probe misses are detected as
+    // soon as the peer's TCP port comes back.
+    if let std::collections::hash_map::Entry::Vacant(slot) =
+        peer_reachability_handles.entry(node_id.clone())
+    {
+        if let Some(info) = shared.remote_node_connection(&node_id) {
+            if info.mode == RemoteNodeConnectionMode::OutboundDial {
+                let worker = PeerReachabilityProbeWorker::start(
+                    node_id.clone(),
+                    info.host.clone(),
+                    info.port,
+                    shared.state_sender(),
+                );
+                slot.insert(worker);
+            }
+        }
+    }
     // For inbound `--connect` peers, start a wait worker. The timeout depends
     // on whether the control host can reach the peer's listening port.
     if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -950,6 +1037,7 @@ fn handle_remote_node_reconnect_failed(
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
     inbound_connect_wait_handles: &mut HashMap<String, InboundConnectWaitWorker>,
+    peer_reachability_handles: &mut HashMap<String, PeerReachabilityProbeWorker>,
     snapshot_store: &OutboundConnectionSnapshotStore,
     network_online: bool,
     node_id: String,
@@ -984,6 +1072,9 @@ fn handle_remote_node_reconnect_failed(
     if let Some(worker) = inbound_connect_wait_handles.remove(&node_id) {
         let _ = worker.cancel_tx.send(());
     }
+    if let Some(worker) = peer_reachability_handles.remove(&node_id) {
+        let _ = worker.cancel_tx.send(());
+    }
     if network_online {
         if let Err(error) = snapshot_store.remove(&node_id) {
             ERROR_LOG.log(format!(
@@ -993,6 +1084,53 @@ fn handle_remote_node_reconnect_failed(
     }
     shared.remove_remote_node_connection(&node_id);
     broadcast_snapshot(shared, client_writer, connected_clients);
+}
+
+/// Cancel any existing outbound-dial retry worker for `node_id` and start a
+/// fresh one with the initial backoff.  Call this when we have reason to believe
+/// the peer may be reachable again (network recovery or L4 probe success).
+fn reset_outbound_dial_retry_worker(
+    shared: &Arc<SharedState>,
+    node_id: String,
+    outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
+    state_event_tx: &mpsc::Sender<StateEvent>,
+) {
+    let Some(info) = shared.remote_node_connection(&node_id) else {
+        return;
+    };
+    if info.mode != RemoteNodeConnectionMode::OutboundDial {
+        return;
+    }
+
+    ERROR_LOG.log(format!(
+        "[ratatui-state-loop] resetting outbound-dial retry worker for {node_id}"
+    ));
+
+    if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
+        let _ = worker.cancel_tx.send(());
+    }
+
+    let request = OutboundNodeSessionRequest {
+        node_id: node_id.clone(),
+        endpoint_uri: format!("tls://{}:{}", info.host, info.port),
+        tls_pin_sha256: Some(info.tls_pin_sha256.clone()).filter(|s| !s.is_empty()),
+    };
+    let ingress_tx = {
+        let guard = shared
+            .ingress_internal_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    };
+    if let Some(ingress_tx) = ingress_tx {
+        let worker = OutboundDialRetryWorker::start(
+            node_id.clone(),
+            request,
+            ingress_tx,
+            state_event_tx.clone(),
+        );
+        outbound_dial_retry_handles.insert(node_id, worker);
+    }
 }
 
 fn broadcast_snapshot(
@@ -1880,6 +2018,8 @@ fn reconnect_snapshot_hosts(
     remote_owner: &RemoteRuntimeOwnerRuntime,
     snapshot_store: &OutboundConnectionSnapshotStore,
     state_event_tx: &mpsc::Sender<StateEvent>,
+    outbound_dial_retry_handles: &HashMap<String, OutboundDialRetryWorker>,
+    inbound_connect_wait_handles: &HashMap<String, InboundConnectWaitWorker>,
 ) {
     let entries = match snapshot_store.load() {
         Ok(entries) => entries,
@@ -1916,6 +2056,16 @@ fn reconnect_snapshot_hosts(
             })
         };
         if has_online_session {
+            continue;
+        }
+
+        // If a retry or wait worker is already active for this node, let it
+        // handle the reconnect.  Spawning a parallel reuse-dial/SSH bootstrap
+        // here would race with the worker's backoff and likely fall back to SSH
+        // after only 5s.
+        if outbound_dial_retry_handles.contains_key(&entry.authority_node_id)
+            || inbound_connect_wait_handles.contains_key(&entry.authority_node_id)
+        {
             continue;
         }
 
