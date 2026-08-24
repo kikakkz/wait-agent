@@ -3391,6 +3391,21 @@ where
         }
     };
 
+    // Preserve the stored connection metadata from the existing profile so that
+    // a reuse-dial can still be attempted when credentials are being re-entered.
+    // Without this, tls_pin_sha256 is cleared and try_reuse_existing_connection
+    // skips the existing remote waitagent, causing a new one to be bootstrapped.
+    let (last_remote_port, last_endpoint, tls_pin_sha256) = state
+        .selected_profile()
+        .map(|profile| {
+            (
+                profile.last_remote_port,
+                profile.last_endpoint.clone(),
+                profile.tls_pin_sha256.clone(),
+            )
+        })
+        .unwrap_or((state.last_remote_port, None, None));
+
     let profile = RemoteHostProfile {
         name: profile_name,
         host: state.host.clone(),
@@ -3398,11 +3413,11 @@ where
         auth,
         sudo_password_secret_id,
         preferred_remote_port: remote_port_preference_from_state(state),
-        last_remote_port: state.last_remote_port,
-        last_endpoint: None,
+        last_remote_port,
+        last_endpoint,
         last_connected_at: None,
         use_install_proxy: state.use_install_proxy,
-        tls_pin_sha256: None,
+        tls_pin_sha256,
         host_kind: state.host_kind,
     };
 
@@ -5745,6 +5760,67 @@ mod tests {
 
         assert_eq!(profile, existing);
         assert!(history_store.load().unwrap().hosts.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ensure_connectable_profile_preserves_connection_metadata_on_reauth() {
+        let existing = RemoteHostProfile {
+            name: "k@192.168.1.14".to_string(),
+            host: "192.168.1.14".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(
+                    crate::host::ssh::remote_host_secret_store::RemoteHostSecretId::new(
+                        "waitagent.remote-host.k-192-168-1-14.ssh-password",
+                    )
+                    .unwrap(),
+                ),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: Some(7474),
+            last_endpoint: Some("192.168.1.14:7474".to_string()),
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: Some("deadbeef".to_string()),
+            host_kind: RemoteHostKind::Lan,
+        };
+
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![existing.clone()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        // Simulate credentials not being available in the keyring: the user must
+        // re-enter the password, so saved_profile_can_connect_by_id returns false.
+        state.password_mode = PasswordMode::Enter;
+        state.ssh_password = "re-entered-secret".to_string();
+        assert!(!saved_profile_can_connect_by_id(
+            &state,
+            state.selected_profile().unwrap()
+        ));
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+
+        assert_eq!(profile.last_remote_port, Some(7474));
+        assert_eq!(profile.last_endpoint, Some("192.168.1.14:7474".to_string()));
+        assert_eq!(profile.tls_pin_sha256, Some("deadbeef".to_string()));
+
+        let history = history_store.load().unwrap();
+        assert_eq!(history.hosts.len(), 1);
+        assert_eq!(history.hosts[0].last_remote_port, Some(7474));
+        assert_eq!(
+            history.hosts[0].last_endpoint,
+            Some("192.168.1.14:7474".to_string())
+        );
+        assert_eq!(
+            history.hosts[0].tls_pin_sha256,
+            Some("deadbeef".to_string())
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
