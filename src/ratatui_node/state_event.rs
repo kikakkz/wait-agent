@@ -134,6 +134,7 @@ pub(crate) enum StateEvent {
     /// applies session/active-target mutations on success or logs the error.
     SnapshotHostReconnectResult {
         profile_name: String,
+        authority_node_id: String,
         result: Box<Result<RemoteHostConnectedOutcome, String>>,
     },
     /// The asynchronous remote-host connect operation finished. The state loop

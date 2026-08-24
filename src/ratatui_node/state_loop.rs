@@ -436,6 +436,7 @@ fn run_state_event_loop(
 
             StateEvent::SnapshotHostReconnectResult {
                 profile_name,
+                authority_node_id,
                 result,
             } => match *result {
                 Ok(outcome) => {
@@ -449,9 +450,16 @@ fn run_state_event_loop(
                 }
                 Err(error) => {
                     ERROR_LOG.log(format!(
-                        "[ratatui-state-loop] snapshot reconnect failed for profile `{}`: {error}",
-                        profile_name
+                        "[ratatui-state-loop] snapshot reconnect failed for profile `{}` node={}: {error}",
+                        profile_name, authority_node_id
                     ));
+                    if network_online {
+                        if let Err(remove_error) = snapshot_store.remove(&authority_node_id) {
+                            ERROR_LOG.log(format!(
+                                "[ratatui-state-loop] failed to remove snapshot for {authority_node_id}: {remove_error}"
+                            ));
+                        }
+                    }
                 }
             },
         }
@@ -2073,10 +2081,12 @@ fn reconnect_snapshot_hosts(
         let remote_owner = remote_owner.clone();
         let profile_name = entry.profile_name.clone();
         let tx = state_event_tx.clone();
+        let authority_node_id = entry.authority_node_id.clone();
         std::thread::spawn(move || {
             let result = perform_remote_host_connect(&shared, &remote_owner, &profile_name);
             let _ = tx.send(StateEvent::SnapshotHostReconnectResult {
                 profile_name,
+                authority_node_id,
                 result: Box::new(result),
             });
         });
@@ -2799,19 +2809,93 @@ mod state_loop_tests {
         let (_shared, tx, _client_writer, handle) =
             start_test_loop_with_snapshot_store(snapshot_store);
 
-        // Transition from offline to online. The loop should enqueue
-        // ReconnectSnapshotHosts and attempt to reconnect the saved profile.
+        // Transition from offline to online. In production this enqueues
+        // ReconnectSnapshotHosts via the loop's self-event channel; in the test
+        // harness that channel is dangling, so no reconnect thread runs and the
+        // snapshot entry is left untouched. This test only verifies the event is
+        // handled without panicking.
         let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: false });
         let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: true });
 
         std::thread::sleep(Duration::from_millis(100));
 
-        // The reconnect attempt ran: the missing profile is still in the
-        // snapshot because the failure is logged and the entry is preserved.
         let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
         let entries = reloaded.load().expect("load should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].profile_name, "missing-profile");
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_removed_on_snapshot_reconnect_failed_when_online() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-startup-reconnect-failed-online-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let _ = tx.send(StateEvent::SnapshotHostReconnectResult {
+            profile_name: "test-profile".to_string(),
+            authority_node_id: "peer#99999".to_string(),
+            result: Box::new(Err("profile not found".to_string())),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        assert_eq!(
+            reloaded.load().expect("load should succeed").len(),
+            0,
+            "snapshot should be removed when snapshot reconnect fails while network is online"
+        );
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_kept_on_snapshot_reconnect_failed_when_offline() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-startup-reconnect-failed-offline-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: false });
+        let _ = tx.send(StateEvent::SnapshotHostReconnectResult {
+            profile_name: "test-profile".to_string(),
+            authority_node_id: "peer#99999".to_string(),
+            result: Box::new(Err("profile not found".to_string())),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        let entries = reloaded.load().expect("load should succeed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "snapshot should be kept when snapshot reconnect fails while control plane is offline"
+        );
+        assert_eq!(entries[0].authority_node_id, "peer#99999");
 
         drop(tx);
         handle.join().expect("state loop should exit cleanly");
