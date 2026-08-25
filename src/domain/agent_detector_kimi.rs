@@ -21,7 +21,12 @@ const KIMI_HOOK_EVENTS: &[&str] = &[
 ];
 
 const KIMI_KEYWORDS: AgentKeywords = AgentKeywords {
-    confirm_phrases: &["run this command", "allow this"],
+    confirm_phrases: &[
+        "run this command",
+        "allow this",
+        // Kimi Code CLI plan-approval prompt.
+        "approve this plan",
+    ],
     input_phrases: &[],
     prompt_chars: &[],
     input_window: None,
@@ -88,6 +93,12 @@ impl AgentDetector for KimiDetector {
         }
 
         if kimi_has_choice_menu(&normalized_lines) {
+            return Some(ManagedSessionTaskState::Confirm);
+        }
+
+        // Kimi Code CLI plan-approval menu: "Ready to approve this plan?" with
+        // options like "1. Approve", "2. Reject", "3. Revise".
+        if kimi_is_plan_approval_menu(&normalized_lines) {
             return Some(ManagedSessionTaskState::Confirm);
         }
 
@@ -261,6 +272,42 @@ fn kimi_is_numbered_choice_line(line: &str) -> bool {
     num.trim().parse::<usize>().is_ok()
 }
 
+/// Detect options like "1. Approve" / "2. Reject" used by Kimi Code CLI's
+/// plan-approval menu.
+fn kimi_is_dotted_choice_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some((num, rest)) = trimmed.split_once(". ") else {
+        return false;
+    };
+    num.trim().parse::<usize>().is_ok() && !rest.trim().is_empty()
+}
+
+/// Kimi Code CLI shows a plan-approval menu with options such as
+/// "1. Approve", "2. Reject", "3. Revise". Detect that specific shape so it
+/// is reported as Confirm even when the status line also says
+/// "[1 task running]".
+fn kimi_is_plan_approval_menu(lines: &[&str]) -> bool {
+    let mut has_approve = false;
+    let mut has_reject = false;
+    let mut has_dotted_choice = false;
+
+    for line in lines {
+        let lowered = line.to_ascii_lowercase();
+        let trimmed = line.trim_start();
+        if kimi_is_dotted_choice_line(trimmed) {
+            has_dotted_choice = true;
+            if lowered.contains("approve") {
+                has_approve = true;
+            }
+            if lowered.contains("reject") {
+                has_reject = true;
+            }
+        }
+    }
+
+    has_dotted_choice && has_approve && has_reject
+}
+
 fn kimi_has_running_background_task(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
         let mut rest = *line;
@@ -389,6 +436,24 @@ K2.7 Code thinking  [1 task running]"#;
         assert_eq!(
             detector.signal_state_effect("PostToolUse", &payload),
             Some(AgentStateEffect::Set(ManagedSessionTaskState::Running))
+        );
+    }
+
+    #[test]
+    fn plan_approval_menu_is_confirm_despite_running_task() {
+        let pane_text = r#"Error Handling
+- session.send_bootstrap ignores send errors.
+
+Ready to approve this plan?
+▶ 1. Approve
+  2. Reject
+  3. Revise
+
+K2.7 Code thinking  [1 task running]"#;
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Confirm)
         );
     }
 }

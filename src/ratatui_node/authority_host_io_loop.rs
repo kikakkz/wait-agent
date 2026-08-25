@@ -58,6 +58,9 @@ pub(crate) enum AuthorityHostIoRequest {
         session_id: String,
         output_tx: mpsc::Sender<Vec<u8>>,
     },
+    SendBootstrap {
+        session_id: String,
+    },
 }
 
 /// Handle used by other threads to send requests to `AuthorityHostIoLoop`.
@@ -146,10 +149,10 @@ struct SessionState {
     term: Term<VoidListener>,
     /// VTE parser that turns raw PTY bytes into terminal state updates.
     parser: ansi::Processor,
-    /// Set when a new output sender is installed but the active console's
-    /// dimensions are not known yet. The bootstrap is sent once the console
-    /// is activated so it is rendered at the viewer's size instead of the
-    /// PTY's initial size.
+    /// Set when a new output sender is installed but the bootstrap snapshot has
+    /// not been sent yet. The authority-host target reader owns a short stability
+    /// window after `OpenMirrorRequest`; once that window expires it sends
+    /// `SendBootstrap`, which clears this flag and emits the snapshot.
     bootstrap_pending: bool,
 }
 
@@ -497,13 +500,18 @@ fn drain_requests(
                     // so far; replaying the buffered raw bytes on top of it would
                     // corrupt the screen. Drop the buffer.
                     state.output_buffer.clear();
-                    if state.active_console.is_some() {
-                        send_bootstrap(state);
-                    } else {
-                        // Defer bootstrap until the viewer's console is activated
-                        // and the PTY/Term have been resized to the right geometry.
-                        state.bootstrap_pending = true;
-                    }
+                    // Always defer bootstrap until a viewer console is activated.
+                    // SetOutputSender is only sent while spawning a new authority
+                    // host bridge (OpenMirror gRPC), before the viewer's console
+                    // is known. Sending immediately here races with the subsequent
+                    // OpenMirrorRequest/ApplyResize and can produce a double
+                    // bootstrap on reconnect.
+                    state.bootstrap_pending = true;
+                }
+            }
+            AuthorityHostIoRequest::SendBootstrap { session_id } => {
+                if let Some(state) = sessions.get_mut(&session_id) {
+                    send_bootstrap(state);
                 }
             }
         }
@@ -600,33 +608,52 @@ fn send_bootstrap(state: &mut SessionState) {
     ));
 }
 
-/// Render the current terminal screen as an ANSI byte sequence that reproduces
-/// the visible content and cursor position when fed to a fresh terminal emulator.
+/// Maximum scrollback history lines to include in a bootstrap frame. Capping
+/// this bounds the reconnect payload for long-running sessions.
+const MAX_BOOTSTRAP_HISTORY_LINES: usize = 1000;
+
+/// Render the current terminal screen and scrollback history as an ANSI byte
+/// sequence that reproduces the visible content and cursor position when fed
+/// to a fresh terminal emulator.
 ///
 /// Used to bootstrap a newly attached remote console so it sees the prompt
-/// immediately instead of a blank pane until new PTY output arrives.
+/// and prior history immediately instead of a blank pane until new PTY output
+/// arrives.
 fn bootstrap_ansi_for_term(term: &Term<VoidListener>) -> Vec<u8> {
     let grid = term.grid();
     let screen_lines = grid.screen_lines();
     let columns = grid.columns();
     let display_offset = grid.display_offset() as i32;
+    let total_lines = grid.total_lines();
+    let history_len = total_lines.saturating_sub(screen_lines);
+    let history_to_render = history_len.min(MAX_BOOTSTRAP_HISTORY_LINES);
 
-    let mut payload = Vec::with_capacity(screen_lines * (columns * 8 + 16) + 64);
+    let mut payload = Vec::with_capacity(total_lines * (columns * 8 + 32) + 64);
     // Hide cursor, clear screen, and move to home to draw the bootstrap frame
     // without intermediate flicker.
     payload.extend_from_slice(b"\x1b[?25l\x1b[2J\x1b[H");
-    for row in 0..screen_lines {
-        if row > 0 {
-            payload.extend_from_slice(b"\r\n");
-        }
-        let line = Line(row as i32 - display_offset);
+
+    // Render scrollback history first, then the visible screen. Lines are drawn
+    // using absolute row positioning so the bootstrap is independent of the
+    // viewer's terminal size.
+    for offset in (1..=history_to_render).rev() {
+        let line = Line(-(offset as i32));
+        let row = history_to_render - offset + 1;
         let (_, styled) = render_grid_line(grid, line, columns);
+        payload.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+        payload.extend_from_slice(styled.as_bytes());
+    }
+    for row in 0..screen_lines {
+        let line = Line(row as i32 - display_offset);
+        let absolute_row = history_to_render + row + 1;
+        let (_, styled) = render_grid_line(grid, line, columns);
+        payload.extend_from_slice(format!("\x1b[{absolute_row};1H").as_bytes());
         payload.extend_from_slice(styled.as_bytes());
     }
 
     let point = grid.cursor.point;
     let cursor_col = point.column.0 as u16 + 1;
-    let cursor_row = (point.line.0 + display_offset) as u16 + 1;
+    let cursor_row = (point.line.0 + display_offset + history_to_render as i32) as u16 + 1;
     payload.extend_from_slice(format!("\x1b[{cursor_row};{cursor_col}H").as_bytes());
     payload.extend_from_slice(b"\x1b[?25h");
     payload
@@ -783,9 +810,9 @@ fn apply_console_resize(
             cols: cols as usize,
             rows: rows as usize,
         });
-        if state.bootstrap_pending {
-            send_bootstrap(state);
-        }
+        // Do not send bootstrap here. The authority-host target reader defers
+        // bootstrap for a short stability window after OpenMirrorRequest to
+        // avoid redraws for connections that drop immediately.
     }
 }
 
@@ -809,9 +836,8 @@ fn unregister_console(state: &mut SessionState, session_id: &str, console_id: St
                 rows: console.rows as usize,
             });
         }
-        if state.bootstrap_pending {
-            send_bootstrap(state);
-        }
+        // Bootstrap is triggered by the authority-host target reader after its
+        // stability window, not by console election here.
     }
     ERROR_LOG.log(format!(
         "[ratatui-authority-host-io] session={session_id} console={console_id} unregistered; next_active={next:?}"
@@ -850,5 +876,165 @@ fn set_nonblocking(file: &mut File) {
         if flags >= 0 {
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::RemoteNetworkConfig;
+    use std::process::Command;
+
+    fn make_term(cols: usize, rows: usize) -> Term<VoidListener> {
+        Term::new(Config::default(), &TermSize { cols, rows }, VoidListener)
+    }
+
+    fn make_test_session_state(output_tx: Option<mpsc::Sender<Vec<u8>>>) -> SessionState {
+        let pty = rustix_openpty::openpty(None, None).expect("openpty should succeed");
+        let pty_master = File::from(pty.controller);
+        // A short-lived child is enough: the test path does not wait on it.
+        let child = Command::new("false").spawn().expect("spawn should succeed");
+        SessionState {
+            pty_master,
+            child,
+            token: 100,
+            output_tx,
+            output_buffer: VecDeque::new(),
+            pending_write: Vec::new(),
+            consoles: HashMap::new(),
+            active_console: None,
+            term: Term::new(
+                Config::default(),
+                &TermSize { cols: 80, rows: 24 },
+                VoidListener,
+            ),
+            parser: ansi::Processor::new(),
+            bootstrap_pending: false,
+        }
+    }
+
+    #[test]
+    fn set_output_sender_defers_bootstrap_until_send_bootstrap() {
+        let (output_tx, output_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        let mut state = make_test_session_state(Some(output_tx.clone()));
+        state.active_console = Some("console".to_string());
+        sessions.insert("sess".to_string(), state);
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let shared = SharedState::new(RemoteNetworkConfig::default()).expect("shared state");
+        let mut poller = polling::Poller::new().expect("poller");
+        let mut token_to_session = HashMap::new();
+        let mut next_token = 1000;
+
+        req_tx
+            .send(AuthorityHostIoRequest::SetOutputSender {
+                session_id: "sess".to_string(),
+                output_tx: output_tx.clone(),
+            })
+            .unwrap();
+        drain_requests(
+            &req_rx,
+            &shared,
+            &mut poller,
+            &mut sessions,
+            &mut token_to_session,
+            &mut next_token,
+        )
+        .expect("drain should succeed");
+
+        assert!(
+            output_rx.try_recv().is_err(),
+            "SetOutputSender should not emit bootstrap immediately"
+        );
+        assert!(
+            sessions.get("sess").unwrap().bootstrap_pending,
+            "bootstrap should be pending"
+        );
+
+        // Resize should activate the console but must not emit bootstrap; the
+        // authority-host target reader controls the stable window.
+        req_tx
+            .send(AuthorityHostIoRequest::Resize {
+                session_id: "sess".to_string(),
+                console_id: "console".to_string(),
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+        drain_requests(
+            &req_rx,
+            &shared,
+            &mut poller,
+            &mut sessions,
+            &mut token_to_session,
+            &mut next_token,
+        )
+        .expect("drain should succeed");
+
+        assert!(
+            output_rx.try_recv().is_err(),
+            "Resize should not emit bootstrap while pending"
+        );
+        assert!(
+            sessions.get("sess").unwrap().bootstrap_pending,
+            "bootstrap should still be pending after Resize"
+        );
+
+        req_tx
+            .send(AuthorityHostIoRequest::SendBootstrap {
+                session_id: "sess".to_string(),
+            })
+            .unwrap();
+        drain_requests(
+            &req_rx,
+            &shared,
+            &mut poller,
+            &mut sessions,
+            &mut token_to_session,
+            &mut next_token,
+        )
+        .expect("drain should succeed");
+
+        let bootstrap = output_rx
+            .try_recv()
+            .expect("SendBootstrap should emit the deferred bootstrap");
+        let text = String::from_utf8_lossy(&bootstrap);
+        assert!(
+            text.contains("\x1b[2J"),
+            "bootstrap should contain clear-screen sequence: {text}"
+        );
+        assert!(
+            !sessions.get("sess").unwrap().bootstrap_pending,
+            "bootstrap should no longer be pending"
+        );
+    }
+
+    #[test]
+    fn bootstrap_ansi_includes_scrollback_history() {
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        let mut term = make_term(10, 2);
+        // Push four lines into a 2-row terminal so the first two become scrollback.
+        parser.advance(&mut term, b"line1\nline2\nline3\nline4\n");
+
+        let bootstrap = bootstrap_ansi_for_term(&term);
+        let text = String::from_utf8_lossy(&bootstrap);
+
+        assert!(
+            text.contains("line1"),
+            "bootstrap should contain scrollback line1: {text}"
+        );
+        assert!(
+            text.contains("line2"),
+            "bootstrap should contain scrollback line2: {text}"
+        );
+        assert!(
+            text.contains("line3"),
+            "bootstrap should contain visible line3: {text}"
+        );
+        assert!(
+            text.contains("line4"),
+            "bootstrap should contain visible line4: {text}"
+        );
     }
 }

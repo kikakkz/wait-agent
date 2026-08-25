@@ -150,6 +150,18 @@ impl RatatuiAuthorityHostSession {
             console_id: console_id.into(),
         });
     }
+
+    /// Ask the IO loop to send a bootstrap ANSI snapshot of the current terminal
+    /// state to the active output sender.
+    ///
+    /// Called when a remote viewer opens (or reopens) its mirror so the viewer
+    /// immediately sees the current screen and scrollback history instead of a
+    /// blank pane.
+    pub fn send_bootstrap(&self, io_tx: &AuthorityHostIoHandle) {
+        let _ = io_tx.send(AuthorityHostIoRequest::SendBootstrap {
+            session_id: self.session_id.clone(),
+        });
+    }
 }
 
 fn set_nonblocking(file: &mut File) {

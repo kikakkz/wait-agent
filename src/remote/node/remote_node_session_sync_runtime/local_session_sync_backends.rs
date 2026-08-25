@@ -985,6 +985,36 @@ fn authority_host_supports_at_from_record(shared: &SharedState, session_id: &str
         .map(accepts_at_reference)
 }
 
+/// Time to wait after receiving `OpenMirrorRequest` before sending a bootstrap
+/// snapshot. Short-lived reconnects that drop within this window will skip the
+/// bootstrap, avoiding a full screen redraw for a connection that does not last.
+const BOOTSTRAP_STABLE_WINDOW: Duration = Duration::from_millis(300);
+
+/// Bootstrap scheduling state for a target-host reader thread.
+enum BootstrapState {
+    /// No bootstrap is scheduled.
+    None,
+    /// A bootstrap is scheduled once the deadline is reached.
+    Pending { deadline: Instant },
+}
+
+/// If a bootstrap is pending and its deadline has passed, ask the IO loop to
+/// send it and clear the pending state. Returns whether bootstrap was sent.
+fn maybe_send_bootstrap(
+    state: &mut BootstrapState,
+    session: &crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession,
+    io_tx: &crate::ratatui_node::authority_host_io_loop::AuthorityHostIoHandle,
+) -> bool {
+    if let BootstrapState::Pending { deadline } = *state {
+        if Instant::now() >= deadline {
+            session.send_bootstrap(io_tx);
+            *state = BootstrapState::None;
+            return true;
+        }
+    }
+    false
+}
+
 fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs) {
     let SpawnRatatuiAuthorityTargetHostArgs {
         mut listener_stream,
@@ -1056,100 +1086,123 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
         let mut _input_seq: u64 = 1;
         let mut viewer_console_id: Option<String> = None;
         let mut paste_file_assemblers = HashMap::<(String, String), PasteFileAssembler>::new();
+        let mut bootstrap_state = BootstrapState::None;
         while running.load(Ordering::Relaxed) {
-            match read_authority_transport_frame(&mut listener_stream) {
-                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match envelope.payload {
-                    ControlPlanePayload::OpenMirrorRequest(payload) => {
-                        viewer_console_id = Some(payload.console_id.clone());
-                        session.resize_for_console(
-                            &io_tx,
-                            payload.cols as u16,
-                            payload.rows as u16,
-                            payload.console_id,
-                        );
-                        mirror_active.store(true, Ordering::Relaxed);
-                    }
-                    ControlPlanePayload::RawPtyInput(payload) => {
-                        ERROR_LOG.log(format!(
-                            "[ratatui-session-sync] target host received RawPtyInput session={} target={} bytes={}",
-                            payload.session_id, payload.target_id, payload.input_bytes.len()
-                        ));
-                        session.feed_input(&io_tx, payload.input_bytes);
-                    }
-                    ControlPlanePayload::ApplyResize(payload) => {
-                        viewer_console_id = Some(payload.resize_authority_console_id.clone());
-                        session.resize_for_console(
-                            &io_tx,
-                            payload.cols as u16,
-                            payload.rows as u16,
-                            payload.resize_authority_console_id,
-                        );
-                    }
-                    ControlPlanePayload::CloseMirrorRequest(_) => {
-                        mirror_active.store(false, Ordering::Relaxed);
-                        if let Some(console_id) = viewer_console_id.take() {
-                            session.unregister_console(&io_tx, console_id);
+            maybe_send_bootstrap(&mut bootstrap_state, &session, &io_tx);
+
+            let read_timeout = match bootstrap_state {
+                BootstrapState::Pending { deadline } => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    remaining.min(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT)
+                }
+                BootstrapState::None => AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
+            };
+            let _ = listener_stream.set_read_timeout(Some(read_timeout));
+
+            let frame_result = read_authority_transport_frame(&mut listener_stream);
+            let mut fatal_error = false;
+            match frame_result {
+                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
+                    match envelope.payload {
+                        ControlPlanePayload::OpenMirrorRequest(payload) => {
+                            viewer_console_id = Some(payload.console_id.clone());
+                            session.resize_for_console(
+                                &io_tx,
+                                payload.cols as u16,
+                                payload.rows as u16,
+                                payload.console_id,
+                            );
+                            mirror_active.store(true, Ordering::Relaxed);
+                            // Defer bootstrap for a short window so that
+                            // short-lived reconnects do not force a full screen
+                            // redraw. The bootstrap is sent once the window
+                            // expires without a fatal read error.
+                            bootstrap_state = BootstrapState::Pending {
+                                deadline: Instant::now() + BOOTSTRAP_STABLE_WINDOW,
+                            };
                         }
-                    }
-                    ControlPlanePayload::PasteFileRequest(payload) => {
-                        ERROR_LOG.log(format!(
-                            "[ratatui-session-sync] target host received PasteFileRequest session={} target={} file_id={} chunk={}/{} bytes={}",
-                            payload.session_id,
-                            payload.target_id,
-                            payload.file_id,
-                            payload.chunk_index,
-                            payload.total_chunks,
-                            payload.chunk_bytes.len()
-                        ));
-                        let key = (payload.session_id.clone(), payload.file_id.clone());
-                        // Discard incomplete transfers whose last chunk arrived
-                        // long enough ago that the transfer is clearly abandoned.
-                        paste_file_assemblers.retain(|_, assembler| !assembler.is_stale());
-                        if paste_file_assemblers
-                            .get(&key)
-                            .map(|a| a.total_chunks != payload.total_chunks)
-                            .unwrap_or(false)
-                        {
-                            paste_file_assemblers.remove(&key);
+                        ControlPlanePayload::RawPtyInput(payload) => {
+                            ERROR_LOG.log(format!(
+                                "[ratatui-session-sync] target host received RawPtyInput session={} target={} bytes={}",
+                                payload.session_id, payload.target_id, payload.input_bytes.len()
+                            ));
+                            session.feed_input(&io_tx, payload.input_bytes);
                         }
-                        let assembler =
-                            paste_file_assemblers.entry(key.clone()).or_insert_with(|| {
-                                PasteFileAssembler::new(
-                                    payload.filename_hint.clone(),
-                                    payload.total_chunks,
-                                )
-                            });
-                        assembler.touch();
-                        assembler
-                            .chunks
-                            .insert(payload.chunk_index, payload.chunk_bytes);
-                        if assembler.is_complete() {
-                            if let Some(assembler) = paste_file_assemblers.remove(&key) {
-                                let filename_hint = assembler.filename_hint.clone();
-                                let full_bytes = assembler.assemble();
-                                match crate::ratatui_node::clipboard_cache::write_clipboard_file(
-                                    &filename_hint,
-                                    &full_bytes,
-                                ) {
-                                    Ok(path) => {
-                                        let supports_at =
-                                            authority_host_supports_at(&shared, &session);
-                                        let path_string = path.to_string_lossy().into_owned();
-                                        let path_ref =
-                                            format_file_reference(&path_string, supports_at);
-                                        session.feed_input(&io_tx, path_ref.into_bytes());
-                                    }
-                                    Err(error) => {
-                                        ERROR_LOG.log(format!(
-                                            "[ratatui-session-sync] failed to cache pasted file on authority host: {error}"
-                                        ));
+                        ControlPlanePayload::ApplyResize(payload) => {
+                            viewer_console_id = Some(payload.resize_authority_console_id.clone());
+                            session.resize_for_console(
+                                &io_tx,
+                                payload.cols as u16,
+                                payload.rows as u16,
+                                payload.resize_authority_console_id,
+                            );
+                        }
+                        ControlPlanePayload::CloseMirrorRequest(_) => {
+                            mirror_active.store(false, Ordering::Relaxed);
+                            if let Some(console_id) = viewer_console_id.take() {
+                                session.unregister_console(&io_tx, console_id);
+                            }
+                        }
+                        ControlPlanePayload::PasteFileRequest(payload) => {
+                            ERROR_LOG.log(format!(
+                                "[ratatui-session-sync] target host received PasteFileRequest session={} target={} file_id={} chunk={}/{} bytes={}",
+                                payload.session_id,
+                                payload.target_id,
+                                payload.file_id,
+                                payload.chunk_index,
+                                payload.total_chunks,
+                                payload.chunk_bytes.len()
+                            ));
+                            let key = (payload.session_id.clone(), payload.file_id.clone());
+                            // Discard incomplete transfers whose last chunk arrived
+                            // long enough ago that the transfer is clearly abandoned.
+                            paste_file_assemblers.retain(|_, assembler| !assembler.is_stale());
+                            if paste_file_assemblers
+                                .get(&key)
+                                .map(|a| a.total_chunks != payload.total_chunks)
+                                .unwrap_or(false)
+                            {
+                                paste_file_assemblers.remove(&key);
+                            }
+                            let assembler =
+                                paste_file_assemblers.entry(key.clone()).or_insert_with(|| {
+                                    PasteFileAssembler::new(
+                                        payload.filename_hint.clone(),
+                                        payload.total_chunks,
+                                    )
+                                });
+                            assembler.touch();
+                            assembler
+                                .chunks
+                                .insert(payload.chunk_index, payload.chunk_bytes);
+                            if assembler.is_complete() {
+                                if let Some(assembler) = paste_file_assemblers.remove(&key) {
+                                    let filename_hint = assembler.filename_hint.clone();
+                                    let full_bytes = assembler.assemble();
+                                    match crate::ratatui_node::clipboard_cache::write_clipboard_file(
+                                        &filename_hint,
+                                        &full_bytes,
+                                    ) {
+                                        Ok(path) => {
+                                            let supports_at =
+                                                authority_host_supports_at(&shared, &session);
+                                            let path_string = path.to_string_lossy().into_owned();
+                                            let path_ref =
+                                                format_file_reference(&path_string, supports_at);
+                                            session.feed_input(&io_tx, path_ref.into_bytes());
+                                        }
+                                        Err(error) => {
+                                            ERROR_LOG.log(format!(
+                                                "[ratatui-session-sync] failed to cache pasted file on authority host: {error}"
+                                            ));
+                                        }
                                     }
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Ok(AuthorityTransportFrame::RawPtyInput(payload)) => {
                     ERROR_LOG.log(format!(
                         "[ratatui-session-sync] target host received raw frame RawPtyInput session={} target={} bytes={}",
@@ -1178,9 +1231,13 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                     ERROR_LOG.log(format!(
                         "[ratatui-session-sync] authority target host read error: {error}"
                     ));
-                    break;
+                    fatal_error = true;
                 }
             }
+            if fatal_error {
+                break;
+            }
+            maybe_send_bootstrap(&mut bootstrap_state, &session, &io_tx);
         }
         if let Some(console_id) = viewer_console_id.take() {
             session.unregister_console(&io_tx, console_id);
@@ -1249,7 +1306,19 @@ mod tests {
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
+    use crate::infra::remote_protocol::{
+        BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
+        REMOTE_PROTOCOL_VERSION,
+    };
+    use crate::infra::remote_transport_codec::{
+        write_authority_transport_frame, AuthorityTransportFrame,
+    };
+    use crate::ratatui_node::authority_host_io_loop::{
+        AuthorityHostIoLoop, AuthorityHostIoRequest,
+    };
     use crate::ratatui_node::runtime::SharedState;
+    use std::fs::File;
+    use std::process::Command;
 
     #[test]
     fn authority_host_paste_uses_local_record_for_agent_command_name() {
@@ -1321,5 +1390,161 @@ mod tests {
             );
         }
         assert!(!authority_host_supports_at_from_record(&shared, session_id).unwrap_or(false));
+    }
+
+    #[test]
+    fn maybe_send_bootstrap_respects_deadline() {
+        let session = crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession {
+            session_id: "test".to_string(),
+            command_name: "bash".to_string(),
+            pty_master: std::fs::File::open("/dev/null").expect("open /dev/null"),
+            child: None,
+        };
+        let io_tx = crate::ratatui_node::authority_host_io_loop::AuthorityHostIoHandle::dangling();
+
+        let mut state = BootstrapState::None;
+        assert!(
+            !maybe_send_bootstrap(&mut state, &session, &io_tx),
+            "None state should not send bootstrap"
+        );
+
+        state = BootstrapState::Pending {
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        assert!(
+            !maybe_send_bootstrap(&mut state, &session, &io_tx),
+            "future deadline should not send bootstrap"
+        );
+        assert!(
+            matches!(state, BootstrapState::Pending { .. }),
+            "future deadline should keep pending state"
+        );
+
+        state = BootstrapState::Pending {
+            deadline: Instant::now() - Duration::from_millis(1),
+        };
+        assert!(
+            maybe_send_bootstrap(&mut state, &session, &io_tx),
+            "expired deadline should send bootstrap"
+        );
+        assert!(
+            matches!(state, BootstrapState::None),
+            "expired deadline should clear pending state"
+        );
+    }
+
+    #[test]
+    fn open_mirror_request_delays_bootstrap_until_stable_window() {
+        let session_id = "stable-test";
+        let target_id = format!("remote-peer:node:{session_id}");
+        let session = Arc::new(RatatuiAuthorityHostSession {
+            session_id: session_id.to_string(),
+            command_name: "bash".to_string(),
+            pty_master: File::open("/dev/null").expect("open /dev/null"),
+            child: None,
+        });
+
+        let shared = SharedState::new(RemoteNetworkConfig::default()).expect("shared state");
+        let io_loop = AuthorityHostIoLoop::start(shared.clone()).expect("start io loop");
+        let io_tx = io_loop.sender();
+
+        // Register the session with an output sender so bootstrap has somewhere to go.
+        let (output_tx, output_rx) = mpsc::channel();
+        let (pty_master, _pty_holder) = UnixStream::pair().expect("create pty pair");
+        io_tx
+            .send(AuthorityHostIoRequest::RegisterSession {
+                session_id: session_id.to_string(),
+                pty_master: File::from(std::os::fd::OwnedFd::from(pty_master)),
+                child: Command::new("false").spawn().expect("spawn child"),
+                output_tx: Some(output_tx.clone()),
+                cols: 80,
+                rows: 24,
+            })
+            .expect("register session");
+        io_tx
+            .send(AuthorityHostIoRequest::SetOutputSender {
+                session_id: session_id.to_string(),
+                output_tx,
+            })
+            .expect("set output sender");
+        thread::sleep(Duration::from_millis(50));
+
+        // Start the target-host reader over an internal socket pair.
+        let (mut host_stream, listener_stream) = UnixStream::pair().expect("create transport pair");
+        let running = Arc::new(AtomicBool::new(true));
+        spawn_ratatui_authority_target_host(SpawnRatatuiAuthorityTargetHostArgs {
+            listener_stream,
+            host_stream: host_stream.try_clone().expect("clone host stream"),
+            session,
+            target_id: target_id.clone(),
+            node_id: "node".to_string(),
+            running: running.clone(),
+            io_tx,
+            output_rx,
+            shared,
+        });
+
+        // Send OpenMirrorRequest from the viewer side.
+        let payload = OpenMirrorRequestPayload {
+            session_id: session_id.to_string(),
+            target_id: target_id.clone(),
+            console_id: "console".to_string(),
+            cols: 80,
+            rows: 24,
+            raw_pty_passthrough: true,
+            bootstrap_mode: BootstrapMode::Full,
+        };
+        let envelope = ProtocolEnvelope {
+            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+            message_id: "open-mirror-1".to_string(),
+            message_type: "open_mirror_request",
+            timestamp: "0Z".to_string(),
+            sender_id: "node".to_string(),
+            correlation_id: None,
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.clone()),
+            attachment_id: None,
+            console_id: Some("console".to_string()),
+            payload: ControlPlanePayload::OpenMirrorRequest(payload),
+        };
+        write_authority_transport_frame(
+            &mut host_stream,
+            &AuthorityTransportFrame::ControlPlane(Box::new(envelope)),
+        )
+        .expect("write open mirror request");
+        host_stream.flush().expect("flush host stream");
+
+        // Bootstrap should NOT arrive immediately; it is deferred by the stable window.
+        let start = Instant::now();
+        assert!(host_stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .is_ok());
+        let early = read_authority_transport_frame(&mut host_stream);
+        assert!(
+            early.is_err(),
+            "bootstrap should not arrive within the stable window"
+        );
+
+        // After the stable window expires, the bootstrap frame should arrive.
+        let remaining = BOOTSTRAP_STABLE_WINDOW.saturating_sub(start.elapsed());
+        if remaining > Duration::ZERO {
+            thread::sleep(remaining + Duration::from_millis(20));
+        }
+        let bootstrap = read_authority_transport_frame(&mut host_stream)
+            .expect("bootstrap should arrive after stable window");
+        match bootstrap {
+            AuthorityTransportFrame::RawPtyOutput(payload) => {
+                let text = String::from_utf8_lossy(&payload.output_bytes);
+                assert!(
+                    text.contains("\x1b[2J"),
+                    "bootstrap should contain clear-screen sequence: {text}"
+                );
+            }
+            other => panic!("expected RawPtyOutput bootstrap, got {other:?}"),
+        }
+
+        // Tear down: close the socket so the target host reader exits.
+        drop(host_stream);
+        running.store(false, Ordering::Relaxed);
     }
 }
