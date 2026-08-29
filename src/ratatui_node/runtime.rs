@@ -364,12 +364,6 @@ impl SharedState {
             .cloned()
     }
 
-    pub(crate) fn remove_remote_node_connection(&self, node_id: &str) {
-        if let Ok(mut guard) = self.remote_node_connections.lock() {
-            guard.remove(node_id);
-        }
-    }
-
     pub(super) fn detach_all_clients(&self) {
         self.clients.detach_all_clients();
     }

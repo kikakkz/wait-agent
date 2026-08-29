@@ -372,8 +372,6 @@ fn run_state_event_loop(
                     &mut outbound_dial_retry_handles,
                     &mut inbound_connect_wait_handles,
                     &mut peer_reachability_handles,
-                    &snapshot_store,
-                    network_online,
                     node_id,
                 );
             }
@@ -964,6 +962,9 @@ fn handle_remote_node_offline(
     }
     // For outbound-dial peers, start a node-level retry worker so the control
     // plane re-dials the remote waitagent without requiring SSH re-bootstrap.
+    // Evict any stale ingress session first so the fresh dial is not rejected
+    // by the duplicate-dial guard.
+    close_ingress_sessions_for_node(shared, &node_id);
     if let std::collections::hash_map::Entry::Vacant(slot) =
         outbound_dial_retry_handles.entry(node_id.clone())
     {
@@ -1045,9 +1046,7 @@ fn handle_remote_node_reconnect_failed(
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
     inbound_connect_wait_handles: &mut HashMap<String, InboundConnectWaitWorker>,
-    peer_reachability_handles: &mut HashMap<String, PeerReachabilityProbeWorker>,
-    snapshot_store: &OutboundConnectionSnapshotStore,
-    network_online: bool,
+    _peer_reachability_handles: &mut HashMap<String, PeerReachabilityProbeWorker>,
     node_id: String,
 ) {
     ERROR_LOG.log(format!(
@@ -1074,24 +1073,39 @@ fn handle_remote_node_reconnect_failed(
         }
         shared.handle_session_exit(&target_id);
     }
+    // The retry worker that reported failure is already exiting; clean up the
+    // handle.  The wait worker (inbound `--connect` peers) has also timed out.
     if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
         let _ = worker.cancel_tx.send(());
     }
     if let Some(worker) = inbound_connect_wait_handles.remove(&node_id) {
         let _ = worker.cancel_tx.send(());
     }
-    if let Some(worker) = peer_reachability_handles.remove(&node_id) {
-        let _ = worker.cancel_tx.send(());
-    }
-    if network_online {
-        if let Err(error) = snapshot_store.remove(&node_id) {
-            ERROR_LOG.log(format!(
-                "[ratatui-state-loop] failed to remove snapshot for {node_id}: {error}"
-            ));
-        }
-    }
-    shared.remove_remote_node_connection(&node_id);
+    // Keep the reachability probe running so we detect when the peer comes back.
+    // Also keep the stored snapshot and remote_node_connection so a later
+    // reconnect can reuse the same endpoint and credentials instead of
+    // re-bootstrapping via SSH.
+    close_ingress_sessions_for_node(shared, &node_id);
     broadcast_snapshot(shared, client_writer, connected_clients);
+}
+
+/// Ask the ingress server to drop any active or pending gRPC session for
+/// `node_id`.  This is needed when the control plane knows a remote peer is
+/// offline but the ingress runtime may still hold a stale session that would
+/// block a new dial.
+fn close_ingress_sessions_for_node(shared: &Arc<SharedState>, node_id: &str) {
+    let ingress_tx = {
+        let guard = shared
+            .ingress_internal_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    };
+    if let Some(ingress_tx) = ingress_tx {
+        let _ = ingress_tx.send(InternalEvent::CloseNodeIngressSession {
+            node_id: node_id.to_string(),
+        });
+    }
 }
 
 /// Cancel any existing outbound-dial retry worker for `node_id` and start a
@@ -1117,6 +1131,11 @@ fn reset_outbound_dial_retry_worker(
     if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
         let _ = worker.cancel_tx.send(());
     }
+
+    // Evict any stale ingress session before starting a fresh dial attempt;
+    // otherwise the duplicate-dial guard in the ingress server would reject the
+    // new connection while the old, broken session is still in its map.
+    close_ingress_sessions_for_node(shared, &node_id);
 
     let request = OutboundNodeSessionRequest {
         node_id: node_id.clone(),
@@ -1902,6 +1921,11 @@ fn perform_remote_host_connect(
             let tx = guard
                 .as_ref()
                 .ok_or_else(|| "remote node ingress is not ready".to_string())?;
+            // A stale ingress session from a previous disconnect may still be
+            // registered for this node.  Evict it before queuing the new dial
+            // so the duplicate-dial guard does not reject the reuse attempt.
+            let node_id = request.node_id.clone();
+            let _ = tx.send(InternalEvent::CloseNodeIngressSession { node_id });
             tx.send(InternalEvent::InitiateOutboundConnection { request })
                 .map_err(|_| "remote node ingress is not ready".to_string())
         })
@@ -2728,7 +2752,7 @@ mod state_loop_tests {
     }
 
     #[test]
-    fn snapshot_removed_on_remote_node_reconnect_failed_when_online() {
+    fn snapshot_kept_on_remote_node_reconnect_failed_when_online() {
         let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
         let snapshot_path = std::env::temp_dir().join(format!(
             "waitagent-snapshot-reconnect-failed-online-{}",
@@ -2749,11 +2773,13 @@ mod state_loop_tests {
         std::thread::sleep(Duration::from_millis(50));
 
         let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        let entries = reloaded.load().expect("load should succeed");
         assert_eq!(
-            reloaded.load().expect("load should succeed").len(),
-            0,
-            "snapshot should be removed when remote node reconnect fails while network is online"
+            entries.len(),
+            1,
+            "snapshot should be kept when remote node reconnect fails while network is online"
         );
+        assert_eq!(entries[0].authority_node_id, "peer#99999");
 
         drop(tx);
         handle.join().expect("state loop should exit cleanly");
@@ -2984,8 +3010,8 @@ mod state_loop_tests {
             );
         }
         assert!(
-            shared.remote_node_connection("peer#99999").is_none(),
-            "node connection should be removed after reconnect failed"
+            shared.remote_node_connection("peer#99999").is_some(),
+            "node connection should be kept after reconnect failed so a later reconnect can reuse it"
         );
 
         drop(tx);

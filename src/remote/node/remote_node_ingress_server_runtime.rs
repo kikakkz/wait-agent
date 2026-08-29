@@ -225,6 +225,9 @@ pub(crate) enum InternalEvent {
     InitiateOutboundConnection {
         request: OutboundNodeSessionRequest,
     },
+    CloseNodeIngressSession {
+        node_id: String,
+    },
     LocalCatalogChanged,
     Shutdown,
 }
@@ -1725,6 +1728,17 @@ fn run_node_ingress_server_loop<
                     let _ = outbound_guard_tx.send((node_id, result));
                 });
             }
+            IngressServerEvent::Internal(InternalEvent::CloseNodeIngressSession { node_id }) => {
+                close_ingress_sessions_for_node(
+                    &publication_runtime,
+                    &mut sessions,
+                    &mut outbound_guards,
+                    &mut pending_outbound_guards,
+                    &mut pending_outbound_dials,
+                    &mut closed_session_instances,
+                    &node_id,
+                );
+            }
             IngressServerEvent::Internal(event) => {
                 handle_internal_event(
                     &mut sessions,
@@ -2141,6 +2155,30 @@ fn has_active_ingress_session_for_node(
         .any(|active| active.session.node_id() == node_id)
 }
 
+fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
+    sessions: &mut HashMap<String, ActiveNodeIngressSession>,
+    outbound_guards: &mut HashMap<String, GrpcRemoteNodeTransportGuard>,
+    pending_outbound_guards: &mut HashMap<String, GrpcRemoteNodeTransportGuard>,
+    pending_outbound_dials: &mut HashSet<String>,
+    closed_session_instances: &mut HashSet<String>,
+    node_id: &str,
+) {
+    let removed_instance_ids: Vec<String> = sessions
+        .iter()
+        .filter(|(_session_instance_id, active)| active.session.node_id() == node_id)
+        .map(|(session_instance_id, _active)| session_instance_id.clone())
+        .collect();
+    for session_instance_id in &removed_instance_ids {
+        sessions.remove(session_instance_id);
+        closed_session_instances.insert(session_instance_id.clone());
+        outbound_guards.remove(session_instance_id);
+    }
+    pending_outbound_guards.remove(node_id);
+    pending_outbound_dials.remove(node_id);
+    mark_discovered_node_offline_if_last_ingress_session(publication_runtime, sessions, node_id);
+}
+
 fn mark_discovered_node_offline_if_last_ingress_session<B: RemoteTargetPublicationBackend>(
     publication_runtime: &RemoteTargetPublicationRuntime<B>,
     sessions: &HashMap<String, ActiveNodeIngressSession>,
@@ -2519,7 +2557,8 @@ fn handle_internal_event<G: LocalSessionCatalog>(
         | InternalEvent::ShutdownOwner { .. }
         | InternalEvent::LocalCreateSession { .. }
         | InternalEvent::LocalCreateSessionTimedOut { .. }
-        | InternalEvent::InitiateOutboundConnection { .. } => {}
+        | InternalEvent::InitiateOutboundConnection { .. }
+        | InternalEvent::CloseNodeIngressSession { .. } => {}
     }
 }
 
