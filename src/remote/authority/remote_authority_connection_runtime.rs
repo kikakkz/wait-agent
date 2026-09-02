@@ -158,7 +158,7 @@ where
 }
 
 impl RemoteAuthorityConnectionRuntime<LocalAuthoritySocketSource> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn with_local_socket_source() -> Self {
         Self::new(LocalAuthoritySocketSource)
     }

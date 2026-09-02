@@ -814,7 +814,9 @@ fn raw_pty_output_envelope(payload: RawPtyOutputPayload) -> ProtocolEnvelope<Con
     }
 }
 
-#[cfg(test)]
+// These tests exercise Unix-domain-socket transport behavior and rely on
+// items that only exist on Unix; they are not built on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     #[cfg(unix)]
     use super::{

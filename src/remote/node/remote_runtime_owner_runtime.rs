@@ -166,7 +166,7 @@ impl RemoteRuntimeOwnerRuntime {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn new_for_tests(current_executable: PathBuf, network: RemoteNetworkConfig) -> Self {
         start_remote_runtime_owner_for_tests(&network);
         Self {
@@ -642,7 +642,7 @@ impl RemoteRuntimeOwnerRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
     let socket_path = remote_runtime_owner_socket_path(network);
     crate::infra::best_effort::remove_file(&socket_path);
@@ -668,7 +668,7 @@ fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn handle_remote_runtime_owner_client(
     state: &RemoteRuntimeOwnerSharedState,
     stream: &mut impl Read,
@@ -1003,7 +1003,7 @@ fn remote_runtime_owner_available(addr: &RemoteControlAddr) -> bool {
         && parse_remote_runtime_owner_snapshot(&response).is_ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn remote_runtime_owner_socket_path(network: &RemoteNetworkConfig) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-runtime-owner-{}.sock",
@@ -1254,7 +1254,7 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn read_remote_runtime_owner_command(
     reader: &mut impl Read,
 ) -> Result<RemoteRuntimeOwnerCommandEnvelope, LifecycleError> {
@@ -1660,7 +1660,7 @@ fn unescape_optional_field(value: &str) -> Result<Option<String>, LifecycleError
     unescape_field(value).map(Some)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn sanitize_path_component(value: &str) -> String {
     value
         .chars()
@@ -1709,7 +1709,9 @@ fn remote_runtime_owner_io_error(error: io::Error) -> LifecycleError {
     LifecycleError::Io("remote runtime owner operation failed".to_string(), error)
 }
 
-#[cfg(test)]
+// These tests exercise Unix-domain-socket runtime-owner behavior and cannot
+// run on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         handle_remote_runtime_owner_client, parse_remote_runtime_owner_command,
