@@ -590,7 +590,7 @@ pub fn install_or_update_command() -> String {
 #[allow(dead_code)]
 fn default_deploy_script_path() -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    format!("{}/scripts/deploy-ratatui-remote.sh", manifest_dir)
+    format!("{manifest_dir}/scripts/deploy-ratatui-remote.sh")
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
@@ -756,11 +756,10 @@ fn tcp_connect_preflight_command(host: &str, port: u16) -> String {
     );
     let bash = shell_single_quote("cat < /dev/null > /dev/tcp/$1/$2");
     format!(
-        "if command -v nc >/dev/null 2>&1; then nc -z -w {timeout} {host} {port}; \
+        "if command -v nc >/dev/null 2>&1; then nc -z -w {REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS} {host} {port}; \
 elif command -v python3 >/dev/null 2>&1; then python3 -c {python} {host} {port}; \
-elif command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout {timeout} bash -c {bash} sh {host} {port}; \
-else echo 'no TCP probe tool available on remote host (need nc, python3, or bash+timeout)' >&2; exit 127; fi",
-        timeout = REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS
+elif command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout {REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS} bash -c {bash} sh {host} {port}; \
+else echo 'no TCP probe tool available on remote host (need nc, python3, or bash+timeout)' >&2; exit 127; fi"
     )
 }
 

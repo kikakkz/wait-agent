@@ -2515,7 +2515,7 @@ where
 
 fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let connect_label = connect_label(state);
-    let connect_text = format!(" ▶  {} ", connect_label);
+    let connect_text = format!(" ▶  {connect_label} ");
     let connect_width = connect_text.width() as u16;
     let delete_text = " 🗑  Delete ".to_string();
     let delete_width = delete_text.width() as u16;

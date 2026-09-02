@@ -124,8 +124,7 @@ impl RatatuiLocalSession {
         }
 
         ERROR_LOG.log(format!(
-            "[ratatui-local-session] spawned session={} cols={} rows={}",
-            session_id, cols, rows
+            "[ratatui-local-session] spawned session={session_id} cols={cols} rows={rows}"
         ));
 
         Ok(session)

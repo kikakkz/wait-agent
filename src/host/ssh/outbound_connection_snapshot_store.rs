@@ -290,10 +290,7 @@ fn current_timestamp() -> String {
         (seconds_in_day % 60) as u32,
     );
     let millis = nanos / 1_000_000;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        year, month, day, hour, minute, second, millis
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {

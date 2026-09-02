@@ -132,5 +132,5 @@ fn now_rfc3339_like() -> String {
 }
 
 fn to_io_error(error: impl ToString) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, error.to_string())
+    io::Error::other(error.to_string())
 }

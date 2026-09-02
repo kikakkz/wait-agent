@@ -448,8 +448,7 @@ fn run_state_event_loop(
                 }
                 Err(error) => {
                     ERROR_LOG.log(format!(
-                        "[ratatui-state-loop] snapshot reconnect failed for profile `{}` node={}: {error}",
-                        profile_name, authority_node_id
+                        "[ratatui-state-loop] snapshot reconnect failed for profile `{profile_name}` node={authority_node_id}: {error}"
                     ));
                     if network_online {
                         if let Err(remove_error) = snapshot_store.remove(&authority_node_id) {

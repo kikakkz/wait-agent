@@ -12,9 +12,8 @@ pub fn openpty(cols: u16, rows: u16) -> io::Result<PtyPair> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let pty = rustix_openpty::openpty(None, Some(&window_size)).map_err(|error| {
-        io::Error::new(io::ErrorKind::Other, format!("failed to open pty: {error}"))
-    })?;
+    let pty = rustix_openpty::openpty(None, Some(&window_size))
+        .map_err(|error| io::Error::other(format!("failed to open pty: {error}")))?;
 
     let master = File::from(pty.controller);
     let slave = File::from(pty.user);

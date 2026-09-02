@@ -290,7 +290,7 @@ fn read_image_powershell() -> Result<(Vec<u8>, String), String> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis().to_string())
         .unwrap_or_else(|_| "0".to_string());
-    let windows_file = format!("{}\\waitagent-paste-{}.png", windows_temp, timestamp);
+    let windows_file = format!("{windows_temp}\\waitagent-paste-{timestamp}.png");
     let wsl_path = crate::ratatui_node::clipboard_platform::windows_path_to_wsl(&windows_file);
 
     let script = format!(

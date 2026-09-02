@@ -295,7 +295,7 @@ fn run_io_loop(
     let mut poller = polling::Poller::new().map_err(|error| {
         LifecycleError::Io(
             "failed to create authority host IO poller".to_string(),
-            io::Error::new(io::ErrorKind::Other, error),
+            io::Error::other(error),
         )
     })?;
 
@@ -309,7 +309,7 @@ fn run_io_loop(
         {
             return Err(LifecycleError::Io(
                 "failed to register SIGCHLD handler".to_string(),
-                io::Error::new(io::ErrorKind::Other, error),
+                io::Error::other(error),
             ));
         }
         // SAFETY: sig_read outlives the poller; it is owned by this loop and
@@ -324,7 +324,7 @@ fn run_io_loop(
                 .map_err(|error| {
                     LifecycleError::Io(
                         "failed to add SIGCHLD pipe to poller".to_string(),
-                        io::Error::new(io::ErrorKind::Other, error),
+                        io::Error::other(error),
                     )
                 })?;
         }
@@ -342,7 +342,7 @@ fn run_io_loop(
             .map_err(|error| {
                 LifecycleError::Io(
                     "failed to add authority host IO shutdown pipe to poller".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error),
+                    io::Error::other(error),
                 )
             })?;
     }
@@ -358,7 +358,7 @@ fn run_io_loop(
             .map_err(|error| {
                 LifecycleError::Io(
                     "failed to add authority host IO request wake pipe to poller".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error),
+                    io::Error::other(error),
                 )
             })?;
     }
@@ -610,7 +610,7 @@ fn drain_requests(
                                     format!(
                                         "failed to add authority host pty {session_id} to poller"
                                     ),
-                                    io::Error::new(io::ErrorKind::Other, error),
+                                    io::Error::other(error),
                                 )
                             })?;
                     }

@@ -521,8 +521,7 @@ fn engine_preserves_replies_across_synchronized_update() {
     let replies = engine.feed_and_collect_replies(b"\x1b[?2026h\x1b[6n\x1b[?2026l");
     assert!(
         replies.starts_with(b"\x1b["),
-        "cursor-position reply should be generated after sync closes: {:?}",
-        replies
+        "cursor-position reply should be generated after sync closes: {replies:?}"
     );
 }
 

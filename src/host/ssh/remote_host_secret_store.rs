@@ -250,7 +250,7 @@ fn encode_secret_file(
     value: &str,
 ) -> Result<String, RemoteHostSecretStoreError> {
     let payload = encrypt_secret_payload(id, value.as_bytes())?;
-    Ok(format!("{}\n{}\n", FILE_SECRET_HEADER, payload))
+    Ok(format!("{FILE_SECRET_HEADER}\n{payload}\n"))
 }
 
 fn decode_secret_file(

@@ -90,8 +90,7 @@ impl AgentSessionProvider for KimiSessionProvider {
 
         if sessions.is_empty() && failed > 0 {
             return Err(AgentSessionError::Parse(format!(
-                "{} lines could not be parsed",
-                failed
+                "{failed} lines could not be parsed"
             )));
         }
 

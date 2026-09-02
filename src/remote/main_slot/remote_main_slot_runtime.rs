@@ -292,8 +292,7 @@ impl RemoteMainSlotRuntime {
         let result = self.send_messages(&[message]);
         if let Err(error) = &result {
             ERROR_LOG.log_error(format!(
-                "send_target_output seq={} bytes={} failed: {error}",
-                output_seq, byte_count
+                "send_target_output seq={output_seq} bytes={byte_count} failed: {error}"
             ));
         }
         result

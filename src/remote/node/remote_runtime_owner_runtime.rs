@@ -1701,7 +1701,7 @@ impl RemoteTargetSourceBindingResolver for RemoteRuntimeOwnerRuntime {
 fn remote_runtime_owner_error(
     error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
 ) -> LifecycleError {
-    let error = io::Error::new(ErrorKind::Other, error.into().to_string());
+    let error = io::Error::other(error.into().to_string());
     LifecycleError::Io("remote runtime owner operation failed".to_string(), error)
 }
 

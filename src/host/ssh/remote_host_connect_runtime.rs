@@ -543,7 +543,7 @@ fn read_passwords_from_stdin() -> Result<StdinPasswords, LifecycleError> {
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 fn default_profile_name(host: &str, ssh_user: &str) -> String {
-    format!("{}@{}", ssh_user, host)
+    format!("{ssh_user}@{host}")
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.

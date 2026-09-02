@@ -164,7 +164,7 @@ fn sanitize_path_component(value: &str) -> String {
 fn registry_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> LifecycleError {
     LifecycleError::Io(
         "remote workspace socket registry operation failed".to_string(),
-        io::Error::new(ErrorKind::Other, error.into().to_string()),
+        io::Error::other(error.into().to_string()),
     )
 }
 

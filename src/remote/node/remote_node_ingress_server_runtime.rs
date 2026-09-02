@@ -595,7 +595,7 @@ pub(crate) fn notify_authority_socket_ready(
         RatatuiLocalTargetFactory,
         RatatuiLocalAuthorityHostBackend,
     >::ensure_owner_running("__shared__", network)
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut stream = RemoteControlStream::connect(&remote_node_ingress_owner_addr(network))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let id_string = authority_endpoint_id_string(addr, marker);
@@ -612,7 +612,7 @@ pub(crate) fn notify_authority_socket_ready(
         AuthoritySocketReadyReply {
             status: AuthoritySocketReadyStatus::Error,
             message,
-        } => Err(io::Error::new(io::ErrorKind::Other, message)),
+        } => Err(io::Error::other(message)),
     }
 }
 
@@ -1522,6 +1522,10 @@ impl Drop for RemoteNodeIngressServerGuard {
     }
 }
 
+// InternalEvent is ~608 bytes vs 72 for the transport variant. Boxing it would
+// touch every send/match site; the enum is only transferred across this
+// runtime's internal channel, so the size is accepted.
+#[allow(clippy::large_enum_variant)]
 enum IngressServerEvent {
     Transport(RemoteNodeTransportEvent),
     Internal(InternalEvent),
@@ -2404,7 +2408,7 @@ fn write_create_session_rejected_to_stream(
             },
         },
     )
-    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))
+    .map_err(|error| io::Error::other(error.to_string()))
 }
 
 fn local_create_session_rejected_grpc_envelope(
@@ -3886,6 +3890,6 @@ where
 {
     LifecycleError::Io(
         "failed to run remote node ingress server".to_string(),
-        io::Error::new(io::ErrorKind::Other, error.to_string()),
+        io::Error::other(error.to_string()),
     )
 }

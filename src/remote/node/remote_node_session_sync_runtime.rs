@@ -715,7 +715,7 @@ where
             .map_err(|error| {
                 LifecycleError::Io(
                     "failed to create local target".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                    io::Error::other(error.to_string()),
                 )
             })
     }

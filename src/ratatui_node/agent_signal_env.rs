@@ -62,7 +62,7 @@ impl AgentSignalEnv {
     fn prompt_command(&self) -> Result<String, LifecycleError> {
         let cwd_cmd = self.cwd_command()?;
         match std::env::var("PROMPT_COMMAND") {
-            Ok(existing) if !existing.trim().is_empty() => Ok(format!("{}; {}", cwd_cmd, existing)),
+            Ok(existing) if !existing.trim().is_empty() => Ok(format!("{cwd_cmd}; {existing}")),
             _ => Ok(cwd_cmd),
         }
     }
@@ -70,7 +70,7 @@ impl AgentSignalEnv {
     fn cwd_command(&self) -> Result<String, LifecycleError> {
         let sender_path = extract_agent_signal_sender()?;
         let quoted = shell_single_quote(sender_path.to_string_lossy().as_ref());
-        Ok(format!("printf '%s' \"$PWD\" | {} cwd", quoted))
+        Ok(format!("printf '%s' \"$PWD\" | {quoted} cwd"))
     }
 }
 

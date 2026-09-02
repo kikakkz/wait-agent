@@ -624,7 +624,7 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
             .map_err(|error| {
                 LifecycleError::Io(
                     "failed to send create-authority-host-session event".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                    io::Error::other(error.to_string()),
                 )
             })?;
         let created = reply_rx
@@ -632,7 +632,7 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
             .map_err(|error| {
                 LifecycleError::Io(
                     "state event loop did not reply to create-authority-host-session".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                    io::Error::other(error.to_string()),
                 )
             })?
             .map_err(|error| {
@@ -708,7 +708,7 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
                 .map_err(|error| {
                     LifecycleError::Io(
                         "ratatui authority host sessions mutex poisoned".to_string(),
-                        io::Error::new(io::ErrorKind::Other, error.to_string()),
+                        io::Error::other(error.to_string()),
                     )
                 })?;
             guard.get(&session_name).cloned().ok_or_else(|| {
@@ -735,7 +735,7 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
             .map_err(|error| {
                 LifecycleError::Io(
                     "failed to set authority host output sender".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                    io::Error::other(error.to_string()),
                 )
             })?;
         let io_tx = self.shared.authority_host_io_sender();

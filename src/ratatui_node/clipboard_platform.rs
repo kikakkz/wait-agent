@@ -144,9 +144,9 @@ pub fn format_file_reference(path: &str, supports_at: bool) -> String {
         return path.to_string();
     }
     if path.contains(char::is_whitespace) {
-        format!("\"@{}\"", path)
+        format!("\"@{path}\"")
     } else {
-        format!("@{}", path)
+        format!("@{path}")
     }
 }
 

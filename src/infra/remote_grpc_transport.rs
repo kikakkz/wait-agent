@@ -281,8 +281,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     Err(error) => {
                         let t_fail = server_hello_start.elapsed();
                         ERROR_LOG.log_error(format!(
-                            "connect_outbound ServerHello error after {:?}: {}",
-                            t_fail, error
+                            "connect_outbound ServerHello error after {t_fail:?}: {error}"
                         ));
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
@@ -436,8 +435,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
             Ok(Err(error)) => {
                 let t_fail = t_start.elapsed();
                 ERROR_LOG.log_error(format!(
-                    "connect_outbound FAILED (started err) after {:?}: {}",
-                    t_fail, error
+                    "connect_outbound FAILED (started err) after {t_fail:?}: {error}"
                 ));
                 let _ = shutdown_tx.send(());
                 let _ = worker.join();
@@ -446,8 +444,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
             Err(_) => {
                 let t_fail = t_start.elapsed();
                 ERROR_LOG.log_error(format!(
-                    "connect_outbound FAILED (channel closed) after {:?}",
-                    t_fail
+                    "connect_outbound FAILED (channel closed) after {t_fail:?}"
                 ));
                 let _ = shutdown_tx.send(());
                 let _ = worker.join();
@@ -653,8 +650,7 @@ impl NodeSessionService for TransportNodeSessionService {
         } else {
             if operators.is_empty() {
                 ERROR_LOG.log_error(format!(
-                    "server: accepting node session for {} without operator authentication (no authorized keys)",
-                    node_id
+                    "server: accepting node session for {node_id} without operator authentication (no authorized keys)"
                 ));
             }
             None
@@ -742,8 +738,7 @@ impl NodeSessionService for TransportNodeSessionService {
                                     .is_err()
                                 {
                                     ERROR_LOG.log_error(format!(
-                                        "server reader: event_tx.send failed for node {}",
-                                        node_id
+                                        "server reader: event_tx.send failed for node {node_id}"
                                     ));
                                     break;
                                 }
@@ -753,8 +748,7 @@ impl NodeSessionService for TransportNodeSessionService {
                             }
                             Ok(Err(error)) => {
                                 ERROR_LOG.log_error(format!(
-                                    "server reader: inbound error for node {}: {}",
-                                    node_id, error
+                                    "server reader: inbound error for node {node_id}: {error}"
                                 ));
                                 let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                                     node_id: Some(node_id.clone()),
@@ -765,8 +759,7 @@ impl NodeSessionService for TransportNodeSessionService {
                             }
                             Err(_) => {
                                 ERROR_LOG.log_error(format!(
-                                    "server reader: heartbeat timeout for node {} session {}",
-                                    node_id, session_instance_id
+                                    "server reader: heartbeat timeout for node {node_id} session {session_instance_id}"
                                 ));
                                 let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                                     node_id: Some(node_id.clone()),
@@ -800,8 +793,7 @@ impl NodeSessionService for TransportNodeSessionService {
                         };
                         if response_tx.send(envelope).is_err() {
                             ERROR_LOG.log_error(format!(
-                                "server writer: response_tx.send failed for node {}",
-                                writer_node_id
+                                "server writer: response_tx.send failed for node {writer_node_id}"
                             ));
                             break;
                         }

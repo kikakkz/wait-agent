@@ -627,8 +627,7 @@ fn handle_authority_transport_stream(
     }
     session.flush_open_mirror();
     ERROR_LOG.log(format!(
-        "[ratatui-remote-session] authority reader started for {} writer_ready=true",
-        target_id
+        "[ratatui-remote-session] authority reader started for {target_id} writer_ready=true"
     ));
 
     let mut output_seq: u64 = 0;

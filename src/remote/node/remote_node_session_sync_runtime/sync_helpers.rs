@@ -1361,7 +1361,7 @@ where
 {
     LifecycleError::Io(
         "failed to start remote session sync runtime".to_string(),
-        io::Error::new(io::ErrorKind::Other, error.to_string()),
+        io::Error::other(error.to_string()),
     )
 }
 

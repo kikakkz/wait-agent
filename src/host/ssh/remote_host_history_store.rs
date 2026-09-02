@@ -220,11 +220,11 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         match host.preferred_remote_port {
             RemotePortPreference::Auto => push_string(&mut out, "preferred_remote_port", "auto"),
             RemotePortPreference::Port(port) => {
-                out.push_str(&format!("preferred_remote_port = {}\n", port));
+                out.push_str(&format!("preferred_remote_port = {port}\n"));
             }
         }
         if let Some(port) = host.last_remote_port {
-            out.push_str(&format!("last_remote_port = {}\n", port));
+            out.push_str(&format!("last_remote_port = {port}\n"));
         }
         if let Some(endpoint) = &host.last_endpoint {
             push_string(&mut out, "last_endpoint", endpoint);

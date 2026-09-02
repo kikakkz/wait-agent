@@ -723,7 +723,7 @@ fn handle_crossterm_event(
                     {
                         *error_log_state = None;
                         if let Some(target_id) = snapshot.active_target.as_deref() {
-                            let _ = writeln!(stream, "GET_HISTORY {}", target_id);
+                            let _ = writeln!(stream, "GET_HISTORY {target_id}");
                             let _ = stream.flush();
                         }
                     }
@@ -1654,8 +1654,7 @@ fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Re
         format!("[{}-{} / {}]", offset + 1, visible_bottom, total_lines)
     };
     let footer_text = format!(
-        "{}  ·  Enter/Esc/q close · Home/g top · End/G bottom · ↑↓/PgUp/PgDn scroll",
-        position_text
+        "{position_text}  ·  Enter/Esc/q close · Home/g top · End/G bottom · ↑↓/PgUp/PgDn scroll"
     );
     let footer = Paragraph::new(Line::from(vec![Span::styled(
         footer_text,
@@ -1694,7 +1693,7 @@ fn format_log_line(
     let hours = ((total_seconds / 3600) % 24) as u32;
     let minutes = ((total_seconds / 60) % 60) as u32;
     let seconds = (total_seconds % 60) as u32;
-    let time = format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
+    let time = format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}");
 
     let (level_text, level_fg, level_bg) = match level {
         LogLevel::Debug => (LogLevel::Debug.short(), Color::Black, Color::Gray),
@@ -1911,11 +1910,7 @@ fn render_settings_history(frame: &mut Frame, state: &SettingsState, area: Rect,
     let width = inner.width as usize;
     let height = inner.height as usize;
     let mut lines = Vec::new();
-    let start = if state.selected_history + 1 > height {
-        state.selected_history + 1 - height
-    } else {
-        0
-    };
+    let start = (state.selected_history + 1).saturating_sub(height);
     for (idx, value) in state.history.iter().enumerate().skip(start).take(height) {
         let is_selected = idx == state.selected_history;
         let style = if is_selected && focused {
@@ -2161,11 +2156,7 @@ fn render_sidebar_lines<'a>(
 
     // Visible rows with scrolling.
     let max_rows = height.saturating_sub(lines.len() + 2);
-    let start = if selected_index + 1 > max_rows {
-        selected_index + 1 - max_rows
-    } else {
-        0
-    };
+    let start = (selected_index + 1).saturating_sub(max_rows);
     for (idx, session) in sessions.iter().enumerate().skip(start).take(max_rows) {
         let is_selected = idx == selected_index;
         let is_current = active_target == Some(session.id.as_str());
@@ -2227,7 +2218,7 @@ fn render_session_row(
     let base_style = dim_style(base_style, dim_background);
 
     Line::from(vec![
-        Span::styled(format!("{} {}", marker, label), base_style),
+        Span::styled(format!("{marker} {label}"), base_style),
         Span::styled(
             badge.to_string(),
             badge_style(&session.task_state).patch(base_style),
@@ -2378,7 +2369,7 @@ fn render_footer_line(
 
     if let Some(connect) = &snapshot.footer.connect_endpoint {
         left_spans.push(Span::styled("· Connect ", accent_style));
-        left_spans.push(Span::styled(format!("{} ", connect), muted_style));
+        left_spans.push(Span::styled(format!("{connect} "), muted_style));
     }
     if snapshot.footer.remote_count > 0 {
         left_spans.push(Span::styled("· ", muted_style));
@@ -2394,8 +2385,7 @@ fn render_footer_line(
 
     let toggle_label = if sidebar_hidden { "Show" } else { "Hide" };
     let menu_text = format!(
-        "Ctrl-G {} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-H Sess · Ctrl-O Hist · Ctrl-E Logs · Ctrl-P Sett",
-        toggle_label
+        "Ctrl-G {toggle_label} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-H Sess · Ctrl-O Hist · Ctrl-E Logs · Ctrl-P Sett"
     );
 
     let left_width = left_spans

@@ -299,7 +299,7 @@ fn sign_with_key(
     let hash_alg = signing_hash_alg(&private_key.algorithm());
     let signature = private_key
         .sign(SSHSIG_NAMESPACE, hash_alg, challenge)
-        .map_err(|error| OperatorAuthError::SignatureFailed(format!("{:?}", error)))?;
+        .map_err(|error| OperatorAuthError::SignatureFailed(format!("{error:?}")))?;
 
     Ok((
         scheme,
