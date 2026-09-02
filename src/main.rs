@@ -8,6 +8,7 @@ mod event;
 mod host;
 mod infra;
 mod lifecycle;
+mod platform;
 mod ports;
 mod process;
 mod process_monitor;

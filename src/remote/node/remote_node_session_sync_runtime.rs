@@ -8,6 +8,11 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::{
+    cleanup_remote_listener, remote_ready_addr, remote_session_sync_owner_addr,
+    remote_session_sync_startup_lock_path, RemoteControlAddr, RemoteControlListener,
+    RemoteControlStream,
+};
 use crate::process::current_executable::current_waitagent_executable;
 use crate::process::startup_lock::StartupLock;
 use crate::process::workspace::sidecar_process_runtime::{
@@ -21,8 +26,7 @@ use crate::remote::node::remote_node_session_runtime::GrpcAuthorityEvent;
 use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread;
@@ -153,7 +157,7 @@ pub(crate) struct SessionSyncAuthorityManager<F: LocalTargetFactory, A: LocalAut
 }
 
 pub(crate) struct SessionSyncAuthorityHost {
-    pub(crate) writer: Arc<Mutex<Option<UnixStream>>>,
+    pub(crate) writer: Arc<Mutex<Option<RemoteControlStream>>>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) writer_ready: Arc<Condvar>,
     pub(crate) bound_session_instance_id: String,
@@ -262,17 +266,17 @@ impl RemoteNodeSessionSyncRuntime {
         network: &RemoteNetworkConfig,
     ) -> Result<(), LifecycleError> {
         let _t_owner = std::time::Instant::now();
-        let socket_path = remote_session_sync_owner_socket_path(socket_name);
-        if remote_session_sync_owner_available(&socket_path) {
+        let addr = remote_session_sync_owner_addr(socket_name);
+        if remote_session_sync_owner_available(&addr) {
             return Ok(());
         }
-        let lock_path = owner_startup_lock_path(&socket_path);
+        let lock_path = remote_session_sync_startup_lock_path(socket_name);
         let Some(_startup_lock) =
             StartupLock::try_acquire(&lock_path).map_err(remote_session_sync_error)?
         else {
             let _startup_lock =
                 StartupLock::acquire(&lock_path).map_err(remote_session_sync_error)?;
-            if remote_session_sync_owner_available(&socket_path) {
+            if remote_session_sync_owner_available(&addr) {
                 return Ok(());
             }
             return Err(LifecycleError::Protocol(format!(
@@ -280,27 +284,27 @@ impl RemoteNodeSessionSyncRuntime {
                 lock_path.display()
             )));
         };
-        if remote_session_sync_owner_available(&socket_path) {
+        if remote_session_sync_owner_available(&addr) {
             return Ok(());
         }
-        if socket_path.exists() {
-            crate::infra::best_effort::remove_file(&socket_path);
-        }
+        cleanup_remote_listener(&addr);
         let current_executable = current_waitagent_executable()?;
-        let ready_socket = remote_session_sync_owner_ready_socket_path(&socket_path);
-        if ready_socket.exists() {
-            crate::infra::best_effort::remove_file(&ready_socket);
-        }
+
+        let ready_addr = remote_ready_addr();
         let ready_listener =
-            UnixListener::bind(&ready_socket).map_err(remote_session_sync_error)?;
+            RemoteControlListener::bind(&ready_addr).map_err(remote_session_sync_error)?;
+        // On Windows the listener resolves the ephemeral port; the child must be
+        // handed the concrete address, not the pre-bind `127.0.0.1:0`.
+        let bound_ready_addr = ready_listener.local_addr().clone();
         let child = spawn_waitagent_sidecar_child(
             &current_executable,
-            remote_session_sync_owner_args(socket_name, network, Some(&ready_socket)),
+            remote_session_sync_owner_args(socket_name, network, Some(&bound_ready_addr)),
         )
         .map_err(remote_session_sync_error)?;
 
-        let ready = wait_for_remote_session_sync_owner_ready(ready_listener, &ready_socket, child);
-        crate::infra::best_effort::remove_file(&ready_socket);
+        let ready =
+            wait_for_remote_session_sync_owner_ready(ready_listener, &bound_ready_addr, child);
+        cleanup_remote_listener(&bound_ready_addr);
         ready?;
 
         Ok(())
@@ -314,8 +318,8 @@ impl RemoteNodeSessionSyncRuntime {
         if network.connect_endpoint_uri().is_none() {
             return Ok(());
         }
-        let socket_path = remote_session_sync_owner_socket_path(socket_name);
-        match notify_remote_session_sync_owner(&socket_path, reason.clone()) {
+        let addr = remote_session_sync_owner_addr(socket_name);
+        match notify_remote_session_sync_owner(&addr, reason.clone()) {
             Ok(()) => Ok(()),
             Err(first_error) => {
                 ERROR_LOG.log_error(format!(
@@ -325,7 +329,7 @@ impl RemoteNodeSessionSyncRuntime {
                     first_error
                 ));
                 Self::ensure_owner_running(socket_name, network)?;
-                notify_remote_session_sync_owner(&socket_path, reason)
+                notify_remote_session_sync_owner(&addr, reason)
             }
         }
     }
@@ -338,8 +342,8 @@ impl RemoteNodeSessionSyncRuntime {
         if network.connect_endpoint_uri().is_none() {
             return Ok(());
         }
-        let socket_path = remote_session_sync_owner_socket_path(socket_name);
-        match signal_remote_session_sync_owner(&socket_path, reason.clone()) {
+        let addr = remote_session_sync_owner_addr(socket_name);
+        match signal_remote_session_sync_owner(&addr, reason.clone()) {
             Ok(()) => Ok(()),
             Err(first_error) => {
                 ERROR_LOG.log_error(format!(
@@ -349,19 +353,10 @@ impl RemoteNodeSessionSyncRuntime {
                     first_error
                 ));
                 Self::ensure_owner_running(socket_name, network)?;
-                signal_remote_session_sync_owner(&socket_path, reason)
+                signal_remote_session_sync_owner(&addr, reason)
             }
         }
     }
-}
-
-fn owner_startup_lock_path(socket_path: &Path) -> PathBuf {
-    socket_path.with_extension("sock.lock")
-}
-
-fn remote_session_sync_owner_ready_socket_path(owner_socket_path: &Path) -> PathBuf {
-    let pid = std::process::id();
-    owner_socket_path.with_extension(format!("ready-{pid}.sock"))
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
@@ -373,7 +368,8 @@ fn notify_remote_session_sync_owner_ready(
     let Some(ready_socket) = ready_socket else {
         return Ok(());
     };
-    let mut stream = UnixStream::connect(ready_socket)?;
+    let addr = RemoteControlAddr::from_arg_string(ready_socket)?;
+    let mut stream = RemoteControlStream::connect(&addr)?;
     match result {
         Ok(()) => stream.write_all(b"ok\n")?,
         Err(error) => {
@@ -386,8 +382,8 @@ fn notify_remote_session_sync_owner_ready(
 }
 
 fn wait_for_remote_session_sync_owner_ready(
-    listener: UnixListener,
-    ready_socket: &Path,
+    listener: RemoteControlListener,
+    ready_addr: &RemoteControlAddr,
     mut child: std::process::Child,
 ) -> Result<(), LifecycleError> {
     enum SessionSyncOwnerReadyEvent {
@@ -433,7 +429,7 @@ fn wait_for_remote_session_sync_owner_ready(
         Ok(SessionSyncOwnerReadyEvent::Exited(Err(error))) => Err(remote_session_sync_error(error)),
         Err(_) => Err(LifecycleError::Protocol(format!(
             "remote session sync owner ready socket `{}` closed before reporting ready",
-            ready_socket.display()
+            ready_addr.to_arg_string()
         ))),
     }
 }

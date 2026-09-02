@@ -1,29 +1,47 @@
 // Legacy tmux-era authority connection runtime kept during the ratatui migration; most items are currently unused.
 
-use crate::infra::remote_protocol::{
-    ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
-};
+#[cfg(unix)]
+use crate::infra::remote_protocol::RawPtyInputPayload;
+use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope, RawPtyOutputPayload};
+use crate::infra::remote_transport_codec::RemoteTransportCodecError;
+#[cfg(unix)]
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, read_registration_frame, write_authority_transport_frame,
-    write_control_plane_envelope, AuthorityTransportFrame, RemoteTransportCodecError,
+    write_control_plane_envelope, AuthorityTransportFrame,
 };
+#[cfg(unix)]
 use crate::remote::main_slot::remote_main_slot_runtime::RemoteControlPlaneTransportError;
-use crate::remote::transport::{RemoteConnectionRegistry, RemoteControlPlaneConnection};
+use crate::remote::transport::RemoteConnectionRegistry;
+#[cfg(unix)]
+use crate::remote::transport::RemoteControlPlaneConnection;
 use std::fmt;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(unix)]
 const QUEUED_AUTHORITY_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(unix)]
 const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(unix)]
 const AUTHORITY_TRANSPORT_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(unix)]
 const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +81,7 @@ pub struct AuthorityConnectionListenerGuard {
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 struct SocketRemoteControlPlaneConnection {
     writer: Arc<Mutex<UnixStream>>,
     connected: Arc<AtomicBool>,
@@ -97,10 +116,12 @@ pub trait AuthorityConnectionStarter: Send + Sync {
 #[derive(Clone, Default)]
 pub struct LocalAuthoritySocketSource;
 
+#[cfg(unix)]
 pub struct QueuedAuthorityStreamSource {
     receiver: Mutex<Option<mpsc::Receiver<UnixStream>>>,
 }
 
+#[cfg(unix)]
 #[derive(Clone)]
 pub struct QueuedAuthorityStreamSink {
     sender: mpsc::Sender<UnixStream>,
@@ -109,6 +130,7 @@ pub struct QueuedAuthorityStreamSink {
 #[derive(Clone, Default)]
 pub struct LocalAuthoritySocketBridgeStarter;
 
+#[cfg(unix)]
 pub struct QueuedAuthorityStreamStarter {
     runtime: RemoteAuthorityConnectionRuntime<QueuedAuthorityStreamSource>,
 }
@@ -159,6 +181,7 @@ where
     }
 }
 
+#[cfg(unix)]
 impl QueuedAuthorityStreamSource {
     pub fn channel() -> (Self, QueuedAuthorityStreamSink) {
         let (sender, receiver) = mpsc::channel();
@@ -172,6 +195,7 @@ impl QueuedAuthorityStreamSource {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 impl QueuedAuthorityStreamStarter {
     pub fn channel() -> (Self, QueuedAuthorityStreamSink) {
@@ -185,6 +209,7 @@ impl QueuedAuthorityStreamStarter {
     }
 }
 
+#[cfg(unix)]
 pub fn spawn_authority_listener(
     request: AuthorityConnectionRequest,
     registry: RemoteConnectionRegistry,
@@ -222,6 +247,7 @@ pub fn spawn_authority_listener(
     Ok(AuthorityConnectionListenerGuard { socket_path })
 }
 
+#[cfg(unix)]
 pub fn register_authority_stream(
     stream: UnixStream,
     registry: RemoteConnectionRegistry,
@@ -238,6 +264,7 @@ pub fn register_authority_stream(
     )
 }
 
+#[cfg(unix)]
 pub(super) fn register_authority_stream_with_timeouts(
     mut stream: UnixStream,
     registry: RemoteConnectionRegistry,
@@ -486,6 +513,7 @@ impl Drop for AuthorityConnectionListenerGuard {
     }
 }
 
+#[cfg(unix)]
 impl AuthorityConnectionSource for LocalAuthoritySocketSource {
     type Guard = AuthorityConnectionListenerGuard;
 
@@ -499,10 +527,12 @@ impl AuthorityConnectionSource for LocalAuthoritySocketSource {
     }
 }
 
+#[cfg(unix)]
 pub struct QueuedAuthorityStreamSourceGuard {
     running: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 impl AuthorityConnectionSource for QueuedAuthorityStreamSource {
     type Guard = QueuedAuthorityStreamSourceGuard;
 
@@ -552,12 +582,14 @@ impl AuthorityConnectionSource for QueuedAuthorityStreamSource {
     }
 }
 
+#[cfg(unix)]
 impl Drop for QueuedAuthorityStreamSourceGuard {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
     }
 }
 
+#[cfg(unix)]
 impl QueuedAuthorityStreamSink {
     pub fn submit(&self, stream: UnixStream) -> Result<(), mpsc::SendError<UnixStream>> {
         self.sender.send(stream)
@@ -568,11 +600,13 @@ pub struct AuthorityStreamProducerGuard {
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 struct LocalAuthoritySocketBridgeGuard {
     _producer: AuthorityStreamProducerGuard,
     _source: QueuedAuthorityStreamSourceGuard,
 }
 
+#[cfg(unix)]
 impl AuthorityConnectionStarter for LocalAuthoritySocketBridgeStarter {
     fn start_connection(
         &self,
@@ -592,6 +626,7 @@ impl AuthorityConnectionStarter for LocalAuthoritySocketBridgeStarter {
     }
 }
 
+#[cfg(unix)]
 impl AuthorityConnectionStarter for QueuedAuthorityStreamStarter {
     fn start_connection(
         &self,
@@ -606,6 +641,7 @@ impl AuthorityConnectionStarter for QueuedAuthorityStreamStarter {
     }
 }
 
+#[cfg(unix)]
 pub fn spawn_authority_stream_producer(
     socket_path: PathBuf,
     sink: QueuedAuthorityStreamSink,
@@ -633,6 +669,7 @@ impl Drop for AuthorityStreamProducerGuard {
     }
 }
 
+#[cfg(unix)]
 impl RemoteControlPlaneConnection for SocketRemoteControlPlaneConnection {
     fn send(
         &self,
@@ -678,6 +715,7 @@ impl RemoteControlPlaneConnection for SocketRemoteControlPlaneConnection {
     }
 }
 
+#[cfg(unix)]
 fn write_transport_bytes_with_retries(writer: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
     let mut written = 0usize;
     let mut retries = 0usize;
@@ -742,5 +780,5 @@ impl From<RemoteTransportCodecError> for RemoteAuthorityConnectionError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod remote_authority_connection_runtime_test;

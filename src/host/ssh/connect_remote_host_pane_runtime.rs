@@ -24,8 +24,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
-use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use unicode_width::UnicodeWidthStr;
 
@@ -33,7 +32,6 @@ use unicode_width::UnicodeWidthStr;
 pub struct ConnectRemoteHostPaneRuntime {
     network: RemoteNetworkConfig,
     ratatui_port: Option<u16>,
-    ratatui_socket_path: Option<std::path::PathBuf>,
 }
 
 impl ConnectRemoteHostPaneRuntime {
@@ -41,17 +39,11 @@ impl ConnectRemoteHostPaneRuntime {
         Self {
             network,
             ratatui_port: None,
-            ratatui_socket_path: None,
         }
     }
 
     pub fn with_ratatui_port(mut self, port: u16) -> Self {
         self.ratatui_port = Some(port);
-        self
-    }
-
-    pub fn with_ratatui_socket_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.ratatui_socket_path = Some(path.into());
         self
     }
 
@@ -219,7 +211,6 @@ impl ConnectRemoteHostPaneRuntime {
                                 &command,
                                 &self.network,
                                 self.ratatui_port,
-                                self.ratatui_socket_path.as_deref(),
                             ) {
                                 Ok(_) => return Ok(()),
                                 Err(message) => state.status = Status::Error(message),
@@ -3428,11 +3419,7 @@ where
     Ok(profile)
 }
 
-fn run_ratatui_connect(
-    state: &ConnectRemoteHostState,
-    port: u16,
-    socket_path: &std::path::Path,
-) -> Result<String, String> {
+fn run_ratatui_connect(state: &ConnectRemoteHostState, port: u16) -> Result<String, String> {
     validate(state)?;
     let profile = ensure_connectable_profile(
         state,
@@ -3440,51 +3427,37 @@ fn run_ratatui_connect(
         &RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path()),
     )?;
 
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|error| format!("failed to connect to ratatui node on port {port}: {error}"))?;
-    writeln!(stream, "CONNECT_REMOTE_HOST {}", profile.name)
-        .map_err(|error| format!("failed to send connect command: {error}"))?;
-    stream
-        .flush()
-        .map_err(|error| format!("failed to flush connect command: {error}"))?;
-
-    let reader = stream
-        .try_clone()
-        .map_err(|error| format!("failed to clone node socket: {error}"))?;
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        reader
-            .read_line(&mut line)
-            .map_err(|error| format!("failed to read node response: {error}"))?;
-        let response = line.trim();
-        if response.is_empty() {
-            continue;
-        }
-        // The node server wraps command replies in `ServerMessageJson::Response`.
-        // Snapshots may also arrive on this socket while we wait, so skip them.
-        if let Ok(message) = serde_json::from_str::<ServerMessageJson>(response) {
-            match message {
-                ServerMessageJson::Response(resp) => {
-                    if resp.ok {
-                        return Ok("Connected. Press Esc to close.".to_string());
-                    }
-                    return Err(resp.message.unwrap_or_default());
+    let line = crate::platform::local_ipc::send_node_command(
+        port,
+        &format!("CONNECT_REMOTE_HOST {}", profile.name),
+    )
+    .map_err(|error| format!("failed to connect to ratatui node on port {port}: {error}"))?;
+    let response = line.trim();
+    if response.is_empty() {
+        return Err("empty response from ratatui node".to_string());
+    }
+    // The node server wraps command replies in `ServerMessageJson::Response`.
+    if let Ok(message) = serde_json::from_str::<ServerMessageJson>(response) {
+        match message {
+            ServerMessageJson::Response(resp) => {
+                if resp.ok {
+                    return Ok("Connected. Press Esc to close.".to_string());
                 }
-                ServerMessageJson::Snapshot(_) => continue,
-                ServerMessageJson::History(_) => continue,
+                return Err(resp.message.unwrap_or_default());
+            }
+            ServerMessageJson::Snapshot(_) | ServerMessageJson::History(_) => {
+                return Err("unexpected non-response from ratatui node".to_string());
             }
         }
-        // Plain-text fallback for older/simple replies.
-        if response.starts_with("OK") {
-            return Ok("Connected. Press Esc to close.".to_string());
-        }
-        return Err(response
-            .strip_prefix("ERR ")
-            .unwrap_or(response)
-            .to_string());
     }
+    // Plain-text fallback for older/simple replies.
+    if response.starts_with("OK") {
+        return Ok("Connected. Press Esc to close.".to_string());
+    }
+    Err(response
+        .strip_prefix("ERR ")
+        .unwrap_or(response)
+        .to_string())
 }
 
 fn run_connect(
@@ -3492,10 +3465,9 @@ fn run_connect(
     command: &ConnectRemoteHostPaneCommand,
     network: &RemoteNetworkConfig,
     ratatui_port: Option<u16>,
-    ratatui_socket_path: Option<&std::path::Path>,
 ) -> Result<String, String> {
-    if let (Some(port), Some(socket_path)) = (ratatui_port, ratatui_socket_path) {
-        return run_ratatui_connect(state, port, socket_path);
+    if let Some(port) = ratatui_port {
+        return run_ratatui_connect(state, port);
     }
 
     validate(state)?;

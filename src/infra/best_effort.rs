@@ -49,8 +49,3 @@ pub fn wait_child(child: std::process::Child) {
     let mut child = child;
     let _ = child.wait();
 }
-
-/// Shut down a Unix stream; ignore errors.
-pub fn shutdown_stream(stream: &std::os::unix::net::UnixStream) {
-    let _ = stream.shutdown(std::net::Shutdown::Both);
-}

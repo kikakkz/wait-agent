@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 use std::process::ExitCode;
 
@@ -46,7 +47,20 @@ fn run() -> io::Result<()> {
         &agent,
         &payload,
     );
-    UnixDatagram::unbound()?.send_to(message.as_bytes(), signal_socket)?;
+
+    #[cfg(unix)]
+    {
+        UnixDatagram::unbound()?.send_to(message.as_bytes(), signal_socket)?;
+    }
+
+    #[cfg(windows)]
+    {
+        use crate::domain::agent_signal::AgentSignalEnvelope;
+        let envelope: AgentSignalEnvelope = serde_json::from_str(&message)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        crate::platform::signal::send_agent_signal(&signal_socket, &envelope)?;
+    }
+
     Ok(())
 }
 

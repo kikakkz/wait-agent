@@ -2,15 +2,14 @@ use crate::cli::RemoteNetworkConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
+use crate::platform::local_ipc::{LocalIpcAddr, LocalStream};
 use crate::process::current_executable::current_waitagent_executable;
 use crate::process::session_leader::spawn_session_leader;
 use crate::ratatui_node::client_runtime::RatatuiClientRuntime;
 use crate::ratatui_node::node_runtime::{
-    node_is_running, ratatui_socket_dir, ratatui_socket_path, remove_node_socket,
-    send_node_command, ServerMessageJson,
+    node_is_running, ratatui_socket_dir, remove_node_socket, send_node_command, ServerMessageJson,
 };
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -56,8 +55,9 @@ impl RatatuiWorkspaceRuntime {
             )));
         }
 
-        let socket_path = ratatui_socket_path(port);
-        let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+        let ipc_addr = LocalIpcAddr::node(port);
+        let socket_path = ipc_addr.path();
+        let mut stream = LocalStream::connect(&ipc_addr).map_err(|error| {
             LifecycleError::Io(
                 format!(
                     "failed to connect to ratatui node socket {}",
@@ -258,7 +258,8 @@ impl RatatuiWorkspaceRuntime {
 
     fn start_node_server(&self) -> Result<(), LifecycleError> {
         let executable = current_waitagent_executable()?;
-        let socket_path = ratatui_socket_path(self.network.port);
+        let ipc_addr = crate::platform::local_ipc::LocalIpcAddr::node(self.network.port);
+        let socket_path = ipc_addr.path();
         let port = self.network.port;
 
         // Remove any stale socket left by a previous crash.
@@ -316,20 +317,7 @@ struct RatatuiServerListEntry {
 
 fn list_ratatui_servers() -> Vec<RatatuiServerListEntry> {
     let mut servers = Vec::new();
-    let Ok(entries) = std::fs::read_dir(ratatui_socket_dir()) else {
-        return servers;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if !name.ends_with(".sock") {
-            continue;
-        }
-        let port_str = name.trim_end_matches(".sock");
-        let Ok(port) = port_str.parse::<u16>() else {
-            continue;
-        };
+    for port in crate::platform::local_ipc::running_node_ports() {
         match query_server_status(port) {
             Ok(status) => servers.push(RatatuiServerListEntry {
                 port,
@@ -338,13 +326,13 @@ fn list_ratatui_servers() -> Vec<RatatuiServerListEntry> {
                 session_count: status.session_count,
             }),
             Err(_) => {
-                // Stale socket: remove it.
-                crate::infra::best_effort::remove_file(&path);
+                // Stale marker/socket: remove it.
+                crate::infra::best_effort::remove_file(
+                    crate::platform::local_ipc::LocalIpcAddr::node(port).path(),
+                );
             }
         }
     }
-
-    servers.sort_by(|a, b| a.port.cmp(&b.port));
     servers
 }
 

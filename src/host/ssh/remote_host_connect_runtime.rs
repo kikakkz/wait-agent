@@ -96,7 +96,7 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
             bootstrapper,
             target_registry,
             session_creation_service,
-            Arc::new(operator_auth::KeyringOperatorKeyStore),
+            operator_auth::default_operator_key_store(),
         )
     }
 

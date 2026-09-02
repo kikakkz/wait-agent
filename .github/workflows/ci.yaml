@@ -82,6 +82,45 @@ jobs:
       - name: cargo test
         run: cargo test --bin waitagent -- --test-threads=1
 
+  windows-check:
+    runs-on: windows-latest
+    env:
+      # Default CARGO_BUILD_JOBS=1 makes the Windows build impractically slow.
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+
+      - name: cargo check (Windows target)
+        run: cargo check --all-targets
+
+      - name: cargo clippy (Windows)
+        run: cargo clippy -- -D warnings
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+  windows-test:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo test (release)
+        run: cargo test --release -- --test-threads=1
+
   ai-check:
     runs-on: ubuntu-latest
     steps:

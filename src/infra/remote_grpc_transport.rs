@@ -1,4 +1,4 @@
-use crate::infra::operator_auth::{self, OperatorKeyStore};
+use crate::infra::operator_auth::{self};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
 use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
@@ -310,7 +310,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 };
 
                 if !server_hello.operator_challenge.is_empty() {
-                    let keystore = operator_auth::KeyringOperatorKeyStore;
+                    let keystore = operator_auth::default_operator_key_store();
                     let challenge = server_hello.operator_challenge.clone();
                     match keystore.sign_challenge(&challenge) {
                         Ok((auth_scheme, challenge_response)) => {

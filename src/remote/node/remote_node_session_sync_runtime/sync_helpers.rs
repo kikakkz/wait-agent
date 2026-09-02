@@ -19,6 +19,7 @@ use crate::infra::remote_protocol::{
 };
 
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlStream};
 use crate::remote::authority::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::remote::node::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
@@ -28,8 +29,8 @@ use crate::remote::publication::remote_target_publication_runtime::RemoteTargetP
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1463,7 +1464,7 @@ fn timestamp_now() -> prost_types::Timestamp {
 pub(super) fn remote_session_sync_owner_args(
     socket_name: &str,
     network: &RemoteNetworkConfig,
-    ready_socket: Option<&Path>,
+    ready_socket: Option<&RemoteControlAddr>,
 ) -> Vec<String> {
     let mut args = vec![
         "__remote-session-sync-owner".to_string(),
@@ -1472,28 +1473,21 @@ pub(super) fn remote_session_sync_owner_args(
     ];
     if let Some(ready_socket) = ready_socket {
         args.push("--ready-socket".to_string());
-        args.push(ready_socket.display().to_string());
+        args.push(ready_socket.to_arg_string());
     }
     prepend_global_network_args(args, network)
 }
 
-pub(crate) fn remote_session_sync_owner_socket_path(socket_name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "waitagent-remote-session-sync-owner-{}.sock",
-        super::sanitize_path_component(socket_name)
-    ))
-}
-
-pub(crate) fn remote_session_sync_owner_available(socket_path: &Path) -> bool {
-    send_owner_command(socket_path, "ping\n").is_ok()
+pub(crate) fn remote_session_sync_owner_available(addr: &RemoteControlAddr) -> bool {
+    send_owner_command(addr, "ping\n").is_ok()
 }
 
 pub(crate) fn notify_remote_session_sync_owner(
-    socket_path: &Path,
+    addr: &RemoteControlAddr,
     reason: LocalCatalogChangeReason,
 ) -> Result<(), LifecycleError> {
     send_owner_command(
-        socket_path,
+        addr,
         &format!("local-catalog-changed {}\n", reason.encode()),
     )
 }
@@ -1501,23 +1495,26 @@ pub(crate) fn notify_remote_session_sync_owner(
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 pub(crate) fn signal_remote_session_sync_owner(
-    socket_path: &Path,
+    addr: &RemoteControlAddr,
     reason: LocalCatalogChangeReason,
 ) -> Result<(), LifecycleError> {
     send_owner_command_without_response(
-        socket_path,
+        addr,
         &format!("local-catalog-changed {}\n", reason.encode()),
     )
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
-pub(crate) fn shutdown_remote_session_sync_owner(socket_path: &Path) -> Result<(), LifecycleError> {
-    send_owner_command(socket_path, "shutdown\n")
+pub(crate) fn shutdown_remote_session_sync_owner(
+    addr: &RemoteControlAddr,
+) -> Result<(), LifecycleError> {
+    send_owner_command(addr, "shutdown\n")
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
+#[cfg(unix)]
 pub(super) fn serve_owner_commands(
     listener: UnixListener,
     local_catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
@@ -1555,6 +1552,7 @@ pub(super) fn serve_owner_commands(
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
+#[cfg(unix)]
 fn request_local_catalog_change(
     local_catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
     reason: LocalCatalogChangeReason,
@@ -1585,6 +1583,7 @@ fn acknowledge_local_catalog_change(
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
+#[cfg(unix)]
 enum OwnerCommand {
     Ping,
     LocalCatalogChanged(LocalCatalogChangeReason),
@@ -1594,6 +1593,7 @@ enum OwnerCommand {
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
+#[cfg(unix)]
 fn parse_owner_command(request: &str) -> OwnerCommand {
     if request.is_empty() || request == "ping" {
         return OwnerCommand::Ping;
@@ -1609,8 +1609,8 @@ fn parse_owner_command(request: &str) -> OwnerCommand {
     OwnerCommand::Invalid("unknown-command".to_string())
 }
 
-fn send_owner_command(socket_path: &Path, command: &str) -> Result<(), LifecycleError> {
-    let mut stream = UnixStream::connect(socket_path).map_err(remote_session_sync_error)?;
+fn send_owner_command(addr: &RemoteControlAddr, command: &str) -> Result<(), LifecycleError> {
+    let mut stream = RemoteControlStream::connect(addr).map_err(remote_session_sync_error)?;
     stream
         .write_all(command.as_bytes())
         .map_err(remote_session_sync_error)?;
@@ -1634,10 +1634,10 @@ fn send_owner_command(socket_path: &Path, command: &str) -> Result<(), Lifecycle
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 fn send_owner_command_without_response(
-    socket_path: &Path,
+    addr: &RemoteControlAddr,
     command: &str,
 ) -> Result<(), LifecycleError> {
-    let mut stream = UnixStream::connect(socket_path).map_err(remote_session_sync_error)?;
+    let mut stream = RemoteControlStream::connect(addr).map_err(remote_session_sync_error)?;
     stream
         .write_all(command.as_bytes())
         .map_err(remote_session_sync_error)?;

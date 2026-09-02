@@ -10,7 +10,6 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options, Shell};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use super::agent_signal_env::AgentSignalEnv;
@@ -36,7 +35,7 @@ impl RatatuiLocalSession {
 
         tty::setup_env();
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = default_shell();
         let mut env = HashMap::new();
         let signal_env = AgentSignalEnv {
             socket_path: shared.agent_signal.socket_path.clone(),
@@ -82,8 +81,13 @@ impl RatatuiLocalSession {
             proxy.clone(),
         )));
 
-        let master_fd = pty.file().as_raw_fd();
-        let child_pid = pty.child().id() as i32;
+        let child_pid = pty.child().id();
+
+        #[cfg(unix)]
+        let master_fd = {
+            use std::os::fd::AsRawFd;
+            pty.file().as_raw_fd()
+        };
 
         let event_loop =
             EventLoop::new(term.clone(), proxy, pty, true, false).map_err(|error| {
@@ -102,11 +106,20 @@ impl RatatuiLocalSession {
 
         let session_for_pane_text = session.clone();
         if let Some(monitor) = shared.process_monitor() {
-            monitor.register_session(
+            #[cfg(unix)]
+            register_with_process_monitor(
+                &monitor,
                 session_id.clone(),
-                child_pid as u32,
+                child_pid,
                 master_fd,
-                Box::new(move || session_for_pane_text.last_visible_text(8)),
+                session_for_pane_text,
+            );
+            #[cfg(windows)]
+            register_with_process_monitor(
+                &monitor,
+                session_id.clone(),
+                child_pid,
+                session_for_pane_text,
             );
         }
 
@@ -413,6 +426,52 @@ impl EventListener for EventProxy {
             _ => {}
         }
     }
+}
+
+#[cfg(unix)]
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
+#[cfg(windows)]
+pub(crate) fn default_shell() -> String {
+    std::env::var("PSModulePath")
+        .ok()
+        .map(|_| "powershell.exe".to_string())
+        .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()))
+}
+
+#[cfg(unix)]
+fn register_with_process_monitor(
+    monitor: &crate::process_monitor::ProcessMonitor,
+    session_id: String,
+    child_pid: u32,
+    master_fd: std::os::fd::RawFd,
+    session: Arc<RatatuiLocalSession>,
+) {
+    monitor.register_session(
+        session_id,
+        child_pid,
+        master_fd,
+        Box::new(move || session.last_visible_text(8)),
+    );
+}
+
+#[cfg(windows)]
+fn register_with_process_monitor(
+    monitor: &crate::process_monitor::ProcessMonitor,
+    session_id: String,
+    child_pid: u32,
+    session: Arc<RatatuiLocalSession>,
+) {
+    // Windows local sessions use pipes without a PTY master (ConPTY is not
+    // implemented yet), so the monitor receives the placeholder PTY handle 0.
+    monitor.register_session(
+        session_id,
+        child_pid,
+        0,
+        Box::new(move || session.last_visible_text(8)),
+    );
 }
 
 /// Minimal `Dimensions` implementation for creating a `Term`.

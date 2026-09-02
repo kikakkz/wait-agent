@@ -12,7 +12,10 @@ use crate::remote::node::remote_node_session_sync_runtime::{
 use crate::remote::node::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
@@ -127,6 +130,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         })
     }
 
+    #[cfg(unix)]
     pub fn shutdown_socket_sidecars(&self, socket_name: &str) -> Result<(), LifecycleError> {
         let mut first_error = None;
         if let Err(error) = self
@@ -166,6 +170,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn signal_publication_agent_command_without_start(
         &self,
         socket_name: &str,
@@ -399,6 +404,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             .refresh_workspace_socket(socket_name, &self.current_executable)
     }
 
+    #[cfg(unix)]
     pub fn signal_source_session_closed(
         &self,
         socket_name: &str,

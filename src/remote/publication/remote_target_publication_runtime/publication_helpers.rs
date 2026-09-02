@@ -13,7 +13,10 @@ use crate::lifecycle::LifecycleError;
 use crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBinding;
 use base64::Engine;
 use std::collections::BTreeSet;
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::io::{ErrorKind, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::str;
@@ -239,30 +242,35 @@ pub(crate) fn socket_lifecycle_publication_action(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn publication_server_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn publication_agent_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn publication_sender_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn publication_owner_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn remote_target_publication_agent_socket_path(socket_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -272,6 +280,7 @@ pub(crate) fn remote_target_publication_agent_socket_path(socket_name: &str) -> 
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn remote_target_publication_server_command_socket_path(socket_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -280,6 +289,7 @@ pub(crate) fn remote_target_publication_server_command_socket_path(socket_name: 
     ))
 }
 
+#[cfg(unix)]
 pub(crate) fn remote_target_publication_owner_socket_path(
     socket_name: &str,
     target_session_name: &str,
@@ -291,6 +301,7 @@ pub(crate) fn remote_target_publication_owner_socket_path(
     ))
 }
 
+#[cfg(unix)]
 pub(crate) fn remote_target_publication_sender_socket_path(socket_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-publication-sender-{}.sock",
@@ -321,6 +332,7 @@ pub(crate) fn render_publication_agent_command(command: &PublicationAgentCommand
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn render_publication_sender_command(command: &PublicationSenderCommand) -> String {
     match command {
         PublicationSenderCommand::Stop => "stop\n".to_string(),
@@ -391,6 +403,7 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn render_publication_owner_command(command: PublicationOwnerCommand) -> &'static str {
     match command {
         PublicationOwnerCommand::Refresh => "refresh\n",
@@ -399,6 +412,7 @@ pub(crate) fn render_publication_owner_command(command: PublicationOwnerCommand)
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn render_publication_server_command(command: PublicationServerCommand) -> &'static str {
     match command {
@@ -407,6 +421,7 @@ pub(crate) fn render_publication_server_command(command: PublicationServerComman
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn signal_publication_server_command(
     socket_name: &str,
@@ -422,6 +437,7 @@ pub(crate) fn signal_publication_server_command(
     stream.flush().map_err(remote_target_publication_error)
 }
 
+#[cfg(unix)]
 pub(crate) fn signal_publication_owner_command(
     socket_name: &str,
     target_session_name: &str,
@@ -777,6 +793,7 @@ fn decode_optional_static_agent_field(value: &str) -> Result<Option<&'static str
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn drain_pending_publication_agent_commands(
     listener: &UnixListener,
@@ -794,6 +811,7 @@ pub(crate) fn drain_pending_publication_agent_commands(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn drain_pending_publication_agent_commands_nonblocking(
     listener: &UnixListener,
@@ -813,6 +831,7 @@ fn drain_pending_publication_agent_commands_nonblocking(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn drain_pending_publication_sender_commands(
     listener: &UnixListener,
@@ -830,6 +849,7 @@ pub(crate) fn drain_pending_publication_sender_commands(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn drain_pending_publication_sender_commands_nonblocking(
     listener: &UnixListener,
@@ -956,6 +976,7 @@ pub(crate) fn parse_publication_server_command(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn drain_publication_server_commands(
     listener: &UnixListener,
@@ -982,6 +1003,7 @@ pub(crate) fn drain_publication_server_commands(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn drain_publication_owner_commands(
     listener: &UnixListener,
@@ -1128,6 +1150,7 @@ pub(crate) fn published_remote_target_record_from_payload(
     })
 }
 
+#[cfg(unix)]
 pub(crate) fn signal_publication_sender_live_session_registered(
     socket_name: &str,
     target_session_name: &str,
@@ -1146,6 +1169,7 @@ pub(crate) fn signal_publication_sender_live_session_registered(
     )
 }
 
+#[cfg(unix)]
 pub(crate) fn signal_publication_sender_live_session_unregistered(
     socket_name: &str,
     target_session_name: &str,
@@ -1159,6 +1183,7 @@ pub(crate) fn signal_publication_sender_live_session_unregistered(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn signal_publication_sender_live_session_refreshed(
     socket_name: &str,
@@ -1173,6 +1198,7 @@ pub(crate) fn signal_publication_sender_live_session_refreshed(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn signal_publication_target_published(
     socket_name: &str,
@@ -1204,6 +1230,7 @@ pub(crate) fn signal_publication_target_published(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) fn signal_publication_target_exited(
     socket_name: &str,
@@ -1221,6 +1248,7 @@ pub(crate) fn signal_publication_target_exited(
     )
 }
 
+#[cfg(unix)]
 pub(crate) fn signal_publication_sender_command(
     socket_name: &str,
     command: PublicationSenderCommand,

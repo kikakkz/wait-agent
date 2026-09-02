@@ -2,11 +2,14 @@
 
 use crate::cli::RemoteNetworkConfig;
 use crate::lifecycle::LifecycleError;
+#[cfg(unix)]
 use crate::remote::publication::remote_target_publication_runtime::{
     signal_publication_sender_live_session_registered,
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +43,7 @@ pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
     fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError>;
 }
 
+#[cfg(unix)]
 impl<B> RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime<B>
 where
     B: crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend,
@@ -145,6 +149,7 @@ pub fn authority_diag_path(transport_socket_path: &str, target_id: &str) -> Path
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn send_pane_died_event(event_socket_path: &str, pane_id: &str) {
     if let Ok(mut stream) = UnixStream::connect(event_socket_path) {

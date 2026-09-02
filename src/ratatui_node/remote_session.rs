@@ -9,16 +9,18 @@ use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::{
+    authority_transport_addr, authority_transport_marker_path, bind_authority_endpoint,
+    AuthorityEndpointListener, RemoteControlStream,
+};
 use crate::ratatui_node::runtime::SharedState;
 use crate::ratatui_node::state_event::StateEvent;
-use crate::remote::authority::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::remote::node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::remote::node::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::remote::observer::RemoteObserverRuntime;
 use crate::remote::publication::remote_transport_runtime::LocalNodeMailbox;
 use std::io::Write;
 use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -34,8 +36,8 @@ pub struct RatatuiRemoteSession {
     pub session_id: String,
     pub authority_node_id: String,
     observer: Mutex<RemoteObserverRuntime>,
-    writer: Mutex<Option<UnixStream>>,
-    listener: Mutex<Option<UnixListener>>,
+    writer: Mutex<Option<RemoteControlStream>>,
+    listener: Mutex<Option<AuthorityEndpointListener>>,
     running: Arc<AtomicBool>,
     closed: AtomicBool,
     opened: AtomicBool,
@@ -81,23 +83,15 @@ impl RatatuiRemoteSession {
         let target_id = target.address.qualified_target();
         let session_id = target.address.session_id().to_string();
         let authority_node_id = target.address.authority_id().to_string();
-        let socket_path = authority_transport_socket_path(socket_name, &session_id, &target_id);
-
-        if socket_path.exists() {
-            crate::infra::best_effort::remove_file(&socket_path);
-        }
-        if let Some(parent) = socket_path.parent() {
-            crate::infra::best_effort::create_dir_all(parent);
-        }
-        let listener = UnixListener::bind(&socket_path).map_err(|error| {
+        let addr = authority_transport_addr(socket_name, &session_id, &target_id);
+        let marker = authority_transport_marker_path(socket_name, &session_id, &target_id);
+        let listener = bind_authority_endpoint(&addr, &marker).map_err(|error| {
             LifecycleError::Io(
-                format!(
-                    "failed to bind ratatui remote authority socket {}",
-                    socket_path.display()
-                ),
+                format!("failed to bind ratatui remote authority endpoint {addr}"),
                 error,
             )
         })?;
+        let resolved_addr = listener.local_addr().clone();
 
         let observer = RemoteObserverRuntime::new(LocalNodeMailbox::default(), 80, 24);
         let session = Arc::new(Self {
@@ -127,7 +121,8 @@ impl RatatuiRemoteSession {
             authority_node_id.clone(),
         );
 
-        if let Err(error) = notify_authority_socket_ready(network, &authority_node_id, &socket_path)
+        if let Err(error) =
+            notify_authority_socket_ready(network, &authority_node_id, &resolved_addr, &marker)
         {
             ERROR_LOG.log(format!(
                 "[ratatui-remote-session] failed to notify ingress owner for {target_id}: {error}"
@@ -591,7 +586,7 @@ fn signal_connected(session: &RatatuiRemoteSession, result: Result<(), Lifecycle
 }
 
 fn handle_authority_transport_stream(
-    mut stream: UnixStream,
+    mut stream: RemoteControlStream,
     session: Arc<RatatuiRemoteSession>,
     target_id: &str,
     _session_id: &str,
@@ -769,9 +764,10 @@ mod remote_session_tests {
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
+    use crate::platform::remote_ipc::{remote_ready_addr, RemoteControlListener};
     use crate::ratatui_node::runtime::SharedState;
     use std::io::{ErrorKind, Read};
-    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     fn test_record(session_id: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
@@ -807,15 +803,15 @@ mod remote_session_tests {
         assert_eq!(session.target_id, record.address.qualified_target());
         assert_eq!(session.session_id, record.address.session_id());
 
-        let socket_path =
-            authority_transport_socket_path(&socket_name, &session.session_id, &session.target_id);
+        let endpoint_file =
+            authority_endpoint_file(&socket_name, &session.session_id, &session.target_id);
         assert!(
-            socket_path.exists(),
-            "authority transport socket should be bound"
+            endpoint_file.exists(),
+            "authority transport endpoint should be bound"
         );
 
         session.stop();
-        crate::infra::best_effort::remove_file(&socket_path);
+        crate::infra::best_effort::remove_file(&endpoint_file);
     }
 
     #[test]
@@ -838,13 +834,13 @@ mod remote_session_tests {
             "observer screen should contain bootstrap content, got: {lines:?}"
         );
 
-        let socket_path =
-            authority_transport_socket_path(&socket_name, &session.session_id, &session.target_id);
+        let endpoint_file =
+            authority_endpoint_file(&socket_name, &session.session_id, &session.target_id);
         session.stop();
-        crate::infra::best_effort::remove_file(&socket_path);
+        crate::infra::best_effort::remove_file(&endpoint_file);
     }
 
-    fn drain_stream(stream: &mut UnixStream) -> Vec<u8> {
+    fn drain_stream(stream: &mut RemoteControlStream) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
         loop {
@@ -852,6 +848,7 @@ mod remote_session_tests {
                 Ok(0) => break,
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == ErrorKind::TimedOut => break,
                 Err(error) => panic!("stream read failed: {error}"),
             }
         }
@@ -867,8 +864,15 @@ mod remote_session_tests {
         let session = RatatuiRemoteSession::open(&record, &socket_name, &network, &shared, None)
             .expect("open remote session");
 
-        let (mut server, client) = UnixStream::pair().expect("stream pair");
-        server.set_nonblocking(true).expect("set nonblocking");
+        let ready_addr = remote_ready_addr();
+        let listener = RemoteControlListener::bind(&ready_addr).expect("listener binds");
+        let client = RemoteControlStream::connect(listener.local_addr()).expect("client connects");
+        let (mut server, _) = listener.accept().expect("server accepts");
+        drop(listener);
+        crate::platform::remote_ipc::cleanup_remote_listener(&ready_addr);
+        server
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set read timeout");
         *session.writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
 
         assert!(session.resize(80, 24), "first resize should send a frame");
@@ -895,9 +899,29 @@ mod remote_session_tests {
             "different-size resize should produce data"
         );
 
-        let socket_path =
-            authority_transport_socket_path(&socket_name, &session.session_id, &session.target_id);
+        let endpoint_file =
+            authority_endpoint_file(&socket_name, &session.session_id, &session.target_id);
         session.stop();
-        crate::infra::best_effort::remove_file(&socket_path);
+        crate::infra::best_effort::remove_file(&endpoint_file);
+    }
+
+    /// The endpoint's on-disk identity file: the UDS socket path on Unix, the
+    /// `.port` marker on Windows.
+    fn authority_endpoint_file(
+        socket_name: &str,
+        session_id: &str,
+        target_id: &str,
+    ) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            authority_transport_addr(socket_name, session_id, target_id)
+                .unix_path()
+                .expect("authority endpoint should be a unix socket path")
+                .clone()
+        }
+        #[cfg(windows)]
+        {
+            authority_transport_marker_path(socket_name, session_id, target_id)
+        }
     }
 }

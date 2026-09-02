@@ -1,7 +1,7 @@
 use crate::infra::error_log::ERROR_LOG;
+use crate::platform::local_ipc::LocalStream;
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 /// Requests accepted by the single `ClientWriter` thread.
@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 #[derive(Debug)]
 pub(crate) enum ClientWriterRequest {
     /// Store a new client stream and associate it with the given id.
-    Register { client_id: u64, stream: UnixStream },
+    Register { client_id: u64, stream: LocalStream },
     /// Write a single line payload to one client.
     Write { client_id: u64, payload: String },
     /// Write a single line payload to every registered client.
@@ -45,7 +45,7 @@ impl ClientWriter {
     }
 
     fn run(rx: Receiver<ClientWriterRequest>) {
-        let mut clients: HashMap<u64, UnixStream> = HashMap::new();
+        let mut clients: HashMap<u64, LocalStream> = HashMap::new();
         while let Ok(request) = rx.recv() {
             match request {
                 ClientWriterRequest::Register { client_id, stream } => {
@@ -77,7 +77,7 @@ impl ClientWriter {
                 }
                 ClientWriterRequest::Unregister { client_id } => {
                     if let Some(stream) = clients.remove(&client_id) {
-                        crate::infra::best_effort::shutdown_stream(&stream);
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
                 }
             }

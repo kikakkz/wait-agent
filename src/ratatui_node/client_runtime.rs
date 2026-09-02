@@ -3,6 +3,7 @@ use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRun
 use crate::infra::error_log::{LogLevel, ERROR_LOG};
 use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
+use crate::platform::local_ipc::{LocalIpcAddr, LocalStream};
 use crate::ratatui_node::clipboard_classifier::{classify_text, ClipboardContent};
 use crate::ratatui_node::clipboard_paste::{
     dispatch_paste, run_paste_job, PasteAction, PasteContext, PasteJob, PasteJobResult,
@@ -13,8 +14,7 @@ use crate::ratatui_node::logical_key::KeyCode as LogicalKeyCode;
 use crate::ratatui_node::logical_key::KeyModifiers as LogicalKeyModifiers;
 use crate::ratatui_node::logical_key::LogicalKey;
 use crate::ratatui_node::node_runtime::{
-    ratatui_socket_path, ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson,
-    SessionView,
+    ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson, SessionView,
 };
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver};
@@ -35,7 +35,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 /// Ratatui TUI client: connects to a server's node and renders the workspace chrome.
@@ -59,14 +58,15 @@ impl RatatuiClientRuntime {
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
-        let socket_path = ratatui_socket_path(self.port);
+        let ipc_addr = LocalIpcAddr::node(self.port);
+        let socket_path = ipc_addr.path();
         ERROR_LOG.log(format!(
             "[ratatui-client] connecting to socket={} port={}",
             socket_path.display(),
             self.port
         ));
 
-        let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+        let mut stream = LocalStream::connect(&ipc_addr).map_err(|error| {
             LifecycleError::Io(
                 format!(
                     "failed to connect to ratatui node socket {}",
@@ -228,7 +228,7 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
 }
 
 /// Send a PASTE_TEXT command with the given text to the server.
-fn send_paste_text(stream: &mut UnixStream, target_id: &str, text: &str) {
+fn send_paste_text(stream: &mut LocalStream, target_id: &str, text: &str) {
     let encoded = general_purpose::STANDARD.encode(text.as_bytes());
     let _ = writeln!(stream, "PASTE_TEXT {target_id} {encoded}");
     let _ = stream.flush();
@@ -240,7 +240,7 @@ fn send_paste_text(stream: &mut UnixStream, target_id: &str, text: &str) {
 /// enqueued on the clipboard worker thread.
 fn apply_paste_action(
     action: PasteAction,
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     paste_job_tx: &crossbeam_channel::Sender<PasteJob>,
     status_message: &mut Option<(String, Instant)>,
 ) {
@@ -264,7 +264,7 @@ fn apply_paste_action(
 /// Apply the result of a background paste job.
 fn apply_paste_job_result(
     result: PasteJobResult,
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     status_message: &mut Option<(String, Instant)>,
 ) {
     match result {
@@ -296,7 +296,7 @@ fn spawn_clipboard_read(tx: crossbeam_channel::Sender<Result<ClipboardReadResult
 }
 
 /// Send a RESIZE command with the current main-pane size to the server.
-fn send_main_pane_resize(stream: &mut UnixStream, sidebar_hidden: bool) {
+fn send_main_pane_resize(stream: &mut LocalStream, sidebar_hidden: bool) {
     let raw_size = terminal_size();
     let (cols, rows) = match raw_size {
         Ok((cols, rows)) => main_pane_size(cols, rows, sidebar_hidden),
@@ -316,10 +316,7 @@ fn run_connect_popup<F>(
 where
     F: FnMut(&mut Frame),
 {
-    let socket_path = ratatui_socket_path(port);
-    let runtime = ConnectRemoteHostPaneRuntime::new(network.clone())
-        .with_ratatui_port(port)
-        .with_ratatui_socket_path(socket_path);
+    let runtime = ConnectRemoteHostPaneRuntime::new(network.clone()).with_ratatui_port(port);
     let command = ConnectRemoteHostPaneCommand {
         current_socket_name: String::new(),
         current_session_name: "1".to_string(),
@@ -494,7 +491,7 @@ fn apply_server_message(
 /// Send the agent-specific session-management slash command for the active
 /// target. Each agent is responsible for its own session picker / resume UI.
 fn send_agent_session_command(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     snapshot: &RatatuiSnapshot,
     status_message: &mut Option<(String, Instant)>,
 ) {
@@ -537,7 +534,7 @@ fn send_agent_session_command(
 /// Handle a single crossterm event. Returns `true` to continue the loop,
 struct HandleCrosstermEventArgs<'a> {
     terminal: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
-    stream: &'a mut UnixStream,
+    stream: &'a mut LocalStream,
     snapshot: &'a mut RatatuiSnapshot,
     prefix_pressed: &'a mut bool,
     focus: &'a mut Focus,
@@ -846,7 +843,7 @@ fn handle_crossterm_event(
 #[allow(clippy::too_many_arguments)]
 fn run_event_loop(
     mut terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
     crossterm_rx: Receiver<Event>,
@@ -1162,7 +1159,7 @@ fn handle_error_log_key(
 fn handle_settings_key(
     key: KeyEvent,
     settings_state: &mut Option<SettingsState>,
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     _snapshot: &RatatuiSnapshot,
     status_message: &mut Option<(String, Instant)>,
 ) -> Result<bool, LifecycleError> {
@@ -1271,7 +1268,7 @@ fn prev_settings_focus(focus: SettingsFocus) -> SettingsFocus {
 
 fn apply_settings(
     state: &mut SettingsState,
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     status_message: &mut Option<(String, Instant)>,
 ) -> Result<(), LifecycleError> {
     let endpoint = state.input.trim();
@@ -1286,7 +1283,7 @@ fn apply_settings(
 }
 
 fn send_set_public(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     endpoint: Option<String>,
     save: bool,
 ) -> Result<(), LifecycleError> {

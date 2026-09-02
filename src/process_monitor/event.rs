@@ -1,8 +1,8 @@
 /// Normalized process lifecycle events emitted by platform-specific sources.
 ///
-/// The Linux netlink connector, Windows ETW, and macOS libproc sources all
-/// translate their native events into this enum so the rest of waitagent can
-/// reason about sessions in a platform-agnostic way.
+/// The Linux netlink connector, Windows Toolhelp32 snapshot diffs, and macOS
+/// libproc sources all translate their native events into this enum so the
+/// rest of waitagent can reason about sessions in a platform-agnostic way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProcessEvent {
     /// A new process was created.

@@ -1,13 +1,13 @@
 use crate::domain::agent_detector::DetectorRegistry;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use crate::process_monitor::tree::SessionProcessTree;
-use std::os::unix::io::RawFd;
+use crate::process_monitor::PlatformPtyFd;
 
 /// Read the foreground process group of the PTY master fd.
 ///
 /// Returns `None` if the fd is not a TTY or the call fails.
 #[cfg(target_os = "linux")]
-pub(crate) fn foreground_pgid(pty_master_fd: RawFd) -> Option<u32> {
+pub(crate) fn foreground_pgid(pty_master_fd: PlatformPtyFd) -> Option<u32> {
     // SAFETY: `tcgetpgrp` is an async-signal-safe POSIX call; the fd is owned
     // by the session/IO loop and is only read here.
     let pgid = unsafe { libc::tcgetpgrp(pty_master_fd) };
@@ -20,7 +20,7 @@ pub(crate) fn foreground_pgid(pty_master_fd: RawFd) -> Option<u32> {
 
 /// Non-Unix stub: foreground process groups are not available.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn foreground_pgid(_pty_master_fd: RawFd) -> Option<u32> {
+pub(crate) fn foreground_pgid(_pty_master_fd: PlatformPtyFd) -> Option<u32> {
     None
 }
 
@@ -28,7 +28,7 @@ pub(crate) fn foreground_pgid(_pty_master_fd: RawFd) -> Option<u32> {
 /// process tree and PTY foreground group.
 pub(crate) fn derive_session_state(
     tree: &SessionProcessTree,
-    pty_master_fd: RawFd,
+    pty_master_fd: PlatformPtyFd,
     pane_text: &str,
 ) -> (Option<String>, ManagedSessionTaskState) {
     let fg_pgid = foreground_pgid(pty_master_fd);
@@ -58,7 +58,7 @@ pub(crate) fn derive_session_state(
     (Some(command_name), task_state)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

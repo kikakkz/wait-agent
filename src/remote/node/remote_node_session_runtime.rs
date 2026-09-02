@@ -1,6 +1,8 @@
 // Legacy tmux-era remote-node session runtime kept during the ratatui migration; most items are currently unused.
 
+#[cfg(unix)]
 use crate::domain::session_catalog::ManagedSessionRecord;
+#[cfg(unix)]
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body as GrpcBody;
@@ -14,6 +16,7 @@ use crate::infra::remote_grpc_proto::v1::{
     TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
     TargetPublished as GrpcTargetPublished,
 };
+#[cfg(unix)]
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
@@ -26,27 +29,41 @@ use crate::infra::remote_protocol::{
     ResizeAppliedPayload, TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
     TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
+use crate::infra::remote_transport_codec::RemoteTransportCodecError;
+#[cfg(unix)]
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
-    write_node_session_envelope, write_registration_frame, RemoteTransportCodecError,
+    write_node_session_envelope, write_registration_frame,
 };
+#[cfg(unix)]
 use crate::remote::authority::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
 use crate::remote::authority::remote_authority_transport_runtime::RemoteAuthorityCommand;
+#[cfg(unix)]
 use crate::remote::node::remote_node_transport_runtime::{
     read_client_hello, read_server_hello, write_client_hello, write_server_hello,
 };
+#[cfg(unix)]
 use crate::remote::publication::remote_target_publication_runtime::PublicationSenderCommand;
 use std::fmt;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::sync::{mpsc, Arc, Mutex};
+#[cfg(unix)]
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 const NODE_SESSION_SERVER_ID: &str = "waitagent-remote-node-session";
 
@@ -60,6 +77,7 @@ pub trait RemoteNodePublicationSink: Send + Sync + 'static {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub struct RemoteNodeSessionRuntime {
     node_id: String,
@@ -68,6 +86,7 @@ pub struct RemoteNodeSessionRuntime {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 enum RemoteNodeSessionTransport {
     Local(LocalRemoteNodeSessionTransport),
@@ -75,6 +94,7 @@ enum RemoteNodeSessionTransport {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 struct LocalRemoteNodeSessionTransport {
     reader: Mutex<UnixStream>,
@@ -83,6 +103,7 @@ struct LocalRemoteNodeSessionTransport {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 struct GrpcRemoteNodeSessionTransport {
     session: RemoteNodeSessionHandle,
@@ -108,6 +129,7 @@ pub(crate) enum GrpcAuthorityEvent {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteNodeAuthorityEvent {
@@ -120,6 +142,7 @@ pub(crate) enum RemoteNodeAuthorityEvent {
     CreateSessionRejected(CreateSessionRejectedPayload),
 }
 
+#[cfg(unix)]
 pub struct RemoteNodeSessionListenerGuard {
     socket_path: PathBuf,
 }
@@ -130,6 +153,7 @@ pub struct RemoteNodeSessionError {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 impl RemoteNodeSessionRuntime {
     pub fn connect(
@@ -560,6 +584,7 @@ impl RemoteNodeSessionRuntime {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn connect_local_node_session(
     socket_path: impl AsRef<Path>,
@@ -578,6 +603,7 @@ fn connect_local_node_session(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn grpc_authority_event_to_node_event(
     event: GrpcAuthorityEvent,
@@ -615,6 +641,7 @@ fn grpc_authority_event_to_node_event(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn connect_grpc_node_session(
     node_id: &str,
@@ -688,6 +715,7 @@ fn connect_grpc_node_session(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn recv_local_authority_event(
     transport: &LocalRemoteNodeSessionTransport,
@@ -698,6 +726,7 @@ fn recv_local_authority_event(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn map_local_authority_event(
     session_envelope: NodeSessionEnvelope,
@@ -1196,6 +1225,7 @@ fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub fn spawn_remote_node_session_listener(
     socket_path: PathBuf,
@@ -1249,6 +1279,7 @@ impl From<RemoteTransportCodecError> for RemoteNodeSessionError {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RemoteNodeSessionListenerGuard {
     fn drop(&mut self) {
         crate::infra::best_effort::remove_file(&self.socket_path);
@@ -1256,6 +1287,7 @@ impl Drop for RemoteNodeSessionListenerGuard {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn bridge_remote_node_session(
     mut transport_stream: UnixStream,
@@ -1281,6 +1313,7 @@ fn bridge_remote_node_session(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn forward_authority_from_local(
     mut reader: UnixStream,
@@ -1299,6 +1332,7 @@ fn forward_authority_from_local(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn forward_network_session(
     mut authority_writer: UnixStream,
@@ -1319,6 +1353,7 @@ fn forward_network_session(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn now_rfc3339_like() -> String {
     let millis = SystemTime::now()

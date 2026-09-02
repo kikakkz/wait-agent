@@ -1,8 +1,9 @@
 //! Cross-platform process monitoring for waitagent sessions.
 //!
 //! The public entry point is [`ProcessMonitor`]. On Linux it uses netlink proc
-//! events; other platforms currently fall back to no-op sources and should be
-//! implemented later (Windows: ETW, macOS: kqueue + libproc).
+//! events; on Windows it polls Toolhelp32 snapshots and diffs them into
+//! Fork/Exec/Exit events; macOS currently falls back to a no-op source and
+//! should be implemented later (kqueue + libproc).
 //!
 //! The Linux implementation uses a single unified event loop that polls the
 //! netlink socket (primary event source) and a timerfd (fallback refresh). When
@@ -11,6 +12,7 @@
 //! `/proc/<pid>/task/<pid>/children` so sessions still show the correct command
 //! name and task state.
 
+#[cfg(target_os = "linux")]
 use crate::domain::agent_detector::{first_argv_token, SHELL_NAMES};
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use crate::infra::error_log::ERROR_LOG;
@@ -21,11 +23,28 @@ use crate::process_monitor::tree::SessionProcessTree;
 use crate::ratatui_node::runtime::SharedState;
 use crate::ratatui_node::state_event::StateEvent;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::fs;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::time::Duration;
+use std::time::Instant;
+
+/// PTY master handle type used by the process monitor.
+///
+/// On Unix this is the raw fd of the PTY master. Windows local sessions use
+/// anonymous pipes without a PTY master (ConPTY is not implemented yet), so
+/// this is a plain placeholder that callers set to `0`; it is never
+/// dereferenced on Windows. A `usize` placeholder (rather than `c_void`) keeps
+/// the type `Send + Sync` and constructible.
+#[cfg(unix)]
+pub(crate) type PlatformPtyFd = std::os::fd::RawFd;
+/// See the Unix documentation above.
+#[cfg(windows)]
+pub(crate) type PlatformPtyFd = usize;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -45,24 +64,40 @@ use macos::MacOsProcessEventSource as PlatformSource;
 #[cfg(target_os = "windows")]
 use windows::WindowsProcessEventSource as PlatformSource;
 
+/// Platform implementation of `read_proc_cmdline`; the Unix version lives in
+/// this module below, the Windows Toolhelp32-based one in `windows.rs`.
+#[cfg(target_os = "windows")]
+pub(crate) use windows::read_proc_cmdline;
+
 /// Token used by the polling loop for the netlink socket.
+#[cfg(target_os = "linux")]
 const NETLINK_TOKEN: usize = 0;
 /// Token used by the polling loop for the fallback timerfd.
+#[cfg(target_os = "linux")]
 const TIMER_TOKEN: usize = 1;
 
 /// How often the fallback timer fires.
+#[cfg(target_os = "linux")]
 const FALLBACK_INTERVAL: Duration = Duration::from_secs(1);
 /// If a session has not received a netlink event in this time, refresh it from
 /// `/proc`. This is intentionally shorter than the timer interval so a single
 /// missed event does not immediately trigger a scan.
+#[cfg(target_os = "linux")]
 const NETLINK_STALE_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// How often the Windows event loop diffs Toolhelp32 snapshots.
+#[cfg(target_os = "windows")]
+const WINDOWS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Per-session tracking state used by the process monitor.
 struct SessionState {
     tree: SessionProcessTree,
-    pty_master_fd: RawFd,
+    pty_master_fd: PlatformPtyFd,
     last_command_name: Option<String>,
     last_task_state: ManagedSessionTaskState,
+    // Only read by the Linux fallback refresh; Windows/macOS write it from
+    // event handlers but never read it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     last_netlink_event: Option<Instant>,
     pane_text: Box<dyn Fn() -> String + Send>,
 }
@@ -79,6 +114,9 @@ pub(crate) struct ProcessMonitor {
     // refreshes when the process lacks CAP_NET_ADMIN.
     #[allow(dead_code)]
     source: Option<Arc<PlatformSource>>,
+    // Keep the timerfd alive for the lifetime of the monitor. Dropping it would
+    // close the kernel socket and stop the fallback timer.
+    #[cfg(target_os = "linux")]
     #[allow(dead_code)]
     timer_fd: Arc<OwnedFd>,
 }
@@ -102,6 +140,7 @@ impl ProcessMonitor {
                 None
             }
         };
+        #[cfg(target_os = "linux")]
         let timer_fd = Arc::new(start_fallback_timer()?);
 
         let sessions = Arc::new(Mutex::new(HashMap::<String, SessionState>::new()));
@@ -111,6 +150,7 @@ impl ProcessMonitor {
             sessions: sessions.clone(),
             pid_to_session: pid_to_session.clone(),
             source: source.clone(),
+            #[cfg(target_os = "linux")]
             timer_fd: timer_fd.clone(),
         };
 
@@ -118,7 +158,10 @@ impl ProcessMonitor {
 
         let running = Arc::new(AtomicBool::new(true));
         std::thread::spawn(move || {
+            #[cfg(target_os = "linux")]
             event_loop(source, timer_fd, sessions, pid_to_session, shared, running);
+            #[cfg(not(target_os = "linux"))]
+            event_loop(source, sessions, pid_to_session, shared, running);
         });
 
         Ok(monitor)
@@ -129,7 +172,7 @@ impl ProcessMonitor {
         &self,
         target_id: String,
         shell_pid: u32,
-        pty_master_fd: RawFd,
+        pty_master_fd: PlatformPtyFd,
         pane_text: Box<dyn Fn() -> String + Send>,
     ) {
         let (argv0, argv) = read_proc_cmdline(shell_pid);
@@ -206,13 +249,13 @@ pub(crate) fn read_proc_cmdline(pid: u32) -> (Option<String>, Option<Vec<String>
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "macos")]
 pub(crate) fn read_proc_cmdline(_pid: u32) -> (Option<String>, Option<Vec<String>>) {
     (None, None)
 }
 
 /// Read the direct children of `pid` from `/proc/<pid>/task/<pid>/children`.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_proc_children(pid: u32) -> Vec<u32> {
     let path = format!("/proc/{pid}/task/{pid}/children");
     let contents = fs::read_to_string(&path).unwrap_or_default();
@@ -220,11 +263,6 @@ fn read_proc_children(pid: u32) -> Vec<u32> {
         .split_whitespace()
         .filter_map(|s| s.parse::<u32>().ok())
         .collect()
-}
-
-#[cfg(not(unix))]
-fn read_proc_children(_pid: u32) -> Vec<u32> {
-    Vec::new()
 }
 
 /// Read the command line of the process currently in the PTY foreground.
@@ -235,7 +273,7 @@ fn read_proc_children(_pid: u32) -> Vec<u32> {
 /// preferred for continuous tracking.
 #[cfg(unix)]
 pub(crate) fn read_foreground_process_cmdline(
-    pty_master_fd: RawFd,
+    pty_master_fd: PlatformPtyFd,
 ) -> (Option<String>, Option<Vec<String>>) {
     // SAFETY: `tcgetpgrp` and `getpgid` are async-signal-safe POSIX calls; the
     // fd is owned by the session/IO loop and is only read here.
@@ -252,8 +290,10 @@ pub(crate) fn read_foreground_process_cmdline(
 
 #[cfg(not(unix))]
 pub(crate) fn read_foreground_process_cmdline(
-    _pty_master_fd: RawFd,
+    _pty_master_fd: PlatformPtyFd,
 ) -> (Option<String>, Option<Vec<String>>) {
+    // No PTY foreground process group on Windows (ConPTY is not implemented
+    // yet) and no libproc equivalent on macOS; return nothing.
     (None, None)
 }
 
@@ -299,14 +339,8 @@ fn start_fallback_timer() -> Result<OwnedFd, LifecycleError> {
     Ok(owned)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn start_fallback_timer() -> Result<OwnedFd, LifecycleError> {
-    Err(LifecycleError::Protocol(
-        "fallback timer not implemented for this platform".to_string(),
-    ))
-}
-
 /// Drain the timerfd so subsequent polls do not immediately return readable.
+#[cfg(target_os = "linux")]
 fn drain_timerfd(timer_fd: &OwnedFd) {
     let mut buf = [0u8; 8];
     // SAFETY: read on a valid non-blocking timerfd into a stack buffer.
@@ -391,7 +425,7 @@ fn event_loop(
                         match source.read_events(&mut netlink_events) {
                             Ok(count) => {
                                 if count > 0 {
-                                    handle_netlink_events(
+                                    handle_process_events(
                                         netlink_events,
                                         &sessions,
                                         &pid_to_session,
@@ -418,10 +452,10 @@ fn event_loop(
     ERROR_LOG.log("[process-monitor] unified event loop stopped".to_string());
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS no-op event loop until a native source (kqueue EVFILT_PROC) is added.
+#[cfg(target_os = "macos")]
 fn event_loop(
     _source: Option<Arc<PlatformSource>>,
-    _timer_fd: Arc<OwnedFd>,
     _sessions: Arc<Mutex<HashMap<String, SessionState>>>,
     _pid_to_session: Arc<Mutex<HashMap<u32, String>>>,
     _shared: Arc<SharedState>,
@@ -430,7 +464,56 @@ fn event_loop(
     // Non-Linux platforms fall back to no-op until a native source is added.
 }
 
-fn handle_netlink_events(
+/// Windows polling event loop driven by Toolhelp32 snapshot diffs.
+///
+/// Every [`WINDOWS_POLL_INTERVAL`] the source snapshots all processes and
+/// appends Fork/Exec/Exit diffs, which feed the same shared event handler as
+/// netlink events on Linux. The snapshot diff is both the event source and the
+/// refresh source: `fallback_refresh` is Linux-only because it rebuilds trees
+/// from `/proc/<pid>/task/<pid>/children`, which has no equivalent here.
+///
+/// Cost note: a full snapshot is typically a few hundred processes, so diffing
+/// every 500 ms is acceptable. Processes that start and exit within a single
+/// poll interval are missed; that matches the accuracy of a 500 ms poll.
+#[cfg(target_os = "windows")]
+fn event_loop(
+    source: Option<Arc<PlatformSource>>,
+    sessions: Arc<Mutex<HashMap<String, SessionState>>>,
+    pid_to_session: Arc<Mutex<HashMap<u32, String>>>,
+    shared: Arc<SharedState>,
+    running: Arc<AtomicBool>,
+) {
+    ERROR_LOG.log("[process-monitor] windows polling loop starting".to_string());
+    while running.load(Ordering::Relaxed) {
+        std::thread::sleep(WINDOWS_POLL_INTERVAL);
+        let Some(source) = source.as_ref() else {
+            continue;
+        };
+        let mut process_events = Vec::new();
+        match source.read_events(&mut process_events) {
+            Ok(count) => {
+                if count > 0 {
+                    handle_process_events(process_events, &sessions, &pid_to_session, &shared);
+                }
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[process-monitor] toolhelp snapshot diff error: {error}"
+                ));
+            }
+        }
+    }
+    ERROR_LOG.log("[process-monitor] windows polling loop stopped".to_string());
+}
+
+/// Apply normalized process events to the affected session trees and emit any
+/// resulting command name / task state changes.
+///
+/// Lock order: `pid_to_session` is acquired before `sessions`, matching
+/// [`ProcessMonitor::register_session`] and `fallback_refresh`.
+// On macOS no event source calls this yet; the allow is scoped to that stub.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn handle_process_events(
     events: Vec<ProcessEvent>,
     sessions: &Arc<Mutex<HashMap<String, SessionState>>>,
     pid_to_session: &Arc<Mutex<HashMap<u32, String>>>,
@@ -521,6 +604,7 @@ fn handle_netlink_events(
 /// proc connector is silent.
 ///
 /// Lock order: `pid_to_session` is acquired before `sessions` for each target.
+#[cfg(target_os = "linux")]
 fn fallback_refresh(
     sessions: &Arc<Mutex<HashMap<String, SessionState>>>,
     pid_to_session: &Arc<Mutex<HashMap<u32, String>>>,
@@ -555,6 +639,7 @@ fn fallback_refresh(
 /// resulting command name / task state changes.
 ///
 /// The caller must hold both locks: `pid_to_session` first, then `sessions`.
+#[cfg(target_os = "linux")]
 fn refresh_session_from_proc(
     target_id: &str,
     state: &mut SessionState,
@@ -583,6 +668,7 @@ fn refresh_session_from_proc(
 }
 
 /// Recursively rebuild children of `parent_pid` into `state.tree`.
+#[cfg(target_os = "linux")]
 fn rebuild_children(
     target_id: &str,
     parent_pid: u32,

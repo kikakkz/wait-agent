@@ -33,7 +33,6 @@ crossterm = { version = "0.27.0", features = ["bracketed-paste"] }
 getrandom = "0.4"
 rand_core = "0.10"
 hmac = "0.13"
-libc = "0.2"
 pbkdf2 = "0.13"
 polling = "3.11"
 prost = "0.13"
@@ -46,14 +45,10 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pemfile = "2"
 ssh-key = { version = "0.7.0-rc.10", features = ["ed25519", "rsa", "encryption"] }
 tokio-rustls = "0.26"
-alacritty_terminal = "0.25"
-rustix = { version = "1.1", features = ["termios"] }
-rustix-openpty = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11"
 sha2 = "0.11"
-signal-hook = "0.3"
 thiserror = "1"
 tokio = { version = "1.43", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
@@ -61,7 +56,27 @@ tonic = { version = "0.12", features = ["transport", "tls"] }
 tower = "0.4"
 hyper-util = "0.1"
 unicode-width = "0.1.14"
-keyring = { version = "3", features = ["linux-native", "apple-native", "windows-native"] }
+alacritty_terminal = "0.25"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+rustix = { version = "1.1", features = ["termios"] }
+rustix-openpty = "0.2"
+signal-hook = "0.3"
+keyring = { version = "3", features = ["linux-native", "apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
 
 [features]
 # Enable to compile the loom model tests in src/ratatui_node/loom_tests.rs.
@@ -70,5 +85,6 @@ loom_test = []
 
 [build-dependencies]
 cc = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 protoc-bin-vendored = "3"
 tonic-build = "0.12"

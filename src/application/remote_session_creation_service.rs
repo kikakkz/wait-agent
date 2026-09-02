@@ -3,7 +3,6 @@ use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
-use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
     CreateSessionRequestPayload, NodeSessionChannel, NodeSessionEnvelope, ProtocolEnvelope,
@@ -17,7 +16,6 @@ use crate::ports::session_creation::{
 };
 use crate::ports::target_registry::TargetCatalogGateway;
 use std::fmt;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -63,8 +61,8 @@ impl RemoteSessionCreationTransport for GrpcRemoteSessionCreationTransport {
         request: CreateSessionRequestPayload,
         accept_timeout: Duration,
     ) -> Result<CreateSessionReply, Self::Error> {
-        let socket_path = remote_node_ingress_owner_socket_path(&self.network);
-        let mut stream = UnixStream::connect(socket_path)
+        let addr = crate::platform::remote_ipc::remote_node_ingress_owner_addr(&self.network);
+        let mut stream = crate::platform::remote_ipc::RemoteControlStream::connect(&addr)
             .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
         stream
             .set_read_timeout(Some(accept_timeout))

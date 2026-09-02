@@ -1,9 +1,11 @@
 fn main() {
+    #[cfg(not(windows))]
     compile_agent_signal_sender();
     compile_remote_grpc_proto();
     emit_version_info();
 }
 
+#[cfg(not(windows))]
 fn compile_agent_signal_sender() {
     println!("cargo:rerun-if-changed=src/process/agent_signal_sender_bundle.c");
     let out_dir =
@@ -47,13 +49,7 @@ fn emit_version_info() {
 
     let git_dirty = git_worktree_dirty();
 
-    let build_time = std::process::Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
+    let build_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let dirty_flag = if git_dirty { "-dirty" } else { "" };
     println!("cargo:rustc-env=WAITAGENT_VERSION_FULL={pkg_version} ({git_hash}{dirty_flag}) {build_time}");

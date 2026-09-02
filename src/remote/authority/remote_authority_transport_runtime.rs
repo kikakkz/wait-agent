@@ -11,34 +11,50 @@ use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
     write_registration_frame, AuthorityTransportFrame, RemoteTransportCodecError,
 };
+use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlStream};
 use crate::remote::authority::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
 use crate::remote::node::remote_node_transport_runtime::{
     read_client_hello, read_server_hello, write_client_hello, write_server_hello,
 };
 use std::fmt;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
+use std::sync::Mutex;
+#[cfg(unix)]
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::time::Instant;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 pub(crate) const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 const AUTHORITY_TRANSPORT_SERVER_ID: &str = "waitagent-main-slot";
 pub struct RemoteAuthorityTransportRuntime {
     node_id: String,
-    reader: Mutex<UnixStream>,
-    writer: Mutex<UnixStream>,
+    reader: Mutex<RemoteControlStream>,
+    writer: Mutex<RemoteControlStream>,
     next_message_id: AtomicU64,
 }
 
+#[cfg(unix)]
 pub struct AuthorityTransportListenerGuard {
     socket_path: PathBuf,
 }
@@ -82,15 +98,13 @@ pub struct SendRawPtyInputArgs<'a> {
     pub input_bytes: Vec<u8>,
 }
 
-// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
-#[allow(dead_code)]
 impl RemoteAuthorityTransportRuntime {
     pub fn connect(
-        socket_path: impl AsRef<Path>,
+        addr: &RemoteControlAddr,
         node_id: impl Into<String>,
     ) -> Result<Self, RemoteAuthorityTransportError> {
         let node_id = node_id.into();
-        let mut stream = UnixStream::connect(socket_path)?;
+        let mut stream = RemoteControlStream::connect(addr)?;
         write_client_hello(&mut stream, &node_id)?;
         let _server_hello = read_server_hello(&mut stream)?;
         let writer = stream.try_clone()?;
@@ -159,6 +173,7 @@ impl RemoteAuthorityTransportRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn send_pong(&self) -> Result<(), RemoteAuthorityTransportError> {
         self.send_transport_frame(AuthorityTransportFrame::Pong)
     }
@@ -215,6 +230,8 @@ impl RemoteAuthorityTransportRuntime {
         }))
     }
 
+    // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+    #[allow(dead_code)]
     pub fn send_sync_response(
         &self,
         session_id: &str,
@@ -230,6 +247,8 @@ impl RemoteAuthorityTransportRuntime {
         })
     }
 
+    // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+    #[allow(dead_code)]
     pub fn send_input_congestion(
         &self,
         congested: bool,
@@ -237,6 +256,8 @@ impl RemoteAuthorityTransportRuntime {
         self.send_transport_frame(AuthorityTransportFrame::InputCongestion(congested))
     }
 
+    // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+    #[allow(dead_code)]
     pub fn send_open_mirror_accepted(
         &self,
         session_id: &str,
@@ -254,6 +275,8 @@ impl RemoteAuthorityTransportRuntime {
         )
     }
 
+    // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+    #[allow(dead_code)]
     pub fn send_open_mirror_rejected(
         &self,
         session_id: &str,
@@ -351,6 +374,8 @@ impl RemoteAuthorityTransportRuntime {
         )
     }
 
+    // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+    #[allow(dead_code)]
     pub fn send_target_exited(
         &self,
         transport_session_id: &str,
@@ -508,6 +533,7 @@ fn command_from_control_plane_payload(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub fn spawn_authority_transport_listener(
     socket_path: PathBuf,
@@ -559,64 +585,15 @@ impl From<RemoteTransportCodecError> for RemoteAuthorityTransportError {
     }
 }
 
+#[cfg(unix)]
 impl Drop for AuthorityTransportListenerGuard {
     fn drop(&mut self) {
         crate::infra::best_effort::remove_file(&self.socket_path);
     }
 }
 
-pub fn authority_transport_socket_path(
-    socket_name: &str,
-    session_name: &str,
-    target: &str,
-) -> PathBuf {
-    let scope_hash = stable_socket_hash(&[socket_name, session_name]);
-    let authority_hash = stable_socket_hash(&[target_authority_id(target)]);
-    let target_hash = target_session_component(target);
-    std::env::temp_dir().join(format!(
-        "waitagent-remote-{scope_hash}-{authority_hash}-{target_hash}.sock",
-    ))
-}
-
 pub(crate) fn authority_target_component(authority_id: &str, session_id: &str) -> String {
-    stable_socket_hash(&[authority_id, ":", session_id])
-}
-
-fn target_authority_id(target: &str) -> &str {
-    split_target_identity(target)
-        .map(|(authority_id, _)| authority_id)
-        .unwrap_or(target)
-}
-
-fn target_session_component(target: &str) -> String {
-    split_target_identity(target)
-        .map(|(authority_id, session_id)| authority_target_component(authority_id, session_id))
-        .unwrap_or_else(|| stable_socket_hash(&[target]))
-}
-
-fn split_target_identity(target: &str) -> Option<(&str, &str)> {
-    let target = target
-        .strip_prefix("remote-peer:")
-        .or_else(|| target.strip_prefix("local-tmux:"))
-        .or_else(|| target.strip_prefix("local:"))
-        .or_else(|| target.strip_prefix("remote:"))
-        .unwrap_or(target);
-    let (authority_id, session_id) = target.rsplit_once(':')?;
-    if authority_id.is_empty() || session_id.is_empty() {
-        return None;
-    }
-    Some((authority_id, session_id))
-}
-
-fn stable_socket_hash(values: &[&str]) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for value in values {
-        for byte in value.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    format!("{hash:016x}")
+    crate::platform::remote_ipc::stable_socket_hash(&[authority_id, ":", session_id])
 }
 
 fn now_rfc3339_like() -> String {
@@ -628,6 +605,7 @@ fn now_rfc3339_like() -> String {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn bridge_authority_transport(
     mut transport_stream: UnixStream,
@@ -664,6 +642,7 @@ fn bridge_authority_transport(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn forward_authority_frames_to_control_plane(
     reader: UnixStream,
@@ -678,6 +657,7 @@ fn forward_authority_frames_to_control_plane(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn forward_authority_frames_to_control_plane_with_timeouts(
     mut reader: UnixStream,
@@ -749,6 +729,7 @@ fn forward_authority_frames_to_control_plane_with_timeouts(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn forward_control_plane_to_authority_frames(
     mut reader: UnixStream,
@@ -791,6 +772,7 @@ fn forward_control_plane_to_authority_frames(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn raw_pty_input_envelope(payload: RawPtyInputPayload) -> ProtocolEnvelope<ControlPlanePayload> {
     ProtocolEnvelope {
@@ -809,6 +791,7 @@ fn raw_pty_input_envelope(payload: RawPtyInputPayload) -> ProtocolEnvelope<Contr
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn raw_pty_output_envelope(payload: RawPtyOutputPayload) -> ProtocolEnvelope<ControlPlanePayload> {
     ProtocolEnvelope {
@@ -828,11 +811,11 @@ fn raw_pty_output_envelope(payload: RawPtyOutputPayload) -> ProtocolEnvelope<Con
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::{
-        authority_transport_socket_path, forward_authority_frames_to_control_plane_with_timeouts,
-        spawn_authority_transport_listener, RemoteAuthorityCommand,
-        RemoteAuthorityTransportRuntime,
+        forward_authority_frames_to_control_plane_with_timeouts, spawn_authority_transport_listener,
     };
+    use super::{RemoteAuthorityCommand, RemoteAuthorityTransportRuntime};
     use crate::infra::remote_protocol::{
         ClientHelloPayload, ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload,
         RawPtyOutputPayload,
@@ -840,6 +823,9 @@ mod tests {
     use crate::infra::remote_transport_codec::{
         read_authority_transport_frame, read_control_plane_envelope,
         write_authority_transport_frame, AuthorityTransportFrame,
+    };
+    use crate::platform::remote_ipc::{
+        authority_transport_addr, bind_authority_endpoint, RemoteControlAddr,
     };
     use crate::remote::authority::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityTransportEvent, QueuedAuthorityStreamSource,
@@ -851,16 +837,21 @@ mod tests {
     };
     use crate::remote::transport::{RegistryRemoteControlPlaneSink, RemoteConnectionRegistry};
 
-    use std::os::unix::net::{UnixListener, UnixStream};
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
     use std::process;
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
     #[test]
     fn authority_transport_socket_path_is_workspace_and_target_scoped() {
-        let path = authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1");
-        let rendered = path.to_string_lossy();
+        let addr = authority_transport_addr("wa-1", "workspace-1", "peer-a:shell-1");
+        let rendered = addr
+            .unix_path()
+            .expect("addr should be a unix path")
+            .to_string_lossy();
 
         assert!(rendered.contains("waitagent-remote-"));
         assert!(rendered.ends_with(".sock"));
@@ -869,8 +860,8 @@ mod tests {
 
     #[test]
     fn connect_sends_client_hello_and_accepts_server_hello() {
-        let socket_path = test_socket_path("hello");
-        let listener = UnixListener::bind(&socket_path).expect("listener should bind");
+        let (addr, marker) = test_authority_endpoint("hello");
+        let listener = bind_authority_endpoint(&addr, &marker).expect("listener should bind");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("listener should accept");
             let hello =
@@ -885,7 +876,7 @@ mod tests {
             (sender_id, payload)
         });
 
-        let _runtime = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
+        let _runtime = RemoteAuthorityTransportRuntime::connect(&addr, "peer-a")
             .expect("authority runtime should connect");
         let (sender_id, payload) = server.join().expect("server should join cleanly");
 
@@ -897,12 +888,13 @@ mod tests {
                 client_version: NODE_TRANSPORT_CLIENT_VERSION.to_string(),
             }
         );
-        crate::infra::best_effort::remove_file(&socket_path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn listener_bridges_authority_transport_into_registered_connection_runtime() {
         let socket_path = test_socket_path("bridge");
+        let addr = RemoteControlAddr::Unix(socket_path.clone());
         let (source, sink) = QueuedAuthorityStreamSource::channel();
         let runtime = RemoteAuthorityConnectionRuntime::new(source);
         let registry = RemoteConnectionRegistry::new();
@@ -920,7 +912,7 @@ mod tests {
         let _listener = spawn_authority_transport_listener(socket_path.clone(), sink)
             .expect("authority transport listener should bind");
 
-        let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
+        let transport = RemoteAuthorityTransportRuntime::connect(&addr, "peer-a")
             .expect("authority runtime should connect");
         assert_eq!(
             match rx
@@ -1027,6 +1019,7 @@ mod tests {
         crate::infra::best_effort::remove_file(&socket_path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn authority_bridge_keeps_forwarding_after_socket_idle_timeout() {
         let (mut transport_writer, transport_reader) =
@@ -1066,8 +1059,8 @@ mod tests {
 
     #[test]
     fn recv_command_consumes_keepalive_frames_before_command() {
-        let socket_path = test_socket_path("keepalive-command");
-        let listener = UnixListener::bind(&socket_path).expect("listener should bind");
+        let (addr, marker) = test_authority_endpoint("keepalive-command");
+        let listener = bind_authority_endpoint(&addr, &marker).expect("listener should bind");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("listener should accept");
             let _hello =
@@ -1093,7 +1086,7 @@ mod tests {
             .expect("raw input should encode");
         });
 
-        let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
+        let transport = RemoteAuthorityTransportRuntime::connect(&addr, "peer-a")
             .expect("authority runtime should connect");
         assert_eq!(
             transport.recv_command().expect("heartbeat should decode"),
@@ -1113,13 +1106,12 @@ mod tests {
             })
         );
         server.join().expect("server should join cleanly");
-        crate::infra::best_effort::remove_file(&socket_path);
     }
 
     #[test]
     fn recv_command_returns_sync_request_frame() {
-        let socket_path = test_socket_path("sync-request-command");
-        let listener = UnixListener::bind(&socket_path).expect("listener should bind");
+        let (addr, marker) = test_authority_endpoint("sync-request-command");
+        let listener = bind_authority_endpoint(&addr, &marker).expect("listener should bind");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("listener should accept");
             let _hello =
@@ -1136,7 +1128,7 @@ mod tests {
             .expect("sync request should encode");
         });
 
-        let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
+        let transport = RemoteAuthorityTransportRuntime::connect(&addr, "peer-a")
             .expect("authority runtime should connect");
         assert_eq!(
             transport.recv_command().expect("command should decode"),
@@ -1146,9 +1138,30 @@ mod tests {
             }
         );
         server.join().expect("server should join cleanly");
-        crate::infra::best_effort::remove_file(&socket_path);
     }
 
+    /// Cross-platform test endpoint: hashed-style Unix socket path plus the
+    /// `.port` marker on Unix; TCP loopback plus marker on Windows.
+    fn test_authority_endpoint(name: &str) -> (RemoteControlAddr, std::path::PathBuf) {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let marker = std::env::temp_dir().join(format!(
+            "waitagent-test-remote-authority-{name}-{}-{millis}.port",
+            process::id()
+        ));
+        #[cfg(unix)]
+        let addr = RemoteControlAddr::Unix(std::env::temp_dir().join(format!(
+            "waitagent-test-remote-authority-{name}-{}-{millis}.sock",
+            process::id()
+        )));
+        #[cfg(windows)]
+        let addr = RemoteControlAddr::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        (addr, marker)
+    }
+
+    #[cfg(unix)]
     fn test_socket_path(name: &str) -> std::path::PathBuf {
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)

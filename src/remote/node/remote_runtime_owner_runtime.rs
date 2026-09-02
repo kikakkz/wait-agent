@@ -8,21 +8,23 @@ use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
 
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::{
+    cleanup_remote_listener, remote_ready_addr, remote_runtime_owner_addr,
+    remote_runtime_owner_startup_lock_path, RemoteControlAddr, RemoteControlAsyncListener,
+    RemoteControlAsyncStream, RemoteControlListener, RemoteControlStream,
+};
 use crate::process::current_executable::current_waitagent_executable;
 use crate::process::startup_lock::StartupLock;
 use crate::process::workspace::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener as TokioUnixListener;
-use tokio::net::UnixStream as TokioUnixStream;
 use tokio::time::{sleep_until, Instant as TokioInstant};
 
 #[cfg(not(test))]
@@ -179,10 +181,8 @@ impl RemoteRuntimeOwnerRuntime {
     }
 
     pub fn run_owner(&self, command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
-        let socket_path = remote_runtime_owner_socket_path(&self.network);
-        if socket_path.exists() {
-            crate::infra::best_effort::remove_file(&socket_path);
-        }
+        let addr = remote_runtime_owner_addr(&self.network);
+        cleanup_remote_listener(&addr);
 
         let state = RemoteRuntimeOwnerSharedState {
             records: Arc::new(Mutex::new(HashMap::new())),
@@ -194,7 +194,7 @@ impl RemoteRuntimeOwnerRuntime {
 
         let runtime = tokio::runtime::Runtime::new().map_err(remote_runtime_owner_error)?;
         let listener = match runtime
-            .block_on(async { TokioUnixListener::bind(&socket_path) })
+            .block_on(async { RemoteControlAsyncListener::bind(&addr).await })
             .map_err(remote_runtime_owner_error)
         {
             Ok(listener) => {
@@ -219,14 +219,14 @@ impl RemoteRuntimeOwnerRuntime {
         let result = runtime.block_on(run_remote_runtime_owner_event_loop(listener, state.clone()));
 
         state.running.store(false, Ordering::Relaxed);
-        let _ = UnixStream::connect(&socket_path);
-        crate::infra::best_effort::remove_file(&socket_path);
+        let _ = RemoteControlStream::connect(&addr);
+        cleanup_remote_listener(&addr);
         result
     }
 }
 
 async fn run_remote_runtime_owner_event_loop(
-    listener: TokioUnixListener,
+    listener: RemoteControlAsyncListener,
     state: RemoteRuntimeOwnerSharedState,
 ) -> Result<(), LifecycleError> {
     let mut next_ttl_deadline: Option<TokioInstant> = compute_next_ttl_deadline(&state);
@@ -279,7 +279,7 @@ async fn run_remote_runtime_owner_event_loop(
 
 async fn handle_remote_runtime_owner_client_async(
     state: &RemoteRuntimeOwnerSharedState,
-    stream: &mut TokioUnixStream,
+    stream: &mut RemoteControlAsyncStream,
 ) -> Result<Option<String>, LifecycleError> {
     let _t_total = Instant::now();
     let command = read_remote_runtime_owner_command_async(stream).await?;
@@ -291,7 +291,7 @@ async fn handle_remote_runtime_owner_client_async(
 }
 
 async fn read_remote_runtime_owner_command_async(
-    reader: &mut TokioUnixStream,
+    reader: &mut RemoteControlAsyncStream,
 ) -> Result<RemoteRuntimeOwnerCommandEnvelope, LifecycleError> {
     let mut bytes = Vec::new();
     reader
@@ -462,11 +462,8 @@ impl RemoteRuntimeOwnerRuntime {
         source_socket_name: &str,
         authority_host_session_name: &str,
     ) -> Result<Vec<ManagedSessionRecord>, LifecycleError> {
-        let socket_path = remote_runtime_owner_socket_path(&self.network);
-        if !socket_path.exists() {
-            return Ok(Vec::new());
-        }
-        let mut stream = match UnixStream::connect(&socket_path) {
+        let addr = remote_runtime_owner_addr(&self.network);
+        let mut stream = match RemoteControlStream::connect(&addr) {
             Ok(stream) => stream,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error)
@@ -478,7 +475,7 @@ impl RemoteRuntimeOwnerRuntime {
                         | ErrorKind::BrokenPipe
                 ) =>
             {
-                crate::infra::best_effort::remove_file(&socket_path);
+                cleanup_remote_listener(&addr);
                 return Ok(Vec::new());
             }
             Err(error) => return Err(remote_runtime_owner_error(error)),
@@ -501,7 +498,7 @@ impl RemoteRuntimeOwnerRuntime {
             Ok(_) => parse_remote_runtime_owner_snapshot(&response)
                 .map(|snapshot| snapshot.sessions)
                 .or_else(|_| {
-                    crate::infra::best_effort::remove_file(&socket_path);
+                    cleanup_remote_listener(&addr);
                     Ok(Vec::new())
                 }),
             Err(error) => {
@@ -510,7 +507,7 @@ impl RemoteRuntimeOwnerRuntime {
                     self.network.listener_addr(),
                     error
                 ));
-                crate::infra::best_effort::remove_file(&socket_path);
+                cleanup_remote_listener(&addr);
                 Ok(Vec::new())
             }
         }
@@ -542,8 +539,8 @@ impl RemoteRuntimeOwnerRuntime {
     #[cfg(test)]
     pub fn snapshot(&self) -> Result<RemoteRuntimeOwnerSnapshot, LifecycleError> {
         self.ensure_owner_running()?;
-        let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(&self.network))
-            .map_err(remote_runtime_owner_error)?;
+        let addr = remote_runtime_owner_addr(&self.network);
+        let mut stream = RemoteControlStream::connect(&addr).map_err(remote_runtime_owner_error)?;
         stream
             .write_all(
                 render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::Snapshot)
@@ -563,14 +560,9 @@ impl RemoteRuntimeOwnerRuntime {
 
     pub fn try_snapshot(&self) -> Result<RemoteRuntimeOwnerSnapshot, LifecycleError> {
         let t_total = Instant::now();
-        let socket_path = remote_runtime_owner_socket_path(&self.network);
-        if !socket_path.exists() {
-            return Ok(RemoteRuntimeOwnerSnapshot {
-                sessions: Vec::new(),
-            });
-        }
+        let addr = remote_runtime_owner_addr(&self.network);
         let _t_connect = Instant::now();
-        let mut stream = match UnixStream::connect(&socket_path) {
+        let mut stream = match RemoteControlStream::connect(&addr) {
             Ok(stream) => stream,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 return Ok(RemoteRuntimeOwnerSnapshot {
@@ -586,7 +578,7 @@ impl RemoteRuntimeOwnerRuntime {
                         | ErrorKind::BrokenPipe
                 ) =>
             {
-                crate::infra::best_effort::remove_file(&socket_path);
+                cleanup_remote_listener(&addr);
                 return Ok(RemoteRuntimeOwnerSnapshot {
                     sessions: Vec::new(),
                 });
@@ -626,7 +618,7 @@ impl RemoteRuntimeOwnerRuntime {
                             t_parse.elapsed(),
                             t_total.elapsed()
                         ));
-                        crate::infra::best_effort::remove_file(&socket_path);
+                        cleanup_remote_listener(&addr);
                         Ok(RemoteRuntimeOwnerSnapshot {
                             sessions: Vec::new(),
                         })
@@ -641,7 +633,7 @@ impl RemoteRuntimeOwnerRuntime {
                     t_read.elapsed(),
                     t_total.elapsed()
                 ));
-                crate::infra::best_effort::remove_file(&socket_path);
+                cleanup_remote_listener(&addr);
                 Ok(RemoteRuntimeOwnerSnapshot {
                     sessions: Vec::new(),
                 })
@@ -654,8 +646,9 @@ impl RemoteRuntimeOwnerRuntime {
 fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
     let socket_path = remote_runtime_owner_socket_path(network);
     crate::infra::best_effort::remove_file(&socket_path);
+    let addr = RemoteControlAddr::Unix(socket_path);
     let listener =
-        UnixListener::bind(&socket_path).expect("test remote runtime owner socket should bind");
+        RemoteControlListener::bind(&addr).expect("test remote runtime owner socket should bind");
     let state = RemoteRuntimeOwnerSharedState {
         records: Arc::new(Mutex::new(HashMap::new())),
         offline_nodes: Arc::new(Mutex::new(HashMap::new())),
@@ -663,16 +656,14 @@ fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
         network: network.clone(),
         current_executable: PathBuf::from("/tmp/waitagent-test"),
     };
-    thread::spawn(move || {
-        for accepted in listener.incoming() {
-            let Ok(mut stream) = accepted else {
-                break;
-            };
-            let response = handle_remote_runtime_owner_client(&state, &mut stream);
-            if let Ok(Some(payload)) = response {
-                let _ = stream.write_all(payload.as_bytes());
-                let _ = stream.flush();
-            }
+    thread::spawn(move || loop {
+        let Ok((mut stream, _)) = listener.accept() else {
+            break;
+        };
+        let response = handle_remote_runtime_owner_client(&state, &mut stream);
+        if let Ok(Some(payload)) = response {
+            let _ = stream.write_all(payload.as_bytes());
+            let _ = stream.flush();
         }
     });
 }
@@ -680,7 +671,7 @@ fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
 #[cfg(test)]
 fn handle_remote_runtime_owner_client(
     state: &RemoteRuntimeOwnerSharedState,
-    stream: &mut UnixStream,
+    stream: &mut impl Read,
 ) -> Result<Option<String>, LifecycleError> {
     let _t_total = Instant::now();
     let command = read_remote_runtime_owner_command(stream)?;
@@ -950,16 +941,16 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
     current_executable: &Path,
     network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
-    let socket_path = remote_runtime_owner_socket_path(network);
-    if remote_runtime_owner_available(&socket_path) {
+    let addr = remote_runtime_owner_addr(network);
+    if remote_runtime_owner_available(&addr) {
         return Ok(());
     }
-    let lock_path = remote_runtime_owner_startup_lock_path(&socket_path);
+    let lock_path = remote_runtime_owner_startup_lock_path(network);
     let Some(_startup_lock) =
         StartupLock::try_acquire(&lock_path).map_err(remote_runtime_owner_error)?
     else {
         let _startup_lock = StartupLock::acquire(&lock_path).map_err(remote_runtime_owner_error)?;
-        if remote_runtime_owner_available(&socket_path) {
+        if remote_runtime_owner_available(&addr) {
             return Ok(());
         }
         return Err(LifecycleError::Protocol(format!(
@@ -968,31 +959,30 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
             lock_path.display()
         )));
     };
-    if remote_runtime_owner_available(&socket_path) {
+    if remote_runtime_owner_available(&addr) {
         return Ok(());
     }
-    if socket_path.exists() {
-        crate::infra::best_effort::remove_file(&socket_path);
-    }
+    cleanup_remote_listener(&addr);
 
-    let ready_socket = remote_runtime_owner_ready_socket_path(&socket_path);
-    if ready_socket.exists() {
-        crate::infra::best_effort::remove_file(&ready_socket);
-    }
-    let ready_listener = UnixListener::bind(&ready_socket).map_err(remote_runtime_owner_error)?;
+    let ready_addr = remote_ready_addr();
+    let ready_listener =
+        RemoteControlListener::bind(&ready_addr).map_err(remote_runtime_owner_error)?;
+    // On Windows the listener resolves the ephemeral port; the child must be
+    // handed the concrete address, not the pre-bind `127.0.0.1:0`.
+    let bound_ready_addr = ready_listener.local_addr().clone();
 
     let child = spawn_waitagent_sidecar_child(
         current_executable,
-        remote_runtime_owner_args(network, Some(&ready_socket)),
+        remote_runtime_owner_args(network, Some(&bound_ready_addr)),
     )
     .map_err(remote_runtime_owner_error)?;
-    let ready = wait_for_remote_runtime_owner_ready(ready_listener, &ready_socket, child);
-    crate::infra::best_effort::remove_file(&ready_socket);
+    let ready = wait_for_remote_runtime_owner_ready(ready_listener, &bound_ready_addr, child);
+    cleanup_remote_listener(&bound_ready_addr);
     ready
 }
 
-fn remote_runtime_owner_available(socket_path: &Path) -> bool {
-    let Ok(mut stream) = UnixStream::connect(socket_path) else {
+fn remote_runtime_owner_available(addr: &RemoteControlAddr) -> bool {
+    let Ok(mut stream) = RemoteControlStream::connect(addr) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
@@ -1013,20 +1003,12 @@ fn remote_runtime_owner_available(socket_path: &Path) -> bool {
         && parse_remote_runtime_owner_snapshot(&response).is_ok()
 }
 
-fn remote_runtime_owner_startup_lock_path(socket_path: &Path) -> PathBuf {
-    socket_path.with_extension("sock.lock")
-}
-
+#[cfg(test)]
 pub(crate) fn remote_runtime_owner_socket_path(network: &RemoteNetworkConfig) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-runtime-owner-{}.sock",
         sanitize_path_component(&network.listener_addr().to_string())
     ))
-}
-
-fn remote_runtime_owner_ready_socket_path(owner_socket_path: &Path) -> PathBuf {
-    let pid = std::process::id();
-    owner_socket_path.with_extension(format!("ready-{pid}.sock"))
 }
 
 fn notify_remote_runtime_owner_ready(
@@ -1036,7 +1018,8 @@ fn notify_remote_runtime_owner_ready(
     let Some(ready_socket) = ready_socket else {
         return Ok(());
     };
-    let mut stream = UnixStream::connect(ready_socket)?;
+    let addr = RemoteControlAddr::from_arg_string(ready_socket)?;
+    let mut stream = RemoteControlStream::connect(&addr)?;
     match result {
         Ok(()) => stream.write_all(b"ok\n")?,
         Err(error) => {
@@ -1049,8 +1032,8 @@ fn notify_remote_runtime_owner_ready(
 }
 
 fn wait_for_remote_runtime_owner_ready(
-    listener: UnixListener,
-    ready_socket: &Path,
+    listener: RemoteControlListener,
+    ready_addr: &RemoteControlAddr,
     mut child: std::process::Child,
 ) -> Result<(), LifecycleError> {
     enum RemoteRuntimeOwnerReadyEvent {
@@ -1100,19 +1083,19 @@ fn wait_for_remote_runtime_owner_ready(
         }
         Err(_) => Err(LifecycleError::Protocol(format!(
             "remote runtime owner ready socket `{}` closed before reporting ready",
-            ready_socket.display()
+            ready_addr.to_arg_string()
         ))),
     }
 }
 
 pub(crate) fn remote_runtime_owner_args(
     network: &RemoteNetworkConfig,
-    ready_socket: Option<&Path>,
+    ready_socket: Option<&RemoteControlAddr>,
 ) -> Vec<String> {
     let mut args = vec!["__remote-runtime-owner".to_string()];
     if let Some(ready_socket) = ready_socket {
         args.push("--ready-socket".to_string());
-        args.push(ready_socket.display().to_string());
+        args.push(ready_socket.to_arg_string());
     }
     prepend_global_network_args(args, network)
 }
@@ -1125,8 +1108,7 @@ fn signal_remote_runtime_owner_command(
     match try_signal_remote_runtime_owner_command(network, &command) {
         Ok(()) => Ok(()),
         Err(first_error) if remote_runtime_owner_ack_error(&first_error) => {
-            let socket_path = remote_runtime_owner_socket_path(network);
-            crate::infra::best_effort::remove_file(&socket_path);
+            cleanup_remote_listener(&remote_runtime_owner_addr(network));
             ensure_remote_runtime_owner_process_running(current_executable, network)?;
             try_signal_remote_runtime_owner_command(network, &command).map_err(|second_error| {
                 LifecycleError::Protocol(format!(
@@ -1145,7 +1127,7 @@ fn try_signal_remote_runtime_owner_command(
     let _t_total = Instant::now();
     let _command_label = remote_runtime_owner_command_label(command);
     let _t_connect = Instant::now();
-    let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(network))
+    let mut stream = RemoteControlStream::connect(&remote_runtime_owner_addr(network))
         .map_err(remote_runtime_owner_io_error)?;
 
     let _t_write = Instant::now();
@@ -1678,6 +1660,7 @@ fn unescape_optional_field(value: &str) -> Result<Option<String>, LifecycleError
     unescape_field(value).map(Some)
 }
 
+#[cfg(test)]
 fn sanitize_path_component(value: &str) -> String {
     value
         .chars()
@@ -1742,10 +1725,12 @@ mod tests {
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
+    use crate::platform::remote_ipc::{
+        socket_pair, RemoteControlAddr, RemoteControlAsyncListener, RemoteControlStream,
+    };
     use std::collections::{BTreeSet, HashMap};
     use std::io::{Read, Write};
     use std::net::Shutdown;
-    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
@@ -1807,7 +1792,12 @@ mod tests {
             node_cert_path: None,
         };
 
-        let args = remote_runtime_owner_args(&network, Some(Path::new("/tmp/runtime-ready.sock")));
+        let args = remote_runtime_owner_args(
+            &network,
+            Some(&RemoteControlAddr::Unix(PathBuf::from(
+                "/tmp/runtime-ready.sock",
+            ))),
+        );
 
         assert!(args.iter().any(|arg| arg == "--ready-socket"));
         assert!(args.iter().any(|arg| arg == "/tmp/runtime-ready.sock"));
@@ -1971,7 +1961,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(
@@ -2060,7 +2050,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(
@@ -2183,7 +2173,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(
@@ -2239,7 +2229,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(
@@ -2330,7 +2320,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(
@@ -2397,7 +2387,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(
@@ -2511,7 +2501,7 @@ mod tests {
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
-        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        let (mut client, mut server) = socket_pair().expect("socket pair should open");
         client
             .write_all(
                 render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::Shutdown)
@@ -2548,7 +2538,8 @@ mod tests {
         socket_path: &std::path::Path,
         command: &RemoteRuntimeOwnerCommandEnvelope,
     ) -> String {
-        let mut stream = UnixStream::connect(socket_path).expect("client should connect");
+        let addr = RemoteControlAddr::Unix(socket_path.to_path_buf());
+        let mut stream = RemoteControlStream::connect(&addr).expect("client should connect");
         stream
             .write_all(render_remote_runtime_owner_command(command).as_bytes())
             .expect("command should write");
@@ -2573,7 +2564,8 @@ mod tests {
             node_cert_path: None,
         };
         let socket_path = remote_runtime_owner_socket_path(&network);
-        let socket_path_for_thread = socket_path.clone();
+        let addr = RemoteControlAddr::Unix(socket_path.clone());
+        let addr_for_thread = addr.clone();
         crate::infra::best_effort::remove_file(&socket_path);
 
         let state = RemoteRuntimeOwnerSharedState {
@@ -2589,7 +2581,8 @@ mod tests {
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
             runtime
                 .block_on(async {
-                    let listener = tokio::net::UnixListener::bind(&socket_path_for_thread)
+                    let listener = RemoteControlAsyncListener::bind(&addr_for_thread)
+                        .await
                         .expect("event loop socket should bind");
                     run_remote_runtime_owner_event_loop(listener, state_for_thread).await
                 })

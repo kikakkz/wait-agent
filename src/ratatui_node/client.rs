@@ -1,8 +1,8 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::platform::local_ipc::LocalStream;
 use base64::{engine::general_purpose, Engine as _};
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +22,7 @@ pub(crate) struct ClientHandle {
 }
 
 pub(crate) fn handle_client(
-    stream: UnixStream,
+    stream: LocalStream,
     client_id: u64,
     clients: Arc<Mutex<Vec<ClientHandle>>>,
     shared: Arc<SharedState>,

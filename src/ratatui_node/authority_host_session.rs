@@ -1,12 +1,11 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::ratatui_node::agent_signal_env::AgentSignalEnv;
-use crate::ratatui_node::authority_host_io_loop::{AuthorityHostIoHandle, AuthorityHostIoRequest};
+use crate::ratatui_node::authority_host_io_loop::{
+    AuthorityHostIoHandle, AuthorityHostIoRequest, SessionChild,
+};
+#[cfg(unix)]
 use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::process::CommandExt;
-use std::process::{Child, Command};
 
 /// A simple PTY-backed session used when this node hosts a session for a remote
 /// viewer. Unlike `RatatuiLocalSession` it captures raw PTY bytes so they can be
@@ -18,14 +17,20 @@ pub struct RatatuiAuthorityHostSession {
     pub session_id: String,
     #[allow(dead_code)]
     pub command_name: String,
+    #[cfg(unix)]
     pub pty_master: File,
+    /// ConPTY on Windows. Moved into `AuthorityHostIoLoop` on registration;
+    /// always `None` while the session is registered.
+    #[cfg(windows)]
+    pub conpty: Option<crate::platform::pty::ConPty>,
     /// The child process is moved to `AuthorityHostIoLoop` when the session is
     /// registered.  After registration this is `None`.
-    pub child: Option<Child>,
+    pub child: Option<SessionChild>,
 }
 
 impl RatatuiAuthorityHostSession {
     /// Spawn a shell in a new PTY with the given initial size.
+    #[cfg(unix)]
     pub fn spawn(
         session_id: impl Into<String>,
         command_name: impl Into<String>,
@@ -33,29 +38,21 @@ impl RatatuiAuthorityHostSession {
         rows: u16,
         signal_env: AgentSignalEnv,
     ) -> Result<Self, LifecycleError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
         let session_id = session_id.into();
         let command_name = command_name.into();
-
-        let window_size = rustix_openpty::rustix::termios::Winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let pty = rustix_openpty::openpty(None, Some(&window_size)).map_err(|error| {
-            LifecycleError::Io(
-                "failed to open pty".to_string(),
-                io::Error::new(io::ErrorKind::Other, error.to_string()),
-            )
-        })?;
-        let master: OwnedFd = pty.controller;
-        let slave: OwnedFd = pty.user;
 
         // Leave the PTY in its default termios for shell startup.  Bash will
         // switch the slave into the raw/readline mode it needs once it has
         // finished initialization.  We only make the master non-blocking so
         // the IO loop can poll it; the kernel line discipline is otherwise
         // left alone.
+        let crate::platform::pty::PtyPair { mut master, slave } =
+            crate::platform::pty::openpty(cols, rows)
+                .map_err(|error| LifecycleError::Io("failed to open pty".to_string(), error))?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let mut cmd = Command::new(&shell);
@@ -96,8 +93,7 @@ impl RatatuiAuthorityHostSession {
             .spawn()
             .map_err(|error| LifecycleError::Io(format!("failed to spawn shell {shell}"), error))?;
 
-        let mut master_file = File::from(master);
-        set_nonblocking(&mut master_file);
+        crate::platform::pty::set_nonblocking(&mut master).ok();
 
         ERROR_LOG.log(format!(
             "[ratatui-authority-host-session] spawned session={} cols={} rows={}",
@@ -107,7 +103,58 @@ impl RatatuiAuthorityHostSession {
         Ok(Self {
             session_id,
             command_name,
-            pty_master: master_file,
+            pty_master: master,
+            child: Some(child),
+        })
+    }
+
+    /// Spawn a shell in a new ConPTY with the given initial size.
+    ///
+    /// Stable Rust's `std::process::Command` cannot express the
+    /// `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` attribute, so the actual
+    /// `CreateProcessW` call lives in `platform::pty`.
+    #[cfg(windows)]
+    pub fn spawn(
+        session_id: impl Into<String>,
+        command_name: impl Into<String>,
+        cols: u16,
+        rows: u16,
+        signal_env: AgentSignalEnv,
+    ) -> Result<Self, LifecycleError> {
+        use std::collections::HashMap;
+
+        let session_id = session_id.into();
+        let command_name = command_name.into();
+
+        let mut conpty = crate::platform::pty::openpty(cols, rows)
+            .map_err(|error| LifecycleError::Io("failed to create ConPTY".to_string(), error))?;
+
+        let shell = super::local_session::default_shell();
+        // Skip non-Unicode variables instead of panicking like `std::env::vars`.
+        let mut env: HashMap<String, String> = std::env::vars_os()
+            .filter_map(
+                |(key, value)| match (key.into_string(), value.into_string()) {
+                    (Ok(key), Ok(value)) => Some((key, value)),
+                    _ => None,
+                },
+            )
+            .collect();
+        signal_env.apply_to_hashmap(&mut env)?;
+        let child =
+            crate::platform::pty::spawn_shell(std::ffi::OsStr::new(&shell), &env, &mut conpty)
+                .map_err(|error| {
+                    LifecycleError::Io(format!("failed to spawn shell {shell}"), error)
+                })?;
+
+        ERROR_LOG.log(format!(
+            "[ratatui-authority-host-session] spawned session={} cols={} rows={}",
+            session_id, cols, rows
+        ));
+
+        Ok(Self {
+            session_id,
+            command_name,
+            conpty: Some(conpty),
             child: Some(child),
         })
     }
@@ -161,16 +208,5 @@ impl RatatuiAuthorityHostSession {
         let _ = io_tx.send(AuthorityHostIoRequest::SendBootstrap {
             session_id: self.session_id.clone(),
         });
-    }
-}
-
-fn set_nonblocking(file: &mut File) {
-    let fd = file.as_raw_fd();
-    // SAFETY: fcntl on a valid fd returned by std::fs::File is safe.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
     }
 }

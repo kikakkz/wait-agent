@@ -1225,9 +1225,7 @@ fn handle_client_command(
 
         ClientCommand::Stop => {
             shared.shutdown.store(true, Ordering::SeqCst);
-            let _ = std::os::unix::net::UnixStream::connect(super::socket::ratatui_socket_path(
-                shared.network.port,
-            ));
+            crate::platform::local_ipc::wake_listener(shared.network.port);
             CommandOutcome::Message("stopping".to_string())
         }
 
@@ -1432,18 +1430,26 @@ fn create_authority_host_session(
     rows: u16,
 ) -> Result<CreatedAuthorityHostTarget, LifecycleError> {
     let (session_id, mut session, target_id) = shared.create_authority_host_session(cols, rows)?;
+    #[cfg(unix)]
     let pty_master = session.pty_master.try_clone().map_err(|error| {
         LifecycleError::Io(
             "failed to clone authority host pty master".to_string(),
             error,
         )
     })?;
+    #[cfg(windows)]
+    let conpty = session.conpty.take().ok_or_else(|| {
+        LifecycleError::Protocol("authority host session missing ConPTY".to_string())
+    })?;
     let child = session.child.take().ok_or_else(|| {
         LifecycleError::Protocol("authority host session missing child process".to_string())
     })?;
     let _ = authority_host_io_tx.send(AuthorityHostIoRequest::RegisterSession {
         session_id: session_id.clone(),
+        #[cfg(unix)]
         pty_master,
+        #[cfg(windows)]
+        conpty,
         child,
         output_tx: None,
         cols,
@@ -2220,7 +2226,7 @@ impl From<CommandOutcome> for ControlResponse {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod state_loop_tests {
     use super::*;
     use std::io::{BufRead, BufReader};
@@ -2304,7 +2310,7 @@ mod state_loop_tests {
         // the Status response.
         client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
             client_id: 1,
-            stream: client,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
         });
         let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
 
@@ -2415,7 +2421,7 @@ mod state_loop_tests {
         let (_server, client) = UnixStream::pair().expect("stream pair");
         client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
             client_id: 2,
-            stream: client,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
         });
         let _ = tx.send(StateEvent::ClientConnected { client_id: 2 });
         let _ = tx.send(StateEvent::LocalSessionOutput {
@@ -2450,7 +2456,7 @@ mod state_loop_tests {
         let (_server, client) = UnixStream::pair().expect("stream pair");
         client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
             client_id: 42,
-            stream: client,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
         });
 
         let tx1 = tx.clone();

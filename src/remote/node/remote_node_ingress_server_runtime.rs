@@ -17,7 +17,6 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportError,
     RemoteNodeTransportEvent,
 };
-use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::infra::remote_protocol::{
     BootstrapMode, ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
     PasteFileRequestPayload, ProtocolEnvelope, TargetExitedPayload, TargetPublicationAckPayload,
@@ -27,6 +26,12 @@ use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
 };
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::{
+    authority_endpoint_from_id_string, authority_endpoint_id_string, cleanup_remote_listener,
+    discover_authority_endpoints, remote_listener_is_running, remote_node_ingress_owner_addr,
+    remote_node_ingress_startup_lock_path, remote_ready_addr, stable_socket_hash,
+    RemoteControlAddr, RemoteControlListener, RemoteControlStream,
+};
 use crate::process::current_executable::current_waitagent_executable;
 use crate::process::startup_lock::StartupLock;
 use crate::process::workspace::sidecar_process_runtime::spawn_waitagent_sidecar_child;
@@ -51,6 +56,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -107,7 +113,7 @@ struct ActiveAuthoritySocketBridge {
 
 struct ActiveNodeIngressSession {
     session: RemoteNodeSessionHandle,
-    bridges: HashMap<PathBuf, ActiveAuthoritySocketBridge>,
+    bridges: HashMap<RemoteControlAddr, ActiveAuthoritySocketBridge>,
     published_fingerprints: HashMap<String, String>,
     source_publication_tracker: SourcePublicationTracker,
     observed_sessions: HashMap<String, ManagedSessionRecord>,
@@ -182,12 +188,12 @@ impl ReceiverPublicationRevisionTable {
 pub(crate) enum InternalEvent {
     BridgeClosed {
         node_id: String,
-        socket_path: PathBuf,
+        endpoint: RemoteControlAddr,
     },
     AuthorityCommandReceived {
         node_id: String,
         session_instance_id: String,
-        socket_path: PathBuf,
+        endpoint: RemoteControlAddr,
         command: RemoteAuthorityCommand,
     },
     AuthorityHostOutput {
@@ -205,7 +211,8 @@ pub(crate) enum InternalEvent {
     SocketDirChanged,
     AuthoritySocketReady {
         node_id: String,
-        socket_path: PathBuf,
+        endpoint: RemoteControlAddr,
+        id_file: PathBuf,
         reply_tx: mpsc::Sender<AuthoritySocketReadyReply>,
     },
     RegisterWorkspaceSocket {
@@ -269,14 +276,11 @@ where
     }
 
     pub fn run_owner(&self, ready_socket: Option<&str>) -> Result<(), LifecycleError> {
-        let socket_path = remote_node_ingress_owner_socket_path(&self.network);
+        let addr = remote_node_ingress_owner_addr(&self.network);
         let startup =
-            (|| -> Result<(UnixListener, RemoteNodeIngressServerGuard), LifecycleError> {
-                if socket_path.exists() {
-                    crate::infra::best_effort::remove_file(&socket_path);
-                }
+            (|| -> Result<(RemoteControlListener, RemoteNodeIngressServerGuard), LifecycleError> {
                 let listener =
-                    UnixListener::bind(&socket_path).map_err(remote_node_ingress_error)?;
+                    RemoteControlListener::bind(&addr).map_err(remote_node_ingress_error)?;
                 let (_catalog_tx, catalog_rx) = mpsc::channel::<LocalCatalogChangeRequest>();
                 let guard = self.start(catalog_rx)?;
                 if guard.owner_event_sender().is_none() {
@@ -332,7 +336,7 @@ where
                 break;
             }
         }
-        crate::infra::best_effort::remove_file(&socket_path);
+        cleanup_remote_listener(&addr);
         Ok(())
     }
 
@@ -340,18 +344,18 @@ where
         socket_name: &str,
         network: &RemoteNetworkConfig,
     ) -> Result<(), LifecycleError> {
-        let socket_path = remote_node_ingress_owner_socket_path(network);
-        if remote_node_ingress_owner_available(&socket_path) {
+        let addr = remote_node_ingress_owner_addr(network);
+        if remote_node_ingress_owner_available(&addr) {
             register_workspace_socket_with_owner(network, socket_name)?;
             return Ok(());
         }
-        let lock_path = owner_startup_lock_path(&socket_path);
+        let lock_path = remote_node_ingress_startup_lock_path(network);
         let Some(_startup_lock) =
             StartupLock::try_acquire(&lock_path).map_err(remote_node_ingress_error)?
         else {
             let _startup_lock =
                 StartupLock::acquire(&lock_path).map_err(remote_node_ingress_error)?;
-            if remote_node_ingress_owner_available(&socket_path) {
+            if remote_node_ingress_owner_available(&addr) {
                 register_workspace_socket_with_owner(network, socket_name)?;
                 return Ok(());
             }
@@ -361,27 +365,24 @@ where
                 lock_path.display()
             )));
         };
-        if remote_node_ingress_owner_available(&socket_path) {
+        if remote_node_ingress_owner_available(&addr) {
             register_workspace_socket_with_owner(network, socket_name)?;
             return Ok(());
         }
-        if socket_path.exists() {
-            crate::infra::best_effort::remove_file(&socket_path);
-        }
         let current_executable = current_waitagent_executable()?;
-        let ready_socket = owner_ready_socket_path(&socket_path);
-        if ready_socket.exists() {
-            crate::infra::best_effort::remove_file(&ready_socket);
-        }
+        let ready_addr = remote_ready_addr();
         let ready_listener =
-            UnixListener::bind(&ready_socket).map_err(remote_node_ingress_error)?;
+            RemoteControlListener::bind(&ready_addr).map_err(remote_node_ingress_error)?;
+        // On Windows the listener resolves the ephemeral port; the child must
+        // be handed the concrete address, not the pre-bind `127.0.0.1:0`.
+        let bound_ready_addr = ready_listener.local_addr().clone();
         let child = spawn_waitagent_sidecar_child(
             &current_executable,
-            remote_node_ingress_owner_args(network, Some(&ready_socket)),
+            remote_node_ingress_owner_args(network, Some(&bound_ready_addr)),
         )
         .map_err(remote_node_ingress_error)?;
-        let ready = wait_for_owner_ready(ready_listener, &ready_socket, child);
-        crate::infra::best_effort::remove_file(&ready_socket);
+        let ready = wait_for_owner_ready(ready_listener, &bound_ready_addr, child);
+        cleanup_remote_listener(&bound_ready_addr);
         ready?;
         register_workspace_socket_with_owner(network, socket_name)
     }
@@ -393,8 +394,8 @@ where
         if socket_name == "__shared__" || socket_name.is_empty() {
             return Ok(());
         }
-        let socket_path = remote_node_ingress_owner_socket_path(network);
-        if !remote_node_ingress_owner_available(&socket_path) {
+        let addr = remote_node_ingress_owner_addr(network);
+        if !remote_node_ingress_owner_available(&addr) {
             return Ok(());
         }
         unregister_workspace_socket_with_owner(network, socket_name)
@@ -402,8 +403,8 @@ where
 
     #[cfg(test)]
     pub fn shutdown_owner(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
-        let socket_path = remote_node_ingress_owner_socket_path(network);
-        if !remote_node_ingress_owner_available(&socket_path) {
+        let addr = remote_node_ingress_owner_addr(network);
+        if !remote_node_ingress_owner_available(&addr) {
             return Ok(());
         }
         shutdown_owner_with_control_socket(network)
@@ -480,16 +481,15 @@ where
             read_node_session_envelope, write_node_session_envelope,
         };
         use crate::ports::session_creation::RemoteSessionCreationError;
-        use std::os::unix::net::UnixStream;
         use std::time::Duration;
 
         const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
 
         Self::ensure_owner_running("__shared__", &self.network)
             .map_err(|error| RemoteSessionCreationError::Transport(error.to_string()))?;
-        let socket_path = remote_node_ingress_owner_socket_path(&self.network);
-        let mut stream = UnixStream::connect(&socket_path)
-            .map_err(|error| RemoteSessionCreationError::Transport(error.to_string()))?;
+        let mut stream =
+            RemoteControlStream::connect(&remote_node_ingress_owner_addr(&self.network))
+                .map_err(|error| RemoteSessionCreationError::Transport(error.to_string()))?;
         stream
             .set_read_timeout(Some(DEFAULT_ACCEPT_TIMEOUT))
             .map_err(|error| RemoteSessionCreationError::Transport(error.to_string()))?;
@@ -584,14 +584,11 @@ fn accepted_target_record(
     }
 }
 
-fn owner_startup_lock_path(socket_path: &Path) -> PathBuf {
-    socket_path.with_extension("sock.lock")
-}
-
 pub(crate) fn notify_authority_socket_ready(
     network: &RemoteNetworkConfig,
     node_id: &str,
-    socket_path: &std::path::Path,
+    addr: &RemoteControlAddr,
+    marker: &Path,
 ) -> io::Result<()> {
     RemoteNodeIngressServerRuntime::<
         crate::remote::publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
@@ -599,9 +596,10 @@ pub(crate) fn notify_authority_socket_ready(
         RatatuiLocalAuthorityHostBackend,
     >::ensure_owner_running("__shared__", network)
         .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
-    let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))?;
+    let mut stream = RemoteControlStream::connect(&remote_node_ingress_owner_addr(network))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    write_owner_control_authority_socket_ready(&mut stream, node_id, socket_path)?;
+    let id_string = authority_endpoint_id_string(addr, marker);
+    write_owner_control_authority_socket_ready(&mut stream, node_id, &id_string)?;
     match read_owner_control_reply(&mut stream)? {
         AuthoritySocketReadyReply {
             status: AuthoritySocketReadyStatus::Registered,
@@ -625,7 +623,7 @@ fn register_workspace_socket_with_owner(
     if socket_name == "__shared__" || socket_name.is_empty() {
         return Ok(());
     }
-    let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))
+    let mut stream = RemoteControlStream::connect(&remote_node_ingress_owner_addr(network))
         .map_err(remote_node_ingress_error)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -649,7 +647,7 @@ fn unregister_workspace_socket_with_owner(
     network: &RemoteNetworkConfig,
     socket_name: &str,
 ) -> Result<(), LifecycleError> {
-    let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))
+    let mut stream = RemoteControlStream::connect(&remote_node_ingress_owner_addr(network))
         .map_err(remote_node_ingress_error)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -669,7 +667,7 @@ fn unregister_workspace_socket_with_owner(
 
 #[cfg(test)]
 fn shutdown_owner_with_control_socket(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
-    let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))
+    let mut stream = RemoteControlStream::connect(&remote_node_ingress_owner_addr(network))
         .map_err(remote_node_ingress_error)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -686,18 +684,14 @@ fn shutdown_owner_with_control_socket(network: &RemoteNetworkConfig) -> Result<(
     }
 }
 
-fn owner_ready_socket_path(owner_socket_path: &Path) -> PathBuf {
-    let pid = std::process::id();
-    owner_socket_path.with_extension(format!("ready-{pid}.sock"))
-}
-
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 fn notify_owner_ready(ready_socket: Option<&str>, result: Result<(), String>) -> io::Result<()> {
     let Some(ready_socket) = ready_socket else {
         return Ok(());
     };
-    let mut stream = UnixStream::connect(ready_socket)?;
+    let addr = RemoteControlAddr::from_arg_string(ready_socket)?;
+    let mut stream = RemoteControlStream::connect(&addr)?;
     match result {
         Ok(()) => stream.write_all(b"ok\n")?,
         Err(error) => {
@@ -710,8 +704,8 @@ fn notify_owner_ready(ready_socket: Option<&str>, result: Result<(), String>) ->
 }
 
 fn wait_for_owner_ready(
-    listener: UnixListener,
-    ready_socket: &Path,
+    listener: RemoteControlListener,
+    ready_addr: &RemoteControlAddr,
     mut child: std::process::Child,
 ) -> Result<(), LifecycleError> {
     enum OwnerReadyEvent {
@@ -757,14 +751,14 @@ fn wait_for_owner_ready(
         Ok(OwnerReadyEvent::Exited(Err(error))) => Err(remote_node_ingress_error(error)),
         Err(_) => Err(LifecycleError::Protocol(format!(
             "remote node ingress owner ready socket `{}` closed before reporting ready",
-            ready_socket.display()
+            ready_addr.to_arg_string()
         ))),
     }
 }
 
 fn remote_node_ingress_owner_args(
     network: &RemoteNetworkConfig,
-    ready_socket: Option<&Path>,
+    ready_socket: Option<&RemoteControlAddr>,
 ) -> Vec<String> {
     let mut args = vec![
         "__remote-node-ingress-server".to_string(),
@@ -773,26 +767,54 @@ fn remote_node_ingress_owner_args(
     ];
     if let Some(ready_socket) = ready_socket {
         args.push("--ready-socket".to_string());
-        args.push(ready_socket.display().to_string());
+        args.push(ready_socket.to_arg_string());
     }
     prepend_global_network_args(args, network)
 }
 
-fn remote_node_ingress_owner_available(socket_path: &std::path::Path) -> bool {
-    if !socket_path.exists() {
-        return false;
-    }
-    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+fn remote_node_ingress_owner_available(addr: &RemoteControlAddr) -> bool {
+    remote_listener_is_running(addr)
 }
 
-pub(crate) fn start_owner_control_acceptor(
-    listener: UnixListener,
+/// Accept loop for owner control listeners.
+///
+/// Implemented by the cross-platform [`RemoteControlListener`] and, for the
+/// single-process ratatui runtime that still binds a raw `UnixListener`, by
+/// `UnixListener` itself.
+pub(crate) trait OwnerControlAccept {
+    type Stream: Read + Write + Send + 'static;
+
+    fn accept_control(&self) -> io::Result<Self::Stream>;
+}
+
+impl OwnerControlAccept for RemoteControlListener {
+    type Stream = RemoteControlStream;
+
+    fn accept_control(&self) -> io::Result<Self::Stream> {
+        self.accept().map(|(stream, _)| stream)
+    }
+}
+
+#[cfg(unix)]
+impl OwnerControlAccept for UnixListener {
+    type Stream = UnixStream;
+
+    fn accept_control(&self) -> io::Result<Self::Stream> {
+        self.accept().map(|(stream, _)| stream)
+    }
+}
+
+pub(crate) fn start_owner_control_acceptor<L>(
+    listener: L,
     owner_tx: &mpsc::Sender<InternalEvent>,
     lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
-) -> thread::JoinHandle<()> {
+) -> thread::JoinHandle<()>
+where
+    L: OwnerControlAccept + Send + 'static,
+{
     let owner_tx = owner_tx.clone();
     thread::spawn(move || {
-        while let Ok((stream, _)) = listener.accept() {
+        while let Ok(stream) = listener.accept_control() {
             handle_owner_stream(stream, owner_tx.clone(), lifecycle_tx.clone());
         }
     })
@@ -813,11 +835,13 @@ fn next_owner_lifecycle_event(
     }
 }
 
-fn handle_owner_stream(
-    mut stream: UnixStream,
+fn handle_owner_stream<S>(
+    mut stream: S,
     owner_tx: mpsc::Sender<InternalEvent>,
     lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
-) {
+) where
+    S: Read + Write + Send + 'static,
+{
     thread::spawn(move || {
         let mut prefix = [0_u8; 4];
         if stream.read_exact(&mut prefix).is_err() {
@@ -827,13 +851,15 @@ fn handle_owner_stream(
             match read_owner_control_message(&mut stream) {
                 Ok(OwnerControlMessage::AuthoritySocketReady {
                     node_id,
-                    socket_path,
+                    endpoint,
+                    id_file,
                 }) => {
                     let (reply_tx, reply_rx) = mpsc::channel();
                     if owner_tx
                         .send(InternalEvent::AuthoritySocketReady {
                             node_id,
-                            socket_path,
+                            endpoint,
+                            id_file,
                             reply_tx,
                         })
                         .is_err()
@@ -1007,7 +1033,8 @@ fn handle_owner_stream(
 enum OwnerControlMessage {
     AuthoritySocketReady {
         node_id: String,
-        socket_path: PathBuf,
+        endpoint: RemoteControlAddr,
+        id_file: PathBuf,
     },
     RegisterWorkspaceSocket {
         socket_name: String,
@@ -1020,12 +1047,12 @@ enum OwnerControlMessage {
 fn write_owner_control_authority_socket_ready(
     writer: &mut impl Write,
     node_id: &str,
-    socket_path: &std::path::Path,
+    id_string: &str,
 ) -> io::Result<()> {
     writer.write_all(OWNER_CONTROL_MAGIC)?;
     writer.write_all(&[1])?;
     write_owner_control_string(writer, node_id)?;
-    write_owner_control_string(writer, &socket_path.to_string_lossy())?;
+    write_owner_control_string(writer, id_string)?;
     writer.flush()
 }
 
@@ -1096,10 +1123,12 @@ fn read_owner_control_message(reader: &mut impl Read) -> io::Result<OwnerControl
     match tag[0] {
         1 => {
             let node_id = read_owner_control_string(reader)?;
-            let socket_path = PathBuf::from(read_owner_control_string(reader)?);
+            let id_string = read_owner_control_string(reader)?;
+            let (endpoint, id_file) = authority_endpoint_from_id_string(&id_string)?;
             Ok(OwnerControlMessage::AuthoritySocketReady {
                 node_id,
-                socket_path,
+                endpoint,
+                id_file,
             })
         }
         2 => {
@@ -2347,7 +2376,7 @@ fn map_local_reply_from_grpc(
 }
 
 fn write_create_session_rejected_to_stream(
-    stream: &mut UnixStream,
+    stream: &mut impl Write,
     request_id: String,
     message: impl Into<String>,
 ) -> io::Result<()> {
@@ -2407,30 +2436,25 @@ fn handle_internal_event<G: LocalSessionCatalog>(
     event: InternalEvent,
 ) {
     match event {
-        InternalEvent::BridgeClosed {
-            node_id,
-            socket_path,
-        } => {
+        InternalEvent::BridgeClosed { node_id, endpoint } => {
             for active in sessions.values_mut() {
                 if active.session.node_id() == node_id {
-                    active.bridges.remove(&socket_path);
+                    active.bridges.remove(&endpoint);
                 }
             }
         }
         InternalEvent::AuthorityCommandReceived {
             node_id,
             session_instance_id,
-            socket_path,
+            endpoint,
             command,
         } => {
             ERROR_LOG.log(format!(
-                "[remote-node-ingress] authority command received node={node_id} session_instance_id={session_instance_id} socket={} command={command:?}",
-                socket_path.display()
+                "[remote-node-ingress] authority command received node={node_id} session_instance_id={session_instance_id} endpoint={endpoint} command={command:?}",
             ));
             let Some(active) = sessions.get(&session_instance_id) else {
                 ERROR_LOG.log(format!(
-                    "[remote-node-ingress] dropping authority command for node={node_id} session_instance_id={session_instance_id} socket={} because no active session is open",
-                    socket_path.display()
+                    "[remote-node-ingress] dropping authority command for node={node_id} session_instance_id={session_instance_id} endpoint={endpoint} because no active session is open",
                 ));
                 return;
             };
@@ -2438,16 +2462,14 @@ fn handle_internal_event<G: LocalSessionCatalog>(
                 Ok(envelope) => envelope,
                 Err(error) => {
                     ERROR_LOG.log(format!(
-                        "[remote-node-ingress] failed to map authority command for node={node_id} session_instance_id={session_instance_id} socket={}: {error}",
-                        socket_path.display()
+                        "[remote-node-ingress] failed to map authority command for node={node_id} session_instance_id={session_instance_id} endpoint={endpoint}: {error}",
                     ));
                     return;
                 }
             };
             if let Err(error) = active.session.send(envelope) {
                 ERROR_LOG.log(format!(
-                    "[remote-node-ingress] failed to send authority command for node={node_id} session_instance_id={session_instance_id} socket={}: {error}",
-                    socket_path.display()
+                    "[remote-node-ingress] failed to send authority command for node={node_id} session_instance_id={session_instance_id} endpoint={endpoint}: {error}",
                 ));
             }
         }
@@ -2487,17 +2509,19 @@ fn handle_internal_event<G: LocalSessionCatalog>(
         }
         InternalEvent::AuthoritySocketReady {
             node_id,
-            socket_path,
+            endpoint,
+            id_file,
             reply_tx,
         } => {
             let outcome = refresh_authority_bridge_for_socket(
                 sessions,
                 internal_tx,
                 &node_id,
-                socket_path.clone(),
+                &endpoint,
+                &id_file,
                 socket_discovery_retry_scheduled,
             );
-            let reply = authority_socket_ready_reply(&node_id, &socket_path, outcome);
+            let reply = authority_socket_ready_reply(&node_id, &id_file, outcome);
             let _ = reply_tx.send(reply);
         }
         InternalEvent::RegisterWorkspaceSocket {
@@ -3273,17 +3297,17 @@ where
 {
     let target_component = authority_target_component(node_id, &session_id);
     let mut stale = Vec::new();
-    for (path, bridge) in &session.bridges {
+    for (endpoint, bridge) in &session.bridges {
         if bridge.target_component != target_component {
             continue;
         }
         if let Err(error) = deliver(&bridge.transport, &session_id, &target_id) {
             let _ = error;
-            stale.push(path.clone());
+            stale.push(endpoint.clone());
         }
     }
-    for path in stale {
-        session.bridges.remove(&path);
+    for endpoint in stale {
+        session.bridges.remove(&endpoint);
     }
     Ok(())
 }
@@ -3300,7 +3324,8 @@ fn refresh_authority_bridge_for_socket(
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     internal_tx: mpsc::Sender<InternalEvent>,
     node_id: &str,
-    socket_path: PathBuf,
+    endpoint: &RemoteControlAddr,
+    id_file: &Path,
     socket_discovery_retry_scheduled: &mut bool,
 ) -> BridgeRefreshOutcome {
     let mut total = BridgeRefreshOutcome::default();
@@ -3309,7 +3334,7 @@ fn refresh_authority_bridge_for_socket(
             continue;
         }
         let outcome =
-            refresh_authority_bridge_path(node_id, active, &socket_path, internal_tx.clone());
+            refresh_authority_bridge_path(node_id, active, endpoint, id_file, internal_tx.clone());
         total.connected += outcome.connected;
         total.pending += outcome.pending;
         total.already_registered += outcome.already_registered;
@@ -3327,7 +3352,7 @@ fn refresh_authority_bridge_for_socket(
 
 fn authority_socket_ready_reply(
     node_id: &str,
-    socket_path: &Path,
+    id_file: &Path,
     outcome: BridgeRefreshOutcome,
 ) -> AuthoritySocketReadyReply {
     if outcome.connected > 0 || outcome.already_registered > 0 {
@@ -3341,7 +3366,7 @@ fn authority_socket_ready_reply(
             status: AuthoritySocketReadyStatus::Pending,
             message: format!(
                 "authority socket bridge for node {node_id} is pending: {}",
-                socket_path.display()
+                id_file.display()
             ),
         };
     }
@@ -3349,7 +3374,7 @@ fn authority_socket_ready_reply(
         status: AuthoritySocketReadyStatus::Error,
         message: format!(
             "authority socket bridge for node {node_id} was not registered: {}",
-            socket_path.display()
+            id_file.display()
         ),
     }
 }
@@ -3395,15 +3420,16 @@ pub(super) fn schedule_socket_discovery_retry(
 fn refresh_authority_bridge_path(
     node_id: &str,
     session: &mut ActiveNodeIngressSession,
-    socket_path: &PathBuf,
+    endpoint: &RemoteControlAddr,
+    id_file: &Path,
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> BridgeRefreshOutcome {
     let mut outcome = BridgeRefreshOutcome::default();
-    if session.bridges.contains_key(socket_path) {
+    if session.bridges.contains_key(endpoint) {
         outcome.already_registered += 1;
         return outcome;
     }
-    let Some(target_component) = socket_path
+    let Some(target_component) = id_file
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .and_then(|name| extract_target_component(&name, node_id))
@@ -3411,7 +3437,7 @@ fn refresh_authority_bridge_path(
         outcome.invalid += 1;
         return outcome;
     };
-    let transport = match RemoteAuthorityTransportRuntime::connect(socket_path, node_id) {
+    let transport = match RemoteAuthorityTransportRuntime::connect(endpoint, node_id) {
         Ok(transport) => transport,
         Err(_) => {
             outcome.pending += 1;
@@ -3422,12 +3448,12 @@ fn refresh_authority_bridge_path(
     spawn_authority_bridge_reader(
         node_id.to_string(),
         session.session.session_instance_id().to_string(),
-        socket_path.clone(),
+        endpoint.clone(),
         transport.clone(),
         internal_tx,
     );
     session.bridges.insert(
-        socket_path.clone(),
+        endpoint.clone(),
         ActiveAuthoritySocketBridge {
             target_component,
             transport,
@@ -3435,7 +3461,7 @@ fn refresh_authority_bridge_path(
     );
     outcome.connected += 1;
     ERROR_LOG.log(format!(
-        "[remote-node-ingress] registered authority bridge for node={node_id}"
+        "[remote-node-ingress] registered authority bridge for node={node_id} endpoint={endpoint}"
     ));
     outcome
 }
@@ -3446,21 +3472,21 @@ fn refresh_authority_bridges(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> BridgeRefreshOutcome {
     let mut outcome = BridgeRefreshOutcome::default();
-    let Ok(socket_paths) = discover_authority_socket_paths(node_id) else {
+    let Ok(endpoints) = discover_authority_endpoints(node_id) else {
         return outcome;
     };
-    for socket_path in socket_paths {
-        if session.bridges.contains_key(&socket_path) {
+    for (endpoint, id_file) in endpoints {
+        if session.bridges.contains_key(&endpoint) {
             continue;
         }
-        let Some(target_component) = socket_path
+        let Some(target_component) = id_file
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .and_then(|name| extract_target_component(&name, node_id))
         else {
             continue;
         };
-        let transport = match RemoteAuthorityTransportRuntime::connect(&socket_path, node_id) {
+        let transport = match RemoteAuthorityTransportRuntime::connect(&endpoint, node_id) {
             Ok(transport) => transport,
             Err(_) => {
                 outcome.pending += 1;
@@ -3471,12 +3497,12 @@ fn refresh_authority_bridges(
         spawn_authority_bridge_reader(
             node_id.to_string(),
             session.session.session_instance_id().to_string(),
-            socket_path.clone(),
+            endpoint.clone(),
             transport.clone(),
             internal_tx.clone(),
         );
         session.bridges.insert(
-            socket_path,
+            endpoint,
             ActiveAuthoritySocketBridge {
                 target_component,
                 transport,
@@ -3496,21 +3522,20 @@ fn refresh_authority_bridges(
 fn spawn_authority_bridge_reader(
     node_id: String,
     session_instance_id: String,
-    socket_path: PathBuf,
+    endpoint: RemoteControlAddr,
     reader: Arc<RemoteAuthorityTransportRuntime>,
     internal_tx: mpsc::Sender<InternalEvent>,
 ) {
     thread::spawn(move || {
         while let Ok(command) = reader.recv_command() {
             ERROR_LOG.log(format!(
-                "[remote-node-ingress] bridge reader recv_command node={node_id} session_instance_id={session_instance_id} socket={} command={command:?}",
-                socket_path.display()
+                "[remote-node-ingress] bridge reader recv_command node={node_id} session_instance_id={session_instance_id} endpoint={endpoint} command={command:?}",
             ));
             if internal_tx
                 .send(InternalEvent::AuthorityCommandReceived {
                     node_id: node_id.clone(),
                     session_instance_id: session_instance_id.clone(),
-                    socket_path: socket_path.clone(),
+                    endpoint: endpoint.clone(),
                     command,
                 })
                 .is_err()
@@ -3518,33 +3543,14 @@ fn spawn_authority_bridge_reader(
                 return;
             }
         }
-        let _ = internal_tx.send(InternalEvent::BridgeClosed {
-            node_id,
-            socket_path,
-        });
+        let _ = internal_tx.send(InternalEvent::BridgeClosed { node_id, endpoint });
     });
 }
 
-fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf>> {
-    let authority_hash = stable_socket_hash(&[authority_id]);
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(std::env::temp_dir())? {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        if !name.starts_with("waitagent-remote-") || !name.ends_with(".sock") {
-            continue;
-        }
-        if !name.contains(&format!("-{authority_hash}-")) {
-            continue;
-        }
-        paths.push(entry.path());
-    }
-    Ok(paths)
-}
-
 fn extract_target_component(file_name: &str, authority_id: &str) -> Option<String> {
-    let trimmed = file_name.trim_end_matches(".sock");
+    let trimmed = file_name
+        .trim_end_matches(".sock")
+        .trim_end_matches(".port");
     let authority_hash = stable_socket_hash(&[authority_id]);
     let mut parts = trimmed.rsplitn(3, '-');
     let target_hash = parts.next()?;
@@ -3554,17 +3560,6 @@ fn extract_target_component(file_name: &str, authority_id: &str) -> Option<Strin
         return None;
     }
     Some(target_hash.to_string())
-}
-
-fn stable_socket_hash(values: &[&str]) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for value in values {
-        for byte in value.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    format!("{hash:016x}")
 }
 
 fn map_authority_command_to_grpc(

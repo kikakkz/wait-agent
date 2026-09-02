@@ -3377,6 +3377,7 @@ dependencies = [
  "base64",
  "cbc",
  "cc",
+ "chrono",
  "crossbeam-channel",
  "crossterm",
  "getrandom 0.4.2",
@@ -3413,6 +3414,7 @@ dependencies = [
  "tonic-build",
  "tower 0.4.13",
  "unicode-width 0.1.14",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

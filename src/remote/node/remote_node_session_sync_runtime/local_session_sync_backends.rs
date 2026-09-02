@@ -15,6 +15,7 @@ use crate::infra::remote_transport_codec::{
     AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::RemoteControlStream;
 use crate::process_monitor::read_foreground_process_cmdline;
 use crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession;
 use crate::ratatui_node::clipboard_platform::format_file_reference;
@@ -23,7 +24,6 @@ use crate::remote::authority::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
     AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
 };
-use crate::remote::node::remote_node_session_sync_runtime::sync_helpers::remote_session_sync_owner_socket_path;
 use crate::remote::node::remote_node_session_sync_runtime::{
     remote_session_sync_error, SessionSyncAuthorityHost, SessionSyncAuthorityOutputRoute,
     LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
@@ -32,7 +32,9 @@ use crate::remote::node::remote_node_session_sync_runtime::{
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -188,10 +190,15 @@ pub(crate) fn target_session_name_from_target_id(target_id: &str) -> Option<Stri
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 fn live_authority_session_socket_path(socket_name: &str, session_name: &str) -> PathBuf {
-    remote_session_sync_owner_socket_path(socket_name).with_extension(format!(
-        "authority-{}",
-        sanitize_path_component(session_name)
-    ))
+    std::env::temp_dir()
+        .join(format!(
+            "waitagent-remote-session-sync-owner-{}.sock",
+            sanitize_path_component(socket_name)
+        ))
+        .with_extension(format!(
+            "authority-{}",
+            sanitize_path_component(session_name)
+        ))
 }
 
 pub(crate) fn sanitize_path_component(value: &str) -> String {
@@ -252,6 +259,7 @@ impl PasteFileAssembler {
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn spawn_live_authority_listener(
     socket_path: PathBuf,
@@ -291,6 +299,7 @@ fn spawn_live_authority_listener(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn bind_live_authority_listener(socket_path: &Path) -> Result<UnixListener, io::Error> {
     if socket_path.exists() {
@@ -302,6 +311,7 @@ fn bind_live_authority_listener(socket_path: &Path) -> Result<UnixListener, io::
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn bridge_live_authority_stream(
     mut host_stream: UnixStream,
@@ -361,6 +371,7 @@ fn bridge_live_authority_stream(
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn send_authority_ping(writer: &Arc<Mutex<Option<UnixStream>>>) -> Result<(), LifecycleError> {
     let mut guard = match writer.lock() {
@@ -386,6 +397,7 @@ fn send_authority_ping(writer: &Arc<Mutex<Option<UnixStream>>>) -> Result<(), Li
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[cfg(unix)]
 #[allow(dead_code)]
 fn forward_host_output(
     mut host_reader: UnixStream,
@@ -706,12 +718,13 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
             })?
         };
 
-        let (host_end, listener_end) = UnixStream::pair().map_err(|error| {
-            LifecycleError::Io(
-                "failed to create authority host socket pair".to_string(),
-                error,
-            )
-        })?;
+        let (host_end, listener_end) =
+            crate::platform::remote_ipc::socket_pair().map_err(|error| {
+                LifecycleError::Io(
+                    "failed to create authority host socket pair".to_string(),
+                    error,
+                )
+            })?;
         let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
         self.shared
             .authority_host_io_sender()
@@ -853,14 +866,14 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
 }
 
 struct SpawnRatatuiAuthorityListenerArgs {
-    host_stream: UnixStream,
+    host_stream: RemoteControlStream,
     #[allow(dead_code)]
-    listener_stream: UnixStream,
+    listener_stream: RemoteControlStream,
     node_id: String,
     bridge_session_id: Arc<RwLock<String>>,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
-    writer: Arc<Mutex<Option<UnixStream>>>,
+    writer: Arc<Mutex<Option<RemoteControlStream>>>,
     writer_ready: Arc<Condvar>,
 }
 
@@ -876,9 +889,10 @@ fn spawn_ratatui_authority_listener(args: SpawnRatatuiAuthorityListenerArgs) {
         writer_ready,
     } = args;
     thread::spawn(move || {
-        // The ratatui authority host is backed by an internal UnixStream::pair.
-        // The listener owns one end of the pair and uses it for both writing
-        // viewer commands and reading PTY output from the target host.
+        // The ratatui authority host is backed by an internal socket pair
+        // (see `crate::platform::remote_ipc::socket_pair`). The listener owns
+        // one end of the pair and uses it for both writing viewer commands
+        // and reading PTY output from the target host.
         {
             let mut writer_guard = match writer.lock() {
                 Ok(guard) => guard,
@@ -927,9 +941,9 @@ fn spawn_ratatui_authority_listener(args: SpawnRatatuiAuthorityListenerArgs) {
 }
 
 struct SpawnRatatuiAuthorityTargetHostArgs {
-    listener_stream: UnixStream,
+    listener_stream: RemoteControlStream,
     #[allow(dead_code)]
-    host_stream: UnixStream,
+    host_stream: RemoteControlStream,
     session: Arc<crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession>,
     target_id: String,
     #[allow(dead_code)]
@@ -959,14 +973,24 @@ fn authority_host_supports_at(shared: &SharedState, session: &RatatuiAuthorityHo
     // may be the only source of agent_command_name. If hooks have not fired yet
     // (e.g. the user pastes before submitting a prompt), detect the agent from
     // the PTY foreground process at paste time.
-    let (argv0, argv) = read_foreground_process_cmdline(session.pty_master.as_raw_fd());
-    let command_name = argv0
-        .as_deref()
-        .map(|cmd| DetectorRegistry::default().detect_command_name(cmd, argv.as_deref(), ""));
-    command_name
-        .as_deref()
-        .map(accepts_at_reference)
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        let (argv0, argv) = read_foreground_process_cmdline(session.pty_master.as_raw_fd());
+        let command_name = argv0
+            .as_deref()
+            .map(|cmd| DetectorRegistry::default().detect_command_name(cmd, argv.as_deref(), ""));
+        command_name
+            .as_deref()
+            .map(accepts_at_reference)
+            .unwrap_or(false)
+    }
+    // On Windows (no ConPTY support yet) there is no foreground process group to
+    // probe; rely solely on the catalog record.
+    #[cfg(not(unix))]
+    {
+        let _ = session;
+        false
+    }
 }
 
 /// Look up `agent_command_name` from the local catalog record. Returns `None`
@@ -1029,7 +1053,7 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
     } = args;
     thread::spawn(move || {
         let session_id = session.session_id.clone();
-        // The target host owns the other end of the UnixStream::pair. It reads
+        // The target host owns the other end of the socket pair. It reads
         // viewer commands from this end and forwards them to AuthorityHostIoLoop.
         // PTY output arrives on output_rx and is framed as RawPtyOutput back to
         // the listener, which forwards it over the gRPC bridge.
@@ -1247,7 +1271,7 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
 }
 
 fn forward_ratatui_host_output(
-    mut listener_stream: UnixStream,
+    mut listener_stream: RemoteControlStream,
     node_id: String,
     bridge_session_id: Arc<RwLock<String>>,
     output_route: SessionSyncAuthorityOutputRoute,
@@ -1392,6 +1416,9 @@ mod tests {
         assert!(!authority_host_supports_at_from_record(&shared, session_id).unwrap_or(false));
     }
 
+    // Constructs a `RatatuiAuthorityHostSession` with a Unix PTY master, so it
+    // only compiles on Unix.
+    #[cfg(unix)]
     #[test]
     fn maybe_send_bootstrap_respects_deadline() {
         let session = crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession {
@@ -1433,6 +1460,11 @@ mod tests {
         );
     }
 
+    /// The pty placeholder for this test is a `UnixStream` pair because the
+    /// registered fd must block on read (a null device would report immediate
+    /// EOF and the io loop would drop the session), and `Command::new("false")`
+    /// is Unix-only. The transport pair uses the cross-platform `socket_pair`.
+    #[cfg(unix)]
     #[test]
     fn open_mirror_request_delays_bootstrap_until_stable_window() {
         let session_id = "stable-test";
@@ -1470,7 +1502,8 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         // Start the target-host reader over an internal socket pair.
-        let (mut host_stream, listener_stream) = UnixStream::pair().expect("create transport pair");
+        let (mut host_stream, listener_stream) =
+            crate::platform::remote_ipc::socket_pair().expect("create transport pair");
         let running = Arc::new(AtomicBool::new(true));
         spawn_ratatui_authority_target_host(SpawnRatatuiAuthorityTargetHostArgs {
             listener_stream,

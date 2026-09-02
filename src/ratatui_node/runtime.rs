@@ -6,6 +6,7 @@ use crate::domain::session_catalog::{
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::lifecycle::LifecycleError;
+use crate::platform::local_ipc::{LocalListener, LocalStream};
 use crate::ports::hooks_config::HooksConfigPort;
 use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
@@ -23,7 +24,6 @@ use crate::remote::publication::ratatui_target_publication_backend::RatatuiRemot
 use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -186,10 +186,8 @@ pub(crate) struct IoHandles {
 
 impl SharedState {
     pub(crate) fn new(network: RemoteNetworkConfig) -> Result<Arc<Self>, LifecycleError> {
-        let agent_signal_socket_path = super::socket::ratatui_socket_dir()
-            .join(format!("signal-{port}.sock", port = network.port))
-            .to_string_lossy()
-            .to_string();
+        let agent_signal_socket_path =
+            crate::platform::signal::default_signal_endpoint(network.port);
         let agent_signal_token = random_token()?;
         let public_endpoint_override = network.public_endpoint.clone();
         Ok(Arc::new(Self {
@@ -459,7 +457,9 @@ impl SharedState {
                     "[ratatui-node] last local session {target_id} exited; shutting down"
                 ));
                 self.shutdown.store(true, Ordering::SeqCst);
-                let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
+                let _ = LocalStream::connect(&crate::platform::local_ipc::LocalIpcAddr::node(
+                    self.network.port,
+                ));
                 *active_guard = None;
             } else {
                 // Pick the next local session. Prefer one that is not the
@@ -1012,7 +1012,8 @@ impl RatatuiNodeRuntime {
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
-        let socket_path = super::socket::ratatui_socket_path(self.network.port);
+        let ipc_addr = crate::platform::local_ipc::LocalIpcAddr::node(self.network.port);
+        let socket_path = ipc_addr.path();
         ERROR_LOG.log(format!(
             "[ratatui-node] starting port={} socket={}",
             self.network.port,
@@ -1023,10 +1024,10 @@ impl RatatuiNodeRuntime {
             crate::infra::best_effort::create_dir_all(parent);
         }
 
-        // Remove stale socket before binding.
+        // Remove stale socket/marker before binding.
         crate::infra::best_effort::remove_file(&socket_path);
 
-        let listener = UnixListener::bind(&socket_path).map_err(|error| {
+        let listener = LocalListener::bind(&ipc_addr).map_err(|error| {
             LifecycleError::Io(
                 format!(
                     "failed to bind ratatui node socket {}",
@@ -1035,6 +1036,12 @@ impl RatatuiNodeRuntime {
                 error,
             )
         })?;
+
+        if let Err(error) = crate::platform::local_ipc::write_node_marker(self.network.port) {
+            ERROR_LOG.log(format!(
+                "[ratatui-node] failed to write node marker: {error}"
+            ));
+        }
 
         ERROR_LOG.log("[ratatui-node] listening".to_string());
 
@@ -1107,7 +1114,11 @@ impl RatatuiNodeRuntime {
 
         // Start the agent signal listener so agent hooks can deliver lifecycle
         // events (UserPromptSubmit, PermissionRequest, etc.) to this server.
-        let signal_server = match AgentSignalServer::start(self.shared.clone()) {
+        let signal_server = match AgentSignalServer::start(
+            std::path::Path::new(&self.shared.agent_signal.socket_path),
+            &self.shared.agent_signal.token,
+            self.shared.state_sender(),
+        ) {
             Ok(server) => {
                 ERROR_LOG.log(format!(
                     "[ratatui-node] agent signal socket={}",
@@ -1204,19 +1215,25 @@ impl RatatuiNodeRuntime {
                 // Bind the same local control socket that legacy sidecar
                 // ingress owners use, so __remote-session-creation and Ctrl+W
                 // connect can reach this single-process server.
-                let owner_socket_path = remote_node_ingress_owner_socket_path(&self.network);
-                crate::infra::best_effort::remove_file(&owner_socket_path);
-                if let Ok(owner_listener) =
-                    std::os::unix::net::UnixListener::bind(&owner_socket_path)
+                #[cfg(unix)]
                 {
-                    if let Some(owner_tx) = guard.owner_event_sender() {
-                        if let Ok(mut guard) = self.shared.ingress_internal_tx.lock() {
-                            *guard = Some(owner_tx.clone());
+                    let owner_socket_path = remote_node_ingress_owner_socket_path(&self.network);
+                    crate::infra::best_effort::remove_file(&owner_socket_path);
+                    if let Ok(owner_listener) =
+                        std::os::unix::net::UnixListener::bind(&owner_socket_path)
+                    {
+                        if let Some(owner_tx) = guard.owner_event_sender() {
+                            if let Ok(mut guard) = self.shared.ingress_internal_tx.lock() {
+                                *guard = Some(owner_tx.clone());
+                            }
+                            let (_lifecycle_tx, _lifecycle_rx) =
+                                std::sync::mpsc::channel::<OwnerLifecycleEvent>();
+                            let _owner_acceptor = start_owner_control_acceptor(
+                                owner_listener,
+                                &owner_tx,
+                                _lifecycle_tx,
+                            );
                         }
-                        let (_lifecycle_tx, _lifecycle_rx) =
-                            std::sync::mpsc::channel::<OwnerLifecycleEvent>();
-                        let _owner_acceptor =
-                            start_owner_control_acceptor(owner_listener, &owner_tx, _lifecycle_tx);
                     }
                 }
                 Some(guard)
@@ -1232,12 +1249,12 @@ impl RatatuiNodeRuntime {
         let clients = self.shared.clients.clients.clone();
         let client_writer_for_accept = client_writer.clone();
 
-        for stream in listener.incoming() {
+        loop {
             if self.shared.shutdown.load(Ordering::SeqCst) {
                 break;
             }
 
-            match stream {
+            match listener.accept() {
                 Ok(stream) => {
                     let clients = clients.clone();
                     let shared = self.shared.clone();
@@ -1267,6 +1284,7 @@ impl RatatuiNodeRuntime {
             signal_server.cleanup();
         }
         crate::infra::best_effort::remove_file(&socket_path);
+        crate::platform::local_ipc::remove_node_marker(self.network.port);
         if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner(&owner_network) {
             ERROR_LOG.log(format!(
                 "[ratatui-node] remote runtime owner shutdown error: {error}"
