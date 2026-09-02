@@ -18,9 +18,10 @@ use crate::process::startup_lock::StartupLock;
 use crate::process::workspace::sidecar_process_runtime::{
     spawn_waitagent_sidecar, spawn_waitagent_sidecar_child,
 };
-use crate::remote::authority::remote_authority_target_host_runtime::{
-    wait_for_ready_socket, RemoteAuthorityPublicationGateway,
-};
+#[cfg(unix)]
+use crate::remote::authority::remote_authority_target_host_runtime::wait_for_ready_socket;
+#[cfg(unix)]
+use crate::remote::authority::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
 use crate::remote::authority::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::remote::node::remote_node_session_runtime::GrpcAuthorityEvent;
 use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
@@ -190,6 +191,7 @@ impl SessionSyncAuthorityPublicationGateway {
     }
 }
 
+#[cfg(unix)]
 impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
     fn ensure_live_session_registered(
         &self,

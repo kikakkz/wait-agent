@@ -55,10 +55,48 @@ fn run() -> io::Result<()> {
 
     #[cfg(windows)]
     {
-        use crate::domain::agent_signal::AgentSignalEnvelope;
-        let envelope: AgentSignalEnvelope = serde_json::from_str(&message)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        crate::platform::signal::send_agent_signal(&signal_socket, &envelope)?;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileA, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            OPEN_EXISTING,
+        };
+
+        let target_c = std::ffi::CString::new(signal_socket.as_str())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid target"))?;
+        // SAFETY: `target_c` is a valid null-terminated pipe name.
+        let handle = unsafe {
+            CreateFileA(
+                target_c.as_ptr() as *const u8,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                0,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let bytes = message.into_bytes();
+        let mut written = 0u32;
+        // SAFETY: `handle` is valid and `bytes` outlives the call.
+        let write_ok = unsafe {
+            WriteFile(
+                handle,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        } != 0;
+        // SAFETY: `handle` was created above and is no longer used after this.
+        unsafe {
+            CloseHandle(handle);
+        }
+        if !write_ok {
+            return Err(io::Error::last_os_error());
+        }
     }
 
     Ok(())

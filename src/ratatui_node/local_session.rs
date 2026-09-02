@@ -81,7 +81,12 @@ impl RatatuiLocalSession {
             proxy.clone(),
         )));
 
+        #[cfg(unix)]
         let child_pid = pty.child().id();
+        // alacritty_terminal 0.25 has no `Pty::child` on Windows; the child
+        // pid is exposed through the exit watcher instead.
+        #[cfg(windows)]
+        let child_pid = pty.child_watcher().pid().map(|pid| pid.get()).unwrap_or(0);
 
         #[cfg(unix)]
         let master_fd = {

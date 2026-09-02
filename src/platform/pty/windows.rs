@@ -83,12 +83,18 @@ pub struct ConPtyChild {
     exit_status: Option<ExitStatus>,
 }
 
+// SAFETY: `process_handle` is an exclusively owned OS process handle. All Win32
+// calls on it (`WaitForSingleObject`, `GetExitCodeProcess`, `CloseHandle`) are
+// thread-safe, and the handle is only closed once, from `Drop`. Sharing the
+// handle across threads cannot race with closure because `Drop` requires `&mut`.
+unsafe impl Send for ConPtyChild {}
+unsafe impl Sync for ConPtyChild {}
+
 impl ConPtyChild {
     /// OS process id of the child.
     pub fn id(&self) -> u32 {
         self.pid
     }
-
     /// Non-blocking reap, matching `std::process::Child::try_wait`.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         use std::os::windows::process::ExitStatusExt;

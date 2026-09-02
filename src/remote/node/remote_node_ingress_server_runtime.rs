@@ -53,8 +53,10 @@ use crate::remote::node::remote_workspace_socket_registry_runtime::workspace_soc
 use crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
+#[cfg(unix)]
 use std::os::fd::RawFd;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -1338,6 +1340,7 @@ fn start_workspace_registry_polling_watcher(
 /// Handle returned by `start_socket_watcher`. The caller wakes the watcher by
 /// writing to a dedicated shutdown pipe so the blocking `poll` returns and the
 /// thread can exit cleanly.
+#[cfg(unix)]
 struct SocketWatcherHandle {
     inotify_fd: RawFd,
     shutdown_write: RawFd,
@@ -1349,6 +1352,7 @@ struct SocketWatcherHandle {
 ///
 /// Linux production uses a blocking inotify fd so bridge discovery is driven by
 /// kernel filesystem events, not periodic refresh scans.
+#[cfg(unix)]
 fn start_socket_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> io::Result<SocketWatcherHandle> {
@@ -1619,6 +1623,9 @@ fn run_node_ingress_server_loop<
         })
     };
     drop(event_tx);
+    // The inotify socket watcher is Unix-only; on Windows authority discovery
+    // currently relies on the periodic retry scan.
+    #[cfg(unix)]
     let watcher = if start_authority_socket_watcher {
         match start_socket_watcher(internal_tx.clone()) {
             Ok(watcher) => Some(watcher),
@@ -1632,6 +1639,8 @@ fn run_node_ingress_server_loop<
     } else {
         None
     };
+    #[cfg(windows)]
+    let _ = start_authority_socket_watcher;
 
     let mut high_priority_events = VecDeque::<IngressServerEvent>::new();
     let mut low_priority_events = VecDeque::<IngressServerEvent>::new();
@@ -1784,6 +1793,7 @@ fn run_node_ingress_server_loop<
             }
         }
     }
+    #[cfg(unix)]
     if let Some(handle) = watcher {
         let signal = [1u8];
         // SAFETY: `handle.shutdown_write` is a valid pipe fd owned by this

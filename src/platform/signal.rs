@@ -115,12 +115,12 @@ fn run_windows_signal_listener(
     state_tx: std::sync::mpsc::Sender<StateEvent>,
     token: String,
 ) {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateNamedPipeA, PIPE_ACCESS_DUPLEX, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeA, DisconnectNamedPipe, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
-    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
 
     let endpoint_c = std::ffi::CString::new(endpoint).unwrap_or_default();
     if endpoint_c.is_empty() {
@@ -134,9 +134,9 @@ fn run_windows_signal_listener(
         // duplex, local-only.
         let pipe = unsafe {
             CreateNamedPipeA(
-                endpoint_c.as_ptr(),
+                endpoint_c.as_ptr() as *const u8,
                 PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_WAIT,
+                PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 4096,
                 4096,
@@ -154,8 +154,7 @@ fn run_windows_signal_listener(
 
         // SAFETY: `pipe` is a valid named pipe handle returned by CreateNamedPipeA.
         let connected = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } != 0
-            || std::io::Error::last_os_error().raw_os_error()
-                == Some(windows_sys::Win32::System::Pipes::ERROR_PIPE_CONNECTED as i32);
+            || std::io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32);
 
         if connected {
             let mut buf = [0u8; 4096];
@@ -271,7 +270,7 @@ pub fn send_agent_signal(target: &str, envelope: &AgentSignalEnvelope) -> std::i
     // SAFETY: `target_c` is a valid null-terminated pipe name.
     let handle = unsafe {
         CreateFileA(
-            target_c.as_ptr(),
+            target_c.as_ptr() as *const u8,
             FILE_GENERIC_READ | FILE_GENERIC_WRITE,
             0,
             std::ptr::null_mut(),

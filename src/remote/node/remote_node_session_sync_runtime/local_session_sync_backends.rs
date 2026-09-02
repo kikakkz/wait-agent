@@ -1,7 +1,9 @@
 // Legacy tmux-era session-sync backends kept during the ratatui migration; most items are currently unused.
 
 use crate::cli::RemoteNetworkConfig;
-use crate::domain::agent_detector::{accepts_at_reference, DetectorRegistry};
+use crate::domain::agent_detector::accepts_at_reference;
+#[cfg(unix)]
+use crate::domain::agent_detector::DetectorRegistry;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, SessionTransport,
 };
@@ -16,17 +18,23 @@ use crate::infra::remote_transport_codec::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::platform::remote_ipc::RemoteControlStream;
+#[cfg(unix)]
 use crate::process_monitor::read_foreground_process_cmdline;
 use crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession;
 use crate::ratatui_node::clipboard_platform::format_file_reference;
 use crate::ratatui_node::SharedState;
+#[cfg(unix)]
+use crate::remote::authority::remote_authority_transport_runtime::AUTHORITY_TRANSPORT_PING_INTERVAL;
+#[cfg(unix)]
+use crate::remote::authority::remote_authority_transport_runtime::AUTHORITY_TRANSPORT_READ_TIMEOUT;
 use crate::remote::authority::remote_authority_transport_runtime::{
-    RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
-    AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
+    RemoteAuthorityCommand, AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
 };
+#[cfg(unix)]
+use crate::remote::node::remote_node_session_sync_runtime::LIVE_AUTHORITY_SERVER_ID;
 use crate::remote::node::remote_node_session_sync_runtime::{
     remote_session_sync_error, SessionSyncAuthorityHost, SessionSyncAuthorityOutputRoute,
-    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
+    SESSION_SYNC_AUTHORITY_ID,
 };
 
 use std::collections::HashMap;

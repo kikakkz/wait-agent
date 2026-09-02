@@ -9,13 +9,18 @@ use crate::infra::remote_protocol::{
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
-    write_registration_frame, AuthorityTransportFrame, RemoteTransportCodecError,
+    AuthorityTransportFrame, RemoteTransportCodecError,
 };
+// Only used by Unix-only listener code and tests; keep available under `test`
+// so unit tests still compile on any host.
+#[cfg(any(unix, test))]
+use crate::infra::remote_transport_codec::write_registration_frame;
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlStream};
+#[cfg(unix)]
 use crate::remote::authority::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
-use crate::remote::node::remote_node_transport_runtime::{
-    read_client_hello, read_server_hello, write_client_hello, write_server_hello,
-};
+#[cfg(any(unix, test))]
+use crate::remote::node::remote_node_transport_runtime::{read_client_hello, write_server_hello};
+use crate::remote::node::remote_node_transport_runtime::{read_server_hello, write_client_hello};
 use std::fmt;
 use std::io;
 #[cfg(unix)]
@@ -41,7 +46,7 @@ pub(crate) const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_sec
 #[cfg(unix)]
 #[allow(dead_code)]
 pub(crate) const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
-#[cfg(unix)]
+// Used by cross-platform ratatui session-sync code, so not gated to unix.
 pub(crate) const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[cfg(unix)]
