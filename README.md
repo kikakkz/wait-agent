@@ -93,34 +93,35 @@ One-line install for Linux x86_64 and macOS Apple Silicon:
 curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
 ```
 
-The installer resolves the latest GitHub release tag and downloads the matching
-release artifact. It does not build from `main`.
+One-line install for Windows (x86_64), from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.ps1 | iex
+```
+
+The installers resolve the latest GitHub release tag and download the matching
+release artifact. They do not build from `main`. The Windows installer performs
+a per-user install under `%LOCALAPPDATA%\Programs\waitagent` (no admin rights
+required) and adds that directory to your user `PATH`.
 
 Manual downloads are available from the
 [GitHub releases page](https://github.com/kikakkz/wait-agent/releases).
 
 <details>
-<summary><strong>Windows / WSL2</strong></summary>
+<summary><strong>Windows remote access</strong></summary>
 
 <br>
 
-WaitAgent does not run as a native Windows binary yet. Install and run the Linux
-build inside WSL2:
+To accept remote-machine connections on a Windows host, start WaitAgent with a
+public endpoint remote hosts can dial:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
-```
-
-When the WSL2 workspace needs to accept remote-machine connections, start
-WaitAgent with a public endpoint that remote hosts can dial:
-
-```bash
+```powershell
 waitagent --public <windows-or-lan-ip>:7474
 ```
 
-If WSL2 mirrored networking is not reliable in your environment, use Windows NAT
-plus a port proxy from the Windows host to the WSL2 address. Run this in an
-elevated Windows PowerShell or Command Prompt:
+If you prefer the WSL2 build instead of the native Windows binary, install and
+run the Linux build inside WSL2 and expose it through Windows NAT with a port
+proxy. Run this in an elevated Windows PowerShell or Command Prompt:
 
 ```powershell
 netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=7474 connectaddress=<wsl2-ip> connectport=7474
@@ -217,9 +218,8 @@ Direct connection is also available:
 waitagent --connect <server-ip>:7474
 ```
 
-Windows users should install and run WaitAgent inside WSL2. If the remote host
-cannot reach WSL2 directly, expose the listener through Windows NAT; see
-[Windows / WSL2](#windows--wsl2).
+Windows hosts run the native Windows binary (`irm ... install.ps1 | iex`); the
+WSL2 alternative is documented under [Windows remote access](#windows-remote-access).
 
 ---
 

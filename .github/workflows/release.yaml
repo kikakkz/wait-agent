@@ -99,7 +99,7 @@ jobs:
                 build-essential automake autoconf cmake ninja-build nasm clang \
                 libdbus-1-dev libkeyutils-dev
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --profile minimal --default-toolchain 1.86.0
+                | sh -s -- -y --profile minimal --default-toolchain 1.88.0
               . "$HOME/.cargo/env"
               export CC=clang
               export CXX=clang++
@@ -221,11 +221,69 @@ jobs:
             waitagent-*-aarch64-macos.tar.gz
             waitagent-*-aarch64-macos.dmg
 
+  release-windows-x86_64:
+    needs: resolve-release
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+      VERSION: ${{ needs.resolve-release.outputs.version }}
+      RELEASE_SHA: ${{ needs.resolve-release.outputs.sha }}
+      CARGO_TARGET_DIR: target/release-${{ github.run_id }}-${{ github.run_attempt }}-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Assert release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$RELEASE_SHA"
+          grep -F "version = \"$VERSION\"" Cargo.toml
+          grep -A2 'name = "waitagent"' Cargo.lock | grep -F "version = \"$VERSION\""
+
+      - name: cargo build --release
+        run: cargo build --release --locked
+        env:
+          WAITAGENT_GIT_SHA: ${{ needs.resolve-release.outputs.sha }}
+
+      - name: Verify built binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$CARGO_TARGET_DIR/release/waitagent.exe"
+          version_output="$("$binary" --version)"
+          echo "$version_output"
+          grep -F "waitagent $VERSION " <<<"$version_output"
+          if grep -F "(unknown)" <<<"$version_output"; then
+            echo "release binary is missing git sha metadata" >&2
+            exit 1
+          fi
+          grep -F "(${RELEASE_SHA:0:7})" <<<"$version_output"
+
+      - name: Build .zip archive
+        shell: pwsh
+        run: |
+          $zip = "waitagent-${env:VERSION}-x86_64-windows.zip"
+          Remove-Item -Force -ErrorAction SilentlyContinue $zip
+          Compress-Archive -Path "$env:CARGO_TARGET_DIR\release\waitagent.exe", "$env:CARGO_TARGET_DIR\release\waitagent-agent-signal-send.exe" -DestinationPath $zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: waitagent-*-x86_64-windows.zip
+
   create-release:
     needs:
       - resolve-release
       - release-linux-x86_64
       - release-macos
+      - release-windows-x86_64
     runs-on: ubuntu-latest
     permissions:
       contents: write
