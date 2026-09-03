@@ -121,6 +121,25 @@ jobs:
       - name: cargo test (release)
         run: cargo test --release -- --test-threads=1
 
+  check-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system deps
+        run: |
+          brew install bison pkg-config libevent ncurses automake autoconf utf8proc
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo check
+        run: cargo check --all-targets
+        env:
+          PKG_CONFIG_PATH: /opt/homebrew/opt/ncurses/lib/pkgconfig:/opt/homebrew/opt/libevent/lib/pkgconfig:/opt/homebrew/opt/utf8proc/lib/pkgconfig
+
   ai-check:
     runs-on: ubuntu-latest
     steps:

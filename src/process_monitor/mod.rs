@@ -27,7 +27,9 @@ use std::collections::HashMap;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::time::Duration;
@@ -64,8 +66,9 @@ use macos::MacOsProcessEventSource as PlatformSource;
 #[cfg(target_os = "windows")]
 use windows::WindowsProcessEventSource as PlatformSource;
 
-/// Platform implementation of `read_proc_cmdline`; the Unix version lives in
-/// this module below, the Windows Toolhelp32-based one in `windows.rs`.
+/// Platform implementation of `read_proc_cmdline`; the Linux /proc version
+/// lives in this module below, the Windows Toolhelp32-based one in
+/// `windows.rs`.
 #[cfg(target_os = "windows")]
 pub(crate) use windows::read_proc_cmdline;
 
@@ -232,7 +235,7 @@ impl ProcessMonitor {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) fn read_proc_cmdline(pid: u32) -> (Option<String>, Option<Vec<String>>) {
     let path = format!("/proc/{pid}/cmdline");
     let contents = fs::read_to_string(&path).unwrap_or_default();
