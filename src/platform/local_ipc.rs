@@ -35,9 +35,16 @@ impl LocalIpcAddr {
         self.path()
     }
 
+    /// Windows local IPC runs on a loopback TCP port derived from the node
+    /// port. The offset keeps it clear of the node's remote gRPC listener
+    /// (which binds the node port on all interfaces) and of third-party
+    /// services that occupy the node port (e.g. 7474).
     #[cfg(windows)]
     pub fn tcp_addr(&self) -> std::net::SocketAddr {
-        std::net::SocketAddr::from(([127, 0, 0, 1], self.port))
+        std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            self.port.saturating_add(LOCAL_IPC_PORT_OFFSET),
+        ))
     }
 }
 
@@ -50,6 +57,13 @@ fn path_extension() -> &'static str {
 fn path_extension() -> &'static str {
     "port"
 }
+
+/// Offset from the node port to the loopback TCP port used for Windows local
+/// IPC. The remote gRPC listener binds the node port on all interfaces, so
+/// local IPC must live elsewhere; 20000 mirrors the offset scheme used for
+/// remote-control listeners (`RemoteControlKind::windows_port_offset`).
+#[cfg(windows)]
+const LOCAL_IPC_PORT_OFFSET: u16 = 20_000;
 
 /// Directory that holds per-node marker files (and UDS files on Unix).
 pub fn marker_dir() -> PathBuf {

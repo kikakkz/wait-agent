@@ -94,14 +94,35 @@ impl RatatuiClientRuntime {
         })?;
         let mut reader = BufReader::new(reader);
 
-        // Read the initial snapshot from the server.
+        // Read the initial snapshot from the server. A real node always
+        // broadcasts a snapshot as the first message after ATTACH, so anything
+        // else means we are not talking to a waitagent node (e.g. a third-party
+        // service occupies the local IPC port) and must surface as an error
+        // instead of silently rendering an empty workspace.
         let mut line = String::new();
-        let snapshot = match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => RatatuiSnapshot::default(),
-            Ok(_) => match parse_server_message(&line) {
-                ServerMessage::Snapshot(snapshot) => *snapshot,
-                _ => RatatuiSnapshot::default(),
-            },
+        let bytes_read = reader.read_line(&mut line).map_err(|error| {
+            LifecycleError::Io(
+                format!(
+                    "failed to read initial snapshot from ratatui node socket {}",
+                    socket_path.display()
+                ),
+                error,
+            )
+        })?;
+        if bytes_read == 0 {
+            return Err(LifecycleError::Protocol(format!(
+                "ratatui node socket {} closed the connection before sending a snapshot; another service may be using the local IPC port",
+                socket_path.display()
+            )));
+        }
+        let snapshot = match parse_server_message(&line) {
+            ServerMessage::Snapshot(snapshot) => *snapshot,
+            _ => {
+                return Err(LifecycleError::Protocol(format!(
+                    "ratatui node socket {} sent an unexpected first message; another service may be using the local IPC port",
+                    socket_path.display()
+                )));
+            }
         };
 
         ERROR_LOG.log(format!(
