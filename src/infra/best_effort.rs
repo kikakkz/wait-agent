@@ -30,6 +30,10 @@ pub fn remove_dir_all(path: impl AsRef<Path>) {
 }
 
 /// Write bytes to a file; ignore errors.
+///
+/// Only used by Unix-only code paths (the bundled agent signal sender
+/// extraction), hence `dead_code` on Windows.
+#[allow(dead_code)]
 pub fn write_file(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
     let _ = fs::write(path, contents);
 }

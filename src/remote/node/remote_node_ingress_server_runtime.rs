@@ -210,6 +210,9 @@ pub(crate) enum InternalEvent {
     LocalCreateSessionTimedOut {
         request_id: String,
     },
+    // Only constructed by the Linux inotify socket watcher; kept in the
+    // cross-platform enum because the match arms handling it are shared.
+    #[allow(dead_code)]
     SocketDirChanged,
     AuthoritySocketReady {
         node_id: String,

@@ -90,6 +90,7 @@ where
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn wait_for_ready_socket(socket_path: &Path) -> Result<(), LifecycleError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {

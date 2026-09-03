@@ -153,9 +153,9 @@ pub fn remote_runtime_owner_startup_lock_path(network: &RemoteNetworkConfig) -> 
 /// Keyed by socket name (not network). The Unix file name must stay identical
 /// to the historical name; the sanitize alphabet keeps `-` and `_`.
 pub fn remote_session_sync_owner_addr(socket_name: &str) -> RemoteControlAddr {
-    let name = sanitize_socket_name(socket_name);
     #[cfg(unix)]
     {
+        let name = sanitize_socket_name(socket_name);
         RemoteControlAddr::Unix(
             std::env::temp_dir().join(format!("waitagent-remote-session-sync-owner-{name}.sock")),
         )

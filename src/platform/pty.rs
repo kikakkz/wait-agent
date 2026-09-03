@@ -4,9 +4,14 @@
 //! `RatatuiAuthorityHostSession` and `AuthorityHostIoLoop`.  Windows
 //! implementations will be added in a later slice.
 
+#[cfg(unix)]
 use std::fs::File;
 
 /// A PTY master/slave pair.
+///
+/// Only the Unix backend constructs this; the Windows backend uses
+/// [`ConPty`] instead.
+#[cfg(unix)]
 pub struct PtyPair {
     pub master: File,
     pub slave: File,

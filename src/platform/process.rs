@@ -37,8 +37,8 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(
-            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP as u32
-                | windows_sys::Win32::System::Threading::DETACHED_PROCESS as u32,
+            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+                | windows_sys::Win32::System::Threading::DETACHED_PROCESS,
         )
         .spawn()
 }

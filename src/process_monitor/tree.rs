@@ -119,6 +119,9 @@ impl SessionProcessTree {
     }
 
     /// Return all pids currently tracked in this tree.
+    ///
+    /// Only the Linux `/proc` refresh path consumes this.
+    #[cfg(target_os = "linux")]
     pub fn pids(&self) -> Vec<u32> {
         self.processes.keys().copied().collect()
     }

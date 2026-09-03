@@ -1,5 +1,8 @@
 use ssh_key::{Algorithm, HashAlg, PrivateKey, PublicKey, SshSig};
 use std::fs;
+// `Write` is only exercised by the Unix 0o600-mode write paths; the Windows
+// paths use `fs::write`.
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -393,7 +396,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "waitagent-operator-auth-{name}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
         ))
     }
 

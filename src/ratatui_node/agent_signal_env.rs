@@ -1,6 +1,7 @@
 use crate::lifecycle::LifecycleError;
 use crate::process::agent_signal_sender_bundle::extract_agent_signal_sender;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::process::Command;
 
 /// Environment variables and `PROMPT_COMMAND` needed by a shell so that
@@ -47,6 +48,10 @@ impl AgentSignalEnv {
 
     /// Insert all required variables into a `std::process::Command` used to
     /// spawn an authority-host PTY session.
+    ///
+    /// Only the Unix authority-host spawn path uses this; the Windows ConPTY
+    /// path and the alacritty PTY path use [`AgentSignalEnv::apply_to_hashmap`].
+    #[cfg(unix)]
     pub fn apply_to_command(&self, cmd: &mut Command) -> Result<(), LifecycleError> {
         cmd.env("WAITAGENT_SIGNAL_SOCKET", &self.socket_path);
         cmd.env("WAITAGENT_SOCKET_NAME", &self.socket_name);

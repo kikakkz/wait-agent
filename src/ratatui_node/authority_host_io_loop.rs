@@ -102,6 +102,12 @@ pub(crate) struct AuthorityHostIoHandle {
 
 impl AuthorityHostIoHandle {
     /// Send a request to the IO loop and wake it if it is blocked in poll.
+    ///
+    /// `SendError` mirrors the request payload, which embeds the platform PTY
+    /// handle type; on Windows (`ConPtyChild`) that makes the error large
+    /// enough to trip `clippy::result_large_err`. The error path only carries
+    /// the value back to the caller for logging, so the size is accepted.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn send(
         &self,
         request: AuthorityHostIoRequest,
@@ -682,6 +688,11 @@ fn drain_requests(
                         let _ = poller.delete(&state.pty_master);
                         token_to_session.remove(&state.token);
                     }
+                    // On Windows the removed session state has no poller
+                    // registration to tear down; only the drop side effect of
+                    // `sessions.remove` matters.
+                    #[cfg(windows)]
+                    drop(state);
                 }
             }
             AuthorityHostIoRequest::SetOutputSender {

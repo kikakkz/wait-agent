@@ -67,19 +67,39 @@ pub fn extract_agent_signal_sender() -> Result<PathBuf, LifecycleError> {
 
 #[cfg(windows)]
 pub fn extract_agent_signal_sender() -> Result<PathBuf, LifecycleError> {
+    // Look up the companion sender binary in order:
+    // 1. next to the current executable (normal installed layout),
+    // 2. one directory up from the current executable (unit-test binaries
+    //    live in `target/<profile>/deps/` while the sender bin is built in
+    //    `target/<profile>/`),
+    // 3. the path cargo exposes to integration tests via CARGO_BIN_EXE_<name>.
     let exe = std::env::current_exe().map_err(|error| {
         LifecycleError::Io(
             "failed to locate current executable for agent signal sender".to_string(),
             error,
         )
     })?;
-    let sender_path = exe.with_file_name("waitagent-agent-signal-send.exe");
-    if sender_path.is_file() {
-        return Ok(sender_path);
+    let mut candidates = vec![exe.with_file_name("waitagent-agent-signal-send.exe")];
+    if let Some(parent_dir) = exe.parent().and_then(|dir| dir.parent()) {
+        candidates.push(parent_dir.join("waitagent-agent-signal-send.exe"));
+    }
+    if let Ok(env_path) = std::env::var("CARGO_BIN_EXE_waitagent-agent-signal-send") {
+        if !env_path.is_empty() {
+            candidates.push(PathBuf::from(env_path));
+        }
+    }
+    for candidate in &candidates {
+        if candidate.is_file() {
+            return Ok(candidate.clone());
+        }
     }
     Err(LifecycleError::Protocol(format!(
-        "agent signal sender not found next to executable at {}",
-        sender_path.display()
+        "agent signal sender not found; searched {}",
+        candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     )))
 }
 

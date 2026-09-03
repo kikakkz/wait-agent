@@ -4,6 +4,7 @@ use crate::domain::agent_signal::AgentSignalEnvelope;
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::ratatui_node::state_event::StateEvent;
+#[cfg(unix)]
 use std::path::Path;
 
 /// Return the platform-specific endpoint where the agent signal server listens.
@@ -224,6 +225,7 @@ fn handle_signal_bytes(bytes: &[u8], state_tx: &std::sync::mpsc::Sender<StateEve
     });
 }
 
+#[cfg(unix)]
 fn ensure_socket_parent(socket_path: &Path) -> Result<(), LifecycleError> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -256,6 +258,7 @@ pub fn send_agent_signal(target: &str, envelope: &AgentSignalEnvelope) -> std::i
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 pub fn send_agent_signal(target: &str, envelope: &AgentSignalEnvelope) -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{

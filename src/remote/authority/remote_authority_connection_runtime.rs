@@ -44,6 +44,9 @@ const AUTHORITY_TRANSPORT_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(unix)]
 const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 
+// Variants are only constructed by the Unix connection loops; on Windows the
+// enum still appears in channel and trait signatures.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorityTransportEvent {
     Connected {
@@ -143,6 +146,8 @@ impl<S> RemoteAuthorityConnectionRuntime<S>
 where
     S: AuthorityConnectionSource,
 {
+    // All callers are Unix-only (the queued-stream starter and tests).
+    #[cfg(any(unix, test))]
     pub fn new(source: S) -> Self {
         Self { source }
     }

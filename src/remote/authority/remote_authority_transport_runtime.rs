@@ -11,14 +11,13 @@ use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
     AuthorityTransportFrame, RemoteTransportCodecError,
 };
-// Only used by Unix-only listener code and tests; keep available under `test`
-// so unit tests still compile on any host.
-#[cfg(any(unix, test))]
+// Only used by Unix-only listener code and Unix-only tests.
+#[cfg(unix)]
 use crate::infra::remote_transport_codec::write_registration_frame;
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlStream};
 #[cfg(unix)]
 use crate::remote::authority::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use crate::remote::node::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::remote::node::remote_node_transport_runtime::{read_server_hello, write_client_hello};
 use std::fmt;

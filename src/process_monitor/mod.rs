@@ -288,15 +288,6 @@ pub(crate) fn read_foreground_process_cmdline(
     read_proc_cmdline(leader_pid as u32)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn read_foreground_process_cmdline(
-    _pty_master_fd: PlatformPtyFd,
-) -> (Option<String>, Option<Vec<String>>) {
-    // No PTY foreground process group on Windows (ConPTY is not implemented
-    // yet) and no libproc equivalent on macOS; return nothing.
-    (None, None)
-}
-
 /// Create a periodic timerfd that fires every [`FALLBACK_INTERVAL`].
 #[cfg(target_os = "linux")]
 fn start_fallback_timer() -> Result<OwnedFd, LifecycleError> {

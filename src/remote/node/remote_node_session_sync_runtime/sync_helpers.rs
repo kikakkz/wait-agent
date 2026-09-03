@@ -88,6 +88,8 @@ pub(crate) enum LocalCatalogChangeAck {
 }
 
 impl LocalCatalogChangeAck {
+    /// Only the Unix session-sync owner listener renders this.
+    #[cfg(unix)]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Published => "published",

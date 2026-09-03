@@ -159,10 +159,9 @@ pub fn openpty(cols: u16, rows: u16) -> io::Result<ConPty> {
         )
     };
     if hr < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("CreatePseudoConsole failed: 0x{hr:08x}"),
-        ));
+        return Err(io::Error::other(format!(
+            "CreatePseudoConsole failed: 0x{hr:08x}"
+        )));
     }
 
     Ok(ConPty {
@@ -183,10 +182,9 @@ pub fn resize(conpty: &ConPty, cols: u16, rows: u16) -> io::Result<()> {
     // SAFETY: conpty.hpcon is a valid open pseudoconsole handle.
     let hr = unsafe { ResizePseudoConsole(conpty.hpcon, size) };
     if hr < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("ResizePseudoConsole failed: 0x{hr:08x}"),
-        ));
+        return Err(io::Error::other(format!(
+            "ResizePseudoConsole failed: 0x{hr:08x}"
+        )));
     }
     Ok(())
 }

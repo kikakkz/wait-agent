@@ -57,6 +57,8 @@ pub fn write_registration_frame(
     Ok(())
 }
 
+// Only the Unix authority connection runtime consumes registration frames.
+#[cfg(unix)]
 pub fn read_registration_frame(
     reader: &mut impl Read,
 ) -> Result<String, RemoteTransportCodecError> {
@@ -994,9 +996,11 @@ fn read_u8(reader: &mut impl Read) -> Result<u8, RemoteTransportCodecError> {
 mod tests {
     use super::{
         read_authority_transport_frame, read_control_plane_envelope, read_node_session_envelope,
-        read_registration_frame, write_authority_transport_frame, write_control_plane_envelope,
-        write_node_session_envelope, write_registration_frame, AuthorityTransportFrame,
+        write_authority_transport_frame, write_control_plane_envelope, write_node_session_envelope,
+        AuthorityTransportFrame,
     };
+    #[cfg(unix)]
+    use super::{read_registration_frame, write_registration_frame};
     use crate::infra::remote_protocol::{
         BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
         CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
@@ -1006,6 +1010,9 @@ mod tests {
         TargetPublicationAckPayload, TargetPublicationAckStatus, TargetPublishedPayload,
     };
 
+    // Registration frames are only consumed by the Unix authority connection
+    // runtime; `read_registration_frame` does not exist on Windows.
+    #[cfg(unix)]
     #[test]
     fn registration_frame_round_trips_node_id() {
         let mut bytes = Vec::new();

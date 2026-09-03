@@ -4,15 +4,19 @@ use crate::domain::session_catalog::{
     SessionTransport,
 };
 use crate::infra::error_log::ERROR_LOG;
+#[cfg(unix)]
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::lifecycle::LifecycleError;
 use crate::platform::local_ipc::{LocalListener, LocalStream};
 use crate::ports::hooks_config::HooksConfigPort;
 use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
+#[cfg(unix)]
 use crate::remote::node::remote_node_ingress_server_runtime::{
-    start_owner_control_acceptor, InternalEvent, OwnerLifecycleEvent,
-    RemoteNodeIngressServerRuntime,
+    start_owner_control_acceptor, OwnerLifecycleEvent,
+};
+use crate::remote::node::remote_node_ingress_server_runtime::{
+    InternalEvent, RemoteNodeIngressServerRuntime,
 };
 use crate::remote::node::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, LocalCatalogChangeRequest, RatatuiLocalAuthorityHostBackend,

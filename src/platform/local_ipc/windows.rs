@@ -8,6 +8,9 @@ use std::time::Duration;
 #[derive(Debug)]
 pub struct LocalListener {
     inner: TcpListener,
+    /// Kept for parity with the Unix backend's `local_addr`; no Windows
+    /// caller reads it yet.
+    #[allow(dead_code)]
     port: u16,
 }
 
@@ -23,6 +26,8 @@ impl LocalListener {
         Ok(LocalStream { inner: stream })
     }
 
+    /// Unix-backend parity API; not wired up on Windows yet.
+    #[allow(dead_code)]
     pub fn local_addr(&self) -> io::Result<LocalIpcAddr> {
         Ok(LocalIpcAddr::node(self.port))
     }
@@ -44,6 +49,8 @@ impl LocalStream {
         Ok(Self { inner })
     }
 
+    /// Unix-backend parity API; not wired up on Windows yet.
+    #[allow(dead_code)]
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.inner.set_read_timeout(dur)
     }

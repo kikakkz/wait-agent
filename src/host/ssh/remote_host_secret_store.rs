@@ -4,6 +4,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+// `Write` is only exercised by the Unix 0o600-mode write paths; the Windows
+// paths use `fs::write`.
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -491,7 +494,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "waitagent-file-secrets-legacy-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
         ));
         let store = FileRemoteHostSecretStore::new(&root);
         let id = RemoteHostSecretId::new("waitagent.remote-host.legacy.ssh-password").unwrap();
@@ -513,7 +519,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "waitagent-file-secrets-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
         ));
         let store = FileRemoteHostSecretStore::new(&root);
         let id =

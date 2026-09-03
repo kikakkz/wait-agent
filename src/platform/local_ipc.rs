@@ -184,7 +184,7 @@ fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, L
     let tcp = addr.tcp_addr();
     let mut stream = TcpStream::connect_timeout(&tcp, Duration::from_secs(2)).map_err(|error| {
         LifecycleError::Io(
-            format!("failed to connect to ratatui node TCP {}", tcp),
+            format!("failed to connect to ratatui node TCP {tcp}"),
             error,
         )
     })?;

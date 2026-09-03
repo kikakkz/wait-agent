@@ -146,8 +146,7 @@ impl RatatuiAuthorityHostSession {
                 })?;
 
         ERROR_LOG.log(format!(
-            "[ratatui-authority-host-session] spawned session={} cols={} rows={}",
-            session_id, cols, rows
+            "[ratatui-authority-host-session] spawned session={session_id} cols={cols} rows={rows}"
         ));
 
         Ok(Self {

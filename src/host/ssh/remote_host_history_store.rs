@@ -681,7 +681,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "waitagent-{name}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
         ))
     }
 }

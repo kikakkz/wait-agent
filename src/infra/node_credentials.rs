@@ -1,6 +1,10 @@
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+// `Write` is only exercised by the Unix 0o600-mode write path; the Windows
+// path uses `fs::write`.
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::host::ssh::remote_host_home::waitagent_home;
@@ -252,7 +256,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "waitagent-node-credentials-{name}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
         ));
         let _ = fs::remove_dir_all(&dir);
         NodeCredentialPaths {

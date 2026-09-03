@@ -1,3 +1,9 @@
+//! Unix-domain-socket paths for remote-node ingress. The only consumer is the
+//! Unix-only owner-control-socket binding in `ratatui_node::runtime`, so the
+//! module is empty on other platforms.
+
+#![cfg(unix)]
+
 use crate::cli::RemoteNetworkConfig;
 use std::path::PathBuf;
 

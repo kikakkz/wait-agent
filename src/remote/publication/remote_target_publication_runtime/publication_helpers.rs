@@ -761,6 +761,8 @@ fn encode_optional_agent_field(value: Option<&str>) -> String {
         .unwrap_or_else(|| "~".to_string())
 }
 
+// Only used by `render_publication_sender_command`, which is Unix-only.
+#[cfg(unix)]
 fn encode_optional_static_agent_field(value: Option<&'static str>) -> String {
     value
         .map(|value| base64::engine::general_purpose::STANDARD.encode(value.as_bytes()))

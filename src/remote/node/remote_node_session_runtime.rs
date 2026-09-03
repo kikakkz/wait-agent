@@ -24,10 +24,14 @@ use crate::infra::remote_grpc_transport::{
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
     CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
-    NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
-    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
-    ResizeAppliedPayload, TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
-    TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    NodeSessionChannel, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus,
+};
+#[cfg(unix)]
+use crate::infra::remote_protocol::{
+    NodeSessionEnvelope, RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload,
+    TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
 #[cfg(unix)]

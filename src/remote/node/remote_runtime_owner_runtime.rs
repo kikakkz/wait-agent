@@ -52,6 +52,10 @@ pub struct PublishedTargetSourceBinding {
     pub session_name: Option<String>,
 }
 
+// `UpsertSession` carries a full `ManagedSessionRecord` (300+ bytes) while the
+// other variants are small; the enum is a short-lived command envelope, so the
+// size is accepted rather than boxing every `UpsertSession` use site.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RemoteRuntimeOwnerCommandEnvelope {
     UpsertSession {
