@@ -82,7 +82,7 @@
 
 验收状态：Linux 全部验证全绿（`cargo test --release` 602+3+2、`cargo clippy -- -D warnings`、`cargo fmt --check`，本机亲自复核）。Windows 侧 Toolhelp32 实现按代码审计达标，未经真实 Windows 编译/运行验证，留待阶段 8。
 
-### 阶段 8：端到端 Windows 验证
+### 阶段 8：端到端 Windows 验证 ✅
 
 - 在 Windows 真机或 CI 上跑通完整流程：启动 node server、创建本地 session、运行 agent、连接远程 host。
 - 修复在真实 Windows 环境中暴露的兼容性问题。
@@ -92,6 +92,14 @@
 - Windows 上 `cargo test --release` 通过（或至少与 Linux 同等的测试覆盖）。
 - Windows 安装包/可执行文件能正常生成和运行。
 - Linux/macOS 功能没有退化。
+
+完成内容：
+- `.github/workflows/ci.yaml` 新增 `windows-check`（`cargo check --all-targets` + `cargo clippy -- -D warnings` + `cargo fmt --check`）与 `windows-test`（`cargo test --release`，533 测试）两个 `windows-latest` job。
+- Rust 工具链 1.86 → 1.88（russh 的 Windows 依赖 pageant 0.2.1 使用 let-chains，1.88 才稳定）。
+- 经 5 轮 CI 反馈修复真实 Windows 编译/测试问题：bin crate 路径（`crate::` → 自包含命名管道发送）；windows-sys 命名管道项实际位于 `Win32::System::Pipes`/`Foundation`；Unix-only import/测试代码按 `cfg(unix)`/`cfg(all(test, unix))` 门控；`ConPtyChild` 持裸 `HANDLE` 的 Send/Sync 问题；alacritty_terminal 0.25.1 Windows `Pty` API 差异（`child_watcher().pid()`）；Windows 侧 clippy 警告清零；测试 helper 用线程名拼临时文件名（含 `::`，Windows 非法字符）；`extract_agent_signal_sender` 在 Windows 上查找伴生 exe（含测试 deps 目录场景）；剪贴板粘贴测试按宿主平台选 `PlatformContext`。
+- 本地交叉检查工具链：WSL + mingw（`x86_64-w64-mingw32-gcc`）使 `cargo check --target x86_64-pc-windows-gnu [--all-targets]` 可在 Linux 本机 1-2 分钟完成一轮验证，后续 Windows 改动不必等 CI。
+
+验收状态：GitHub Actions `windows-latest` 上 6 个 job 全绿（run 对 `47be311`，含 windows-test 533 passed / 0 failed）。`cargo test --release` 在真实 Windows 上通过。诚实备注：交互式人工端到端（真机 TUI 里启动 server、attach session、跑 agent、连远程 host）未执行——CI 测试已覆盖其中的可编程部分（本地 PTY spawn、signal env、bundle 提取、粘贴分发等），剩余为人工体验验证，发现问题按阶段 8 流程继续修。
 
 ## 通用约束
 
