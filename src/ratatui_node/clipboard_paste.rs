@@ -298,7 +298,13 @@ mod tests {
 
         let snapshot = snapshot_with_session("local", Some("kimi"));
         let ctx = PasteContext {
-            platform: PlatformContext::Linux,
+            // Use the platform matching the host so the temp_dir() path
+            // (a Windows path on Windows) parses as a file path.
+            platform: if cfg!(windows) {
+                PlatformContext::Windows
+            } else {
+                PlatformContext::Linux
+            },
             snapshot: &snapshot,
         };
         let action = dispatch_paste(ClipboardContent::PlainText(path.clone()), &ctx);
