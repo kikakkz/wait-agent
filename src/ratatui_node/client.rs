@@ -55,15 +55,24 @@ pub(crate) fn handle_client(
     // add a handle to the registry so disconnect can be tracked.
     let is_attach = trimmed == "ATTACH";
     if is_attach {
-        client_writer.send(ClientWriterRequest::Register { client_id, stream });
+        client_writer.send(ClientWriterRequest::Register {
+            client_id,
+            stream,
+            broadcast: true,
+        });
         register_client_handle(client_id, removed.clone(), &clients);
         let _ = shared
             .state_sender()
             .send(StateEvent::ClientConnected { client_id });
     } else {
         // One-shot commands keep the original stream because the writer thread
-        // does not know about this short-lived client yet.
-        client_writer.send(ClientWriterRequest::Register { client_id, stream });
+        // does not know about this short-lived client yet. They only receive
+        // their direct response, never snapshot broadcasts.
+        client_writer.send(ClientWriterRequest::Register {
+            client_id,
+            stream,
+            broadcast: false,
+        });
     }
 
     if let Some(command) = parse_command(trimmed) {

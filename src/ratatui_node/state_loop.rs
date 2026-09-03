@@ -116,6 +116,11 @@ fn run_state_event_loop(
     let mut peer_reachability_handles: HashMap<String, PeerReachabilityProbeWorker> =
         HashMap::new();
     let mut last_retry_reset: HashMap<String, Instant> = HashMap::new();
+    // Nodes already known to be offline. `RemoteNodeOffline` can be re-signaled
+    // by the ingress close path or by transport failures; without this dedup
+    // the handler and the ingress server ping-pong the same event forever and
+    // flood the single state-loop thread. Cleared when the node comes back.
+    let mut offline_nodes: HashSet<String> = HashSet::new();
     let mut network_online: bool = true;
 
     while let Ok(event) = rx.recv() {
@@ -210,6 +215,9 @@ fn run_state_event_loop(
                 result,
                 activate,
             } => {
+                if let Ok(outcome) = result.as_ref() {
+                    offline_nodes.remove(&outcome.authority_node_id);
+                }
                 handle_remote_host_connect_result(
                     &shared,
                     &client_writer,
@@ -318,6 +326,13 @@ fn run_state_event_loop(
             }
 
             StateEvent::RemoteNodeOffline { node_id } => {
+                // Dedup: the ingress close path and transport failure paths can
+                // re-signal offline for a node the loop already handled. The
+                // first event marks the node offline; later repeats are
+                // absorbed here so the loop cannot self-sustain.
+                if !offline_nodes.insert(node_id.clone()) {
+                    continue;
+                }
                 handle_remote_node_offline(
                     &shared,
                     &client_writer,
@@ -331,6 +346,7 @@ fn run_state_event_loop(
             }
 
             StateEvent::RemoteNodeOnline { node_id } => {
+                offline_nodes.remove(&node_id);
                 if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
                     let _ = worker.cancel_tx.send(());
                 }
@@ -438,6 +454,7 @@ fn run_state_event_loop(
                 result,
             } => match *result {
                 Ok(outcome) => {
+                    offline_nodes.remove(&authority_node_id);
                     apply_remote_host_connect_outcome(
                         &shared,
                         &snapshot_store,
@@ -2310,6 +2327,7 @@ mod state_loop_tests {
         client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
             client_id: 1,
             stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
         });
         let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
 
@@ -2421,6 +2439,7 @@ mod state_loop_tests {
         client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
             client_id: 2,
             stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
         });
         let _ = tx.send(StateEvent::ClientConnected { client_id: 2 });
         let _ = tx.send(StateEvent::LocalSessionOutput {
@@ -2456,6 +2475,7 @@ mod state_loop_tests {
         client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
             client_id: 42,
             stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
         });
 
         let tx1 = tx.clone();
@@ -2754,6 +2774,55 @@ mod state_loop_tests {
         drop(tx);
         handle.join().expect("state loop should exit cleanly");
         crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn duplicate_remote_node_offline_is_deduped() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (_shared, tx, client_writer, handle) = start_test_loop();
+
+        // Attach a client so broadcast_snapshot actually broadcasts.
+        let (server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+        // Let the ClientConnected broadcast settle before counting.
+        std::thread::sleep(Duration::from_millis(100));
+
+        TEST_BROADCAST_COUNT.store(0, Ordering::SeqCst);
+        for _ in 0..3 {
+            let _ = tx.send(StateEvent::RemoteNodeOffline {
+                node_id: "peer#99998".to_string(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            TEST_BROADCAST_COUNT.load(Ordering::SeqCst),
+            1,
+            "duplicate RemoteNodeOffline events for an already-offline node must be deduped"
+        );
+
+        // RemoteNodeOnline clears the dedup state so a genuine later offline
+        // is processed again.
+        let _ = tx.send(StateEvent::RemoteNodeOnline {
+            node_id: "peer#99998".to_string(),
+        });
+        let _ = tx.send(StateEvent::RemoteNodeOffline {
+            node_id: "peer#99998".to_string(),
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            TEST_BROADCAST_COUNT.load(Ordering::SeqCst),
+            2,
+            "offline after online must be processed again"
+        );
+
+        drop(server);
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
     }
 
     #[test]

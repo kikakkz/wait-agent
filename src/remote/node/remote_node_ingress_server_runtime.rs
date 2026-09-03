@@ -2210,6 +2210,12 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
     closed_session_instances: &mut HashSet<String>,
     node_id: &str,
 ) {
+    // Only re-signal "node offline" when this close actually removed something.
+    // The state loop sends CloseNodeIngressSession in response to
+    // RemoteNodeOffline; signaling offline again here when there is nothing to
+    // close would bounce the event straight back and self-sustain a flood.
+    let had_pending =
+        pending_outbound_guards.contains_key(node_id) || pending_outbound_dials.contains(node_id);
     let removed_instance_ids: Vec<String> = sessions
         .iter()
         .filter(|(_session_instance_id, active)| active.session.node_id() == node_id)
@@ -2222,7 +2228,13 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
     }
     pending_outbound_guards.remove(node_id);
     pending_outbound_dials.remove(node_id);
-    mark_discovered_node_offline_if_last_ingress_session(publication_runtime, sessions, node_id);
+    if !removed_instance_ids.is_empty() || had_pending {
+        mark_discovered_node_offline_if_last_ingress_session(
+            publication_runtime,
+            sessions,
+            node_id,
+        );
+    }
 }
 
 fn mark_discovered_node_offline_if_last_ingress_session<B: RemoteTargetPublicationBackend>(
@@ -3905,4 +3917,49 @@ where
         "failed to run remote node ingress server".to_string(),
         io::Error::other(error.to_string()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ratatui_node::state_event::StateEvent;
+    use crate::ratatui_node::SharedState;
+    use crate::remote::publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+    use std::sync::mpsc;
+
+    #[test]
+    fn close_ingress_sessions_for_node_without_sessions_does_not_signal_offline() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let (state_tx, state_rx) = mpsc::channel::<StateEvent>();
+        shared.set_state_tx(state_tx);
+        let backend = RatatuiRemoteTargetPublicationBackend::new(shared, network.clone());
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::with_network_backend_and_noop_owner(network, backend)
+                .expect("publication runtime should build");
+
+        let mut sessions: HashMap<String, ActiveNodeIngressSession> = HashMap::new();
+        let mut outbound_guards: HashMap<String, GrpcRemoteNodeTransportGuard> = HashMap::new();
+        let mut pending_outbound_guards: HashMap<String, GrpcRemoteNodeTransportGuard> =
+            HashMap::new();
+        let mut pending_outbound_dials: HashSet<String> = HashSet::new();
+        let mut closed_session_instances: HashSet<String> = HashSet::new();
+
+        // Nothing was ever dialed or connected for this node: closing must not
+        // bounce a RemoteNodeOffline back to the state loop.
+        close_ingress_sessions_for_node(
+            &publication_runtime,
+            &mut sessions,
+            &mut outbound_guards,
+            &mut pending_outbound_guards,
+            &mut pending_outbound_dials,
+            &mut closed_session_instances,
+            "peer#42424",
+        );
+
+        assert!(
+            state_rx.try_recv().is_err(),
+            "close with nothing to close must not re-signal RemoteNodeOffline"
+        );
+    }
 }

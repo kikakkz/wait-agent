@@ -1,5 +1,6 @@
 use std::fs::{read_to_string, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Path of the diagnostics log file. Fixed location on Unix (existing
@@ -17,6 +18,27 @@ fn log_file() -> std::path::PathBuf {
 }
 /// Maximum bytes to read from the end of the log file when showing recent entries.
 const TAIL_BYTES: usize = 256 * 1024;
+
+/// Maximum size of the diagnostics log before it is truncated. Bounded so a
+/// log-spam loop cannot grow the file without limit and slow every write.
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Last message seen by [`ErrorLog`], used to suppress unbounded repeats.
+struct LastEntry {
+    message: String,
+    count: u64,
+}
+
+static LAST: OnceLock<Mutex<LastEntry>> = OnceLock::new();
+
+fn last_entry() -> &'static Mutex<LastEntry> {
+    LAST.get_or_init(|| {
+        Mutex::new(LastEntry {
+            message: String::new(),
+            count: 0,
+        })
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -56,6 +78,50 @@ impl LogLevel {
     }
 }
 
+/// Decide whether a log write at `current_len` should first truncate the file.
+fn should_truncate(current_len: u64) -> bool {
+    current_len > MAX_LOG_BYTES
+}
+
+/// Format the lines that a new `message` produces given the suppression state.
+///
+/// Returns `None` when the message is a consecutive repeat (the state counter
+/// is bumped and nothing is written). Otherwise returns the lines to append:
+/// an optional "... repeated N times" summary of the previous message followed
+/// by the new message itself.
+fn suppressible_lines(
+    last: &mut LastEntry,
+    level: LogLevel,
+    ts: u128,
+    message: &str,
+) -> Option<Vec<String>> {
+    let format_line = |text: &str| {
+        format!(
+            "[{}.{:03}] [{}] {}\n",
+            ts / 1000,
+            ts % 1000,
+            level.as_str(),
+            text
+        )
+    };
+    if last.message == message {
+        last.count += 1;
+        return None;
+    }
+    let mut lines = Vec::with_capacity(2);
+    if last.count > 0 {
+        lines.push(format_line(&format!(
+            "... previous message repeated {} times: {}",
+            last.count, last.message
+        )));
+    }
+    lines.push(format_line(message));
+    last.message.clear();
+    last.message.push_str(message);
+    last.count = 0;
+    Some(lines)
+}
+
 pub struct ErrorLog;
 
 impl ErrorLog {
@@ -80,18 +146,40 @@ impl ErrorLog {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let line = format!(
-            "[{}.{:03}] [{}] {}\n",
-            ts / 1000,
-            ts % 1000,
-            level.as_str(),
-            message
-        );
-        let _ = OpenOptions::new()
+
+        // Suppress consecutive repeats inside the mutex (no I/O held), then do
+        // the file append after releasing it. The mutex is a leaf: no other
+        // lock is acquired while it is held.
+        let lines = {
+            let mut last = last_entry().lock().unwrap_or_else(|e| e.into_inner());
+            suppressible_lines(&mut last, level, ts, &message)
+        };
+        let Some(lines) = lines else {
+            return;
+        };
+
+        if let Ok(file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_file())
-            .and_then(|mut f| f.write_all(line.as_bytes()));
+        {
+            // Rotate by truncating when the log grows past the cap. Dropping
+            // old history is acceptable for a diagnostics log and keeps the
+            // tail-based reader cheap.
+            let mut file = file;
+            if file
+                .metadata()
+                .map(|metadata| should_truncate(metadata.len()))
+                .unwrap_or(false)
+            {
+                let _ = file.set_len(0);
+            }
+            let mut buf = String::with_capacity(lines.iter().map(|line| line.len()).sum());
+            for line in &lines {
+                buf.push_str(line);
+            }
+            let _ = file.write_all(buf.as_bytes());
+        }
     }
 
     /// Read the most recent `max_lines` log entries.
@@ -214,5 +302,49 @@ mod tests {
             parse_entry("[1234567890.000] [ERROR] x").unwrap().1,
             LogLevel::Error
         );
+    }
+
+    #[test]
+    fn suppressible_lines_drops_consecutive_repeats() {
+        let mut last = LastEntry {
+            message: String::new(),
+            count: 0,
+        };
+        assert!(suppressible_lines(&mut last, LogLevel::Info, 1000, "offline node-a").is_some());
+        assert!(suppressible_lines(&mut last, LogLevel::Info, 1001, "offline node-a").is_none());
+        assert!(suppressible_lines(&mut last, LogLevel::Info, 1002, "offline node-a").is_none());
+        assert_eq!(last.count, 2);
+
+        let lines = suppressible_lines(&mut last, LogLevel::Info, 1003, "offline node-b")
+            .expect("new message must be written");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("repeated 2 times"),
+            "repeat summary missing: {}",
+            lines[0]
+        );
+        assert!(lines[0].contains("offline node-a"));
+        assert!(lines[1].contains("offline node-b"));
+    }
+
+    #[test]
+    fn suppressible_lines_resets_counter_after_flush() {
+        let mut last = LastEntry {
+            message: String::new(),
+            count: 0,
+        };
+        let _ = suppressible_lines(&mut last, LogLevel::Info, 1000, "msg-x");
+        let _ = suppressible_lines(&mut last, LogLevel::Info, 1001, "msg-x");
+        let _ = suppressible_lines(&mut last, LogLevel::Info, 1002, "msg-y");
+        assert_eq!(last.count, 0);
+        assert_eq!(last.message, "msg-y");
+        assert!(suppressible_lines(&mut last, LogLevel::Info, 1003, "msg-y").is_none());
+        assert_eq!(last.count, 1);
+    }
+
+    #[test]
+    fn should_truncate_only_past_cap() {
+        assert!(!should_truncate(MAX_LOG_BYTES));
+        assert!(should_truncate(MAX_LOG_BYTES + 1));
     }
 }

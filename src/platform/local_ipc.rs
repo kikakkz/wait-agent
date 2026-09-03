@@ -149,9 +149,36 @@ pub fn write_node_marker(_port: u16) -> io::Result<()> {
 }
 
 /// Sends a one-shot control command to the server on `port` and returns the
-/// first line of response.
+/// response line. Server-pushed messages (snapshots, history) that arrive
+/// before the response are skipped.
 pub fn send_node_command(port: u16, command: &str) -> Result<String, LifecycleError> {
     send_node_command_impl(LocalIpcAddr::node(port), command)
+}
+
+/// Returns true when a wire line is a server-pushed message (snapshot or
+/// history) rather than a control response. One-shot command clients can
+/// receive pushed broadcasts while waiting for the response.
+fn is_push_message(line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    matches!(
+        value.get("type").and_then(|tag| tag.as_str()),
+        Some("snapshot") | Some("history")
+    )
+}
+
+/// Read lines until the first non-push message, which is the control response.
+/// Lines that fail JSON parsing are treated as legacy plain-text responses.
+fn read_response_line(reader: &mut impl BufRead) -> io::Result<String> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line)?;
+        if !is_push_message(line.trim()) {
+            return Ok(line.trim().to_string());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -184,11 +211,9 @@ fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, L
     })?;
 
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|error| {
+    read_response_line(&mut reader).map_err(|error| {
         LifecycleError::Io("failed to read ratatui node response".to_string(), error)
-    })?;
-    Ok(line.trim().to_string())
+    })
 }
 
 #[cfg(windows)]
@@ -218,11 +243,9 @@ fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, L
     })?;
 
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|error| {
+    read_response_line(&mut reader).map_err(|error| {
         LifecycleError::Io("failed to read ratatui node response".to_string(), error)
-    })?;
-    Ok(line.trim().to_string())
+    })
 }
 
 /// Lists ports that have a marker file in the runtime directory.
@@ -254,3 +277,46 @@ pub(crate) mod windows;
 pub use unix::{LocalListener, LocalStream};
 #[cfg(windows)]
 pub use windows::{LocalListener, LocalStream};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_push_message_detects_snapshot_and_history() {
+        assert!(is_push_message(r#"{"type":"snapshot","payload":{}}"#));
+        assert!(is_push_message(r#"{"type":"history","payload":{}}"#));
+    }
+
+    #[test]
+    fn is_push_message_rejects_responses_and_plain_text() {
+        assert!(!is_push_message(
+            r#"{"type":"response","payload":{"ok":true}}"#
+        ));
+        assert!(!is_push_message("OK connected"));
+        assert!(!is_push_message("ERR boom"));
+        assert!(!is_push_message(""));
+    }
+
+    #[test]
+    fn read_response_line_skips_pushed_messages() {
+        let wire = concat!(
+            r#"{"type":"snapshot","payload":{}}"#,
+            "\n",
+            r#"{"type":"history","payload":{}}"#,
+            "\n",
+            r#"{"type":"response","payload":{"ok":true}}"#,
+            "\n"
+        );
+        let mut reader = BufReader::new(io::Cursor::new(wire.as_bytes()));
+        let line = read_response_line(&mut reader).expect("response line");
+        assert_eq!(line, r#"{"type":"response","payload":{"ok":true}}"#);
+    }
+
+    #[test]
+    fn read_response_line_accepts_legacy_plain_text() {
+        let mut reader = BufReader::new(io::Cursor::new(b"OK connected\n"));
+        let line = read_response_line(&mut reader).expect("response line");
+        assert_eq!(line, "OK connected");
+    }
+}
