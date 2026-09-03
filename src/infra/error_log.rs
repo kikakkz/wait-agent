@@ -2,7 +2,19 @@ use std::fs::{read_to_string, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const LOG_FILE: &str = "/tmp/waitagent-diag.log";
+/// Path of the diagnostics log file. Fixed location on Unix (existing
+/// tooling reads `/tmp/waitagent-diag.log`); the system temp dir elsewhere
+/// so logging works on Windows too.
+fn log_file() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        std::path::PathBuf::from("/tmp/waitagent-diag.log")
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("waitagent-diag.log")
+    }
+}
 /// Maximum bytes to read from the end of the log file when showing recent entries.
 const TAIL_BYTES: usize = 256 * 1024;
 
@@ -78,7 +90,7 @@ impl ErrorLog {
         let _ = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(LOG_FILE)
+            .open(log_file())
             .and_then(|mut f| f.write_all(line.as_bytes()));
     }
 
@@ -88,7 +100,7 @@ impl ErrorLog {
     /// [`TAIL_BYTES`] of the file are parsed. If `max_lines` is larger than
     /// the number of entries in that tail, all tail entries are returned.
     pub fn recent_entries(&self, max_lines: usize) -> Vec<(u128, LogLevel, String)> {
-        let file = match File::open(LOG_FILE) {
+        let file = match File::open(log_file()) {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
@@ -128,7 +140,7 @@ impl ErrorLog {
     /// Prefer [`Self::recent_entries`] for UI use; this reads the entire file
     /// and may be slow for large logs.
     pub fn entries(&self) -> Vec<(u128, LogLevel, String)> {
-        let content = match read_to_string(LOG_FILE) {
+        let content = match read_to_string(log_file()) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
