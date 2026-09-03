@@ -3427,9 +3427,16 @@ fn run_ratatui_connect(state: &ConnectRemoteHostState, port: u16) -> Result<Stri
         &RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path()),
     )?;
 
-    let line = crate::platform::local_ipc::send_node_command(
+    // The node server answers CONNECT_REMOTE_HOST only after the full remote
+    // bootstrap finishes (SSH probe, waitagent install/start), which routinely
+    // exceeds the 2-second default used by quick control commands. The pane
+    // shows a modal "Connecting..." while blocked here, matching the
+    // `__connect-remote-host` sidecar path, which waits without any timeout.
+    const CONNECT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    let line = crate::platform::local_ipc::send_node_command_with_timeout(
         port,
         &format!("CONNECT_REMOTE_HOST {}", profile.name),
+        CONNECT_RESPONSE_TIMEOUT,
     )
     .map_err(|error| format!("failed to connect to ratatui node on port {port}: {error}"))?;
     let response = line.trim();

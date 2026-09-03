@@ -150,9 +150,21 @@ pub fn write_node_marker(_port: u16) -> io::Result<()> {
 
 /// Sends a one-shot control command to the server on `port` and returns the
 /// response line. Server-pushed messages (snapshots, history) that arrive
-/// before the response are skipped.
+/// before the response are skipped. Quick commands use
+/// [`send_node_command_with_timeout`] with a short timeout instead.
 pub fn send_node_command(port: u16, command: &str) -> Result<String, LifecycleError> {
-    send_node_command_impl(LocalIpcAddr::node(port), command)
+    send_node_command_with_timeout(port, command, Duration::from_secs(2))
+}
+
+/// Same as [`send_node_command`] but with an explicit response timeout.
+/// Long-running commands (e.g. `CONNECT_REMOTE_HOST`, whose SSH bootstrap can
+/// take minutes) need a timeout far above the 2-second default.
+pub fn send_node_command_with_timeout(
+    port: u16,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, LifecycleError> {
+    send_node_command_impl(LocalIpcAddr::node(port), command, timeout)
 }
 
 /// Returns true when a wire line is a server-pushed message (snapshot or
@@ -182,7 +194,11 @@ fn read_response_line(reader: &mut impl BufRead) -> io::Result<String> {
 }
 
 #[cfg(unix)]
-fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, LifecycleError> {
+fn send_node_command_impl(
+    addr: LocalIpcAddr,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, LifecycleError> {
     use std::os::unix::net::UnixStream;
 
     let path = addr.path();
@@ -195,14 +211,12 @@ fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, L
             error,
         )
     })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|error| {
-            LifecycleError::Io(
-                "failed to set read timeout on ratatui node socket".to_string(),
-                error,
-            )
-        })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        LifecycleError::Io(
+            "failed to set read timeout on ratatui node socket".to_string(),
+            error,
+        )
+    })?;
     writeln!(stream, "{command}").map_err(|error| {
         LifecycleError::Io("failed to send command to ratatui node".to_string(), error)
     })?;
@@ -217,7 +231,11 @@ fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, L
 }
 
 #[cfg(windows)]
-fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, LifecycleError> {
+fn send_node_command_impl(
+    addr: LocalIpcAddr,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, LifecycleError> {
     use std::net::TcpStream;
 
     let tcp = addr.tcp_addr();
@@ -227,14 +245,12 @@ fn send_node_command_impl(addr: LocalIpcAddr, command: &str) -> Result<String, L
             error,
         )
     })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|error| {
-            LifecycleError::Io(
-                "failed to set read timeout on ratatui node TCP".to_string(),
-                error,
-            )
-        })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        LifecycleError::Io(
+            "failed to set read timeout on ratatui node TCP".to_string(),
+            error,
+        )
+    })?;
     writeln!(stream, "{command}").map_err(|error| {
         LifecycleError::Io("failed to send command to ratatui node".to_string(), error)
     })?;
