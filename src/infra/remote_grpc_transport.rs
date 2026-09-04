@@ -169,9 +169,16 @@ impl Drop for GrpcRemoteNodeTransportGuard {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        // Deliberately do NOT join the worker: tonic's
+        // `serve_with_incoming_shutdown` stops accepting on the shutdown
+        // signal but still waits for every already-accepted connection to
+        // close before returning. A peer (or a wedged dial) holding a node
+        // session channel open therefore blocks `join()` forever, which wedged
+        // whole node servers past their final "shutting down" log (observed
+        // on remote hosts as zombies that still hold their listen port but
+        // never accept again). The worker exits on its own once its
+        // connections drain, and process exit tears it down regardless.
+        self.worker.take();
     }
 }
 
