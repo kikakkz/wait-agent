@@ -23,7 +23,6 @@ use crate::infra::error_log::ERROR_LOG;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
-use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Request, Response, Status};
 use tower::Service;
@@ -93,6 +92,10 @@ pub struct GrpcRemoteNodeTransport {
     tls_cert_path: Option<PathBuf>,
     /// Optional TLS private key path for inbound listeners.
     tls_key_path: Option<PathBuf>,
+    /// Optional authorized-operator keys directory for inbound listeners.
+    /// When unset, the host default (`~/.waitagent/authorized_operators`) is
+    /// used and inbound sessions skip operator authentication if it is empty.
+    authorized_operators_dir: Option<PathBuf>,
 }
 
 pub struct GrpcRemoteNodeTransportGuard {
@@ -112,6 +115,7 @@ impl GrpcRemoteNodeTransport {
         Self {
             tls_cert_path: None,
             tls_key_path: None,
+            authorized_operators_dir: None,
         }
     }
 
@@ -121,7 +125,17 @@ impl GrpcRemoteNodeTransport {
         Self {
             tls_cert_path: Some(cert_path.into()),
             tls_key_path: Some(key_path.into()),
+            authorized_operators_dir: None,
         }
+    }
+
+    /// Serve inbound connections only to operator keys listed in the given
+    /// authorized-keys directory instead of the host default.
+    #[cfg(test)]
+    pub fn with_authorized_operators_dir(dir: impl Into<PathBuf>) -> Self {
+        let mut transport = Self::new();
+        transport.authorized_operators_dir = Some(dir.into());
+        transport
     }
 
     pub fn endpoint(&self, endpoint_uri: &str) -> Result<Endpoint, RemoteNodeTransportError> {
@@ -477,6 +491,10 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?;
         let tls_cert_path = self.tls_cert_path.clone();
         let tls_key_path = self.tls_key_path.clone();
+        let authorized_operators_dir = self
+            .authorized_operators_dir
+            .clone()
+            .or_else(|| Some(operator_auth::default_authorized_operators_dir()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let worker = thread::Builder::new()
             .spawn(move || {
@@ -514,7 +532,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     let service = TransportNodeSessionService {
                         event_tx,
                         session_shutdowns,
-                        authorized_operators_dir: Some(operator_auth::default_authorized_operators_dir()),
+                        authorized_operators_dir,
                     };
                     let mut server_builder = Server::builder()
                         .tcp_nodelay(true)
@@ -655,11 +673,9 @@ impl NodeSessionService for TransportNodeSessionService {
             })?;
             Some(challenge)
         } else {
-            if operators.is_empty() {
-                ERROR_LOG.log_error(format!(
-                    "server: accepting node session for {node_id} without operator authentication (no authorized keys)"
-                ));
-            }
+            ERROR_LOG.log_error(format!(
+                "server: accepting node session for {node_id} without operator authentication (no authorized keys)"
+            ));
             None
         };
 
@@ -671,55 +687,97 @@ impl NodeSessionService for TransportNodeSessionService {
             ))
             .map_err(|error| Status::unavailable(error.to_string()))?;
 
-        if let Some(challenge) = challenge {
-            let auth_envelope = match inbound.message().await? {
-                Some(envelope) => envelope,
-                None => {
-                    return Err(Status::unauthenticated(
-                        "node session closed before operator authentication response",
-                    ));
-                }
-            };
-            let Some(Body::ClientHello(auth_hello)) = auth_envelope.body.as_ref() else {
-                return Err(Status::unauthenticated(
-                    "operator authentication response must be a client_hello",
-                ));
-            };
-            if auth_hello.challenge_response.is_empty() {
-                return Err(Status::unauthenticated(
-                    "operator authentication response is empty",
-                ));
-            }
-            let mut verified = false;
-            for (_fingerprint, public_key) in &operators {
-                if operator_auth::verify_challenge(
-                    &challenge,
-                    &auth_hello.auth_scheme,
-                    &auth_hello.challenge_response,
-                    public_key,
-                )
-                .is_ok()
-                {
-                    verified = true;
-                    break;
-                }
-            }
-            if !verified {
-                return Err(Status::unauthenticated(
-                    "operator challenge signature invalid",
-                ));
-            }
-        }
-
-        self.event_tx
-            .send(RemoteNodeTransportEvent::SessionOpened {
-                session: session.clone(),
-            })
-            .map_err(|_| Status::unavailable("remote node ingress worker is unavailable"))?;
-
-        let event_tx = self.event_tx.clone();
+        // Start forwarding outbound envelopes to the grpc response stream
+        // before operator authentication completes. The peer cannot sign the
+        // challenge until it receives the server hello above, and it cannot
+        // receive the server hello until this handler returns the response
+        // stream — so the stream must go live first or both sides block
+        // forever.
+        let (response_tx, response_rx) = tokio_mpsc::unbounded_channel();
+        let writer_response_tx = response_tx.clone();
         let writer_node_id = node_id.clone();
         tokio::spawn(async move {
+            let mut outbound_rx = outbound_rx;
+            tokio::pin!(session_shutdown_rx);
+            loop {
+                tokio::select! {
+                    _ = &mut session_shutdown_rx => {
+                        break;
+                    }
+                    maybe_envelope = outbound_rx.recv() => {
+                        let Some(envelope) = maybe_envelope else {
+                            break;
+                        };
+                        if writer_response_tx.send(Ok(envelope)).is_err() {
+                            ERROR_LOG.log_error(format!(
+                                "server writer: response_tx.send failed for node {writer_node_id}"
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            // Operator authentication runs here, after the response stream is
+            // live, so an authorized peer can answer the challenge. Until the
+            // challenge is answered the peer only receives the server hello.
+            if let Some(challenge) = challenge {
+                let auth_failure: Option<Status> = match inbound.message().await {
+                    Ok(Some(envelope)) => match envelope.body.as_ref() {
+                        Some(Body::ClientHello(auth_hello)) => {
+                            if auth_hello.challenge_response.is_empty() {
+                                Some(Status::unauthenticated(
+                                    "operator authentication response is empty",
+                                ))
+                            } else if operators.iter().any(|(_fingerprint, public_key)| {
+                                operator_auth::verify_challenge(
+                                    &challenge,
+                                    &auth_hello.auth_scheme,
+                                    &auth_hello.challenge_response,
+                                    public_key,
+                                )
+                                .is_ok()
+                            }) {
+                                None
+                            } else {
+                                Some(Status::unauthenticated(
+                                    "operator challenge signature invalid",
+                                ))
+                            }
+                        }
+                        _ => Some(Status::unauthenticated(
+                            "operator authentication response must be a client_hello",
+                        )),
+                    },
+                    Ok(None) => Some(Status::unauthenticated(
+                        "node session closed before operator authentication response",
+                    )),
+                    Err(error) => Some(error),
+                };
+                if let Some(status) = auth_failure {
+                    ERROR_LOG.log_error(format!(
+                        "server: rejecting node {node_id} session {session_instance_id}: {status}"
+                    ));
+                    let _ = response_tx.send(Err(status));
+                    return;
+                }
+            }
+
+            if event_tx
+                .send(RemoteNodeTransportEvent::SessionOpened {
+                    session: session.clone(),
+                })
+                .is_err()
+            {
+                ERROR_LOG.log_error(format!(
+                    "server: remote node ingress worker unavailable; dropping node {node_id} session {session_instance_id}"
+                ));
+                return;
+            }
+
             let mut heartbeat = tokio::time::interval_at(
                 tokio::time::Instant::now() + HEARTBEAT_INTERVAL,
                 HEARTBEAT_INTERVAL,
@@ -785,30 +843,7 @@ impl NodeSessionService for TransportNodeSessionService {
             });
         });
 
-        let (response_tx, response_rx) = tokio_mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            let mut outbound_rx = outbound_rx;
-            tokio::pin!(session_shutdown_rx);
-            loop {
-                tokio::select! {
-                    _ = &mut session_shutdown_rx => {
-                        break;
-                    }
-                    maybe_envelope = outbound_rx.recv() => {
-                        let Some(envelope) = maybe_envelope else {
-                            break;
-                        };
-                        if response_tx.send(envelope).is_err() {
-                            ERROR_LOG.log_error(format!(
-                                "server writer: response_tx.send failed for node {writer_node_id}"
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-        let outbound_stream = UnboundedReceiverStream::new(response_rx).map(Ok);
+        let outbound_stream = UnboundedReceiverStream::new(response_rx);
 
         Ok(Response::new(Box::pin(outbound_stream)))
     }
@@ -1151,12 +1186,14 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Body, GrpcRemoteNodeTransport, NodeSessionEnvelope, ProtocolVersion, RemoteNodeTransport,
-        RemoteNodeTransportEvent,
+        auth_response_envelope, Body, GrpcRemoteNodeTransport, NodeSessionEnvelope,
+        OutboundNodeSessionRequest, ProtocolVersion, RemoteNodeTransport, RemoteNodeTransportEvent,
     };
+    use crate::infra::operator_auth::{self, MemoryOperatorKeyStore, OperatorKeyStore};
     use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
     use crate::infra::remote_grpc_proto::v1::{ClientHello, Heartbeat};
     use std::net::{SocketAddr, TcpListener};
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
     use tokio::runtime::Builder;
@@ -1253,6 +1290,231 @@ mod tests {
                 .expect("outbound envelope should be present");
             assert!(matches!(outbound.body, Some(Body::Heartbeat(_))));
         });
+    }
+
+    #[test]
+    fn inbound_listener_completes_operator_auth_before_session_opened() {
+        let (auth_dir, keystore) = authorized_operator_fixture("accept");
+        let bind_addr = unused_local_addr();
+        let transport = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let (event_tx, event_rx) = mpsc::channel();
+        let _guard = transport
+            .listen_inbound(bind_addr, event_tx)
+            .expect("grpc listener should start");
+
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        runtime.block_on(async {
+            let mut client = NodeSessionServiceClient::connect(format!("http://{bind_addr}"))
+                .await
+                .expect("grpc client should connect");
+            let (tx, rx) = tokio_mpsc::channel(8);
+            tx.send(client_hello_envelope("peer-auth"))
+                .await
+                .expect("client hello should send");
+            // Regression: the response stream must be returned before the
+            // operator challenge is answered; previously the server awaited
+            // the authentication response here and both sides blocked.
+            let response = client
+                .open_node_session(Request::new(ReceiverStream::new(rx)))
+                .await
+                .expect("response stream should be returned before authentication completes");
+            let mut inbound = response.into_inner();
+
+            let server_hello = inbound
+                .message()
+                .await
+                .expect("server hello should decode")
+                .expect("server hello should be present");
+            let Some(Body::ServerHello(hello)) = server_hello.body else {
+                panic!("server hello envelope expected");
+            };
+            assert!(
+                !hello.operator_challenge.is_empty(),
+                "server hello should carry an operator challenge"
+            );
+
+            let (auth_scheme, challenge_response) = keystore
+                .sign_challenge(&hello.operator_challenge)
+                .expect("operator challenge should sign");
+            tx.send(auth_response_envelope(
+                "peer-auth",
+                "client-session-1",
+                &auth_scheme,
+                &challenge_response,
+            ))
+            .await
+            .expect("authentication response should send");
+
+            let opened = event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("session opened event should arrive after authentication");
+            let session = match opened {
+                RemoteNodeTransportEvent::SessionOpened { session } => session,
+                other => panic!("unexpected transport event: {other:?}"),
+            };
+            assert_eq!(session.node_id(), "peer-auth");
+
+            tx.send(NodeSessionEnvelope {
+                message_id: "heartbeat-1".to_string(),
+                sent_at: None,
+                session_instance_id: "client-session-1".to_string(),
+                correlation_id: None,
+                route: None,
+                body: Some(Body::Heartbeat(Heartbeat {
+                    runtime_id: "peer-auth".to_string(),
+                })),
+            })
+            .await
+            .expect("heartbeat should send");
+            let received = event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("envelope received event should arrive");
+            match received {
+                RemoteNodeTransportEvent::EnvelopeReceived {
+                    node_id, envelope, ..
+                } => {
+                    assert_eq!(node_id, "peer-auth");
+                    assert!(matches!(envelope.body, Some(Body::Heartbeat(_))));
+                }
+                other => panic!("unexpected transport event: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn inbound_listener_rejects_invalid_operator_auth_signature() {
+        let (auth_dir, _keystore) = authorized_operator_fixture("reject");
+        let bind_addr = unused_local_addr();
+        let transport = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let (event_tx, event_rx) = mpsc::channel();
+        let _guard = transport
+            .listen_inbound(bind_addr, event_tx)
+            .expect("grpc listener should start");
+
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        runtime.block_on(async {
+            let mut client = NodeSessionServiceClient::connect(format!("http://{bind_addr}"))
+                .await
+                .expect("grpc client should connect");
+            let (tx, rx) = tokio_mpsc::channel(8);
+            tx.send(client_hello_envelope("peer-reject"))
+                .await
+                .expect("client hello should send");
+            let response = client
+                .open_node_session(Request::new(ReceiverStream::new(rx)))
+                .await
+                .expect("response stream should be returned before authentication completes");
+            let mut inbound = response.into_inner();
+
+            let server_hello = inbound
+                .message()
+                .await
+                .expect("server hello should decode")
+                .expect("server hello should be present");
+            let Some(Body::ServerHello(hello)) = server_hello.body else {
+                panic!("server hello envelope expected");
+            };
+            assert!(
+                !hello.operator_challenge.is_empty(),
+                "server hello should carry an operator challenge"
+            );
+
+            tx.send(auth_response_envelope(
+                "peer-reject",
+                "client-session-1",
+                "ssh-ed25519-challenge",
+                b"not-a-valid-signature",
+            ))
+            .await
+            .expect("authentication response should send");
+
+            match inbound.message().await {
+                Err(status) => assert_eq!(
+                    status.code(),
+                    tonic::Code::Unauthenticated,
+                    "rejected peer should see an unauthenticated stream error"
+                ),
+                other => panic!("expected unauthenticated stream error, got {other:?}"),
+            }
+            assert!(
+                event_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+                "no session event should be published for a rejected peer"
+            );
+        });
+    }
+
+    #[test]
+    fn outbound_dial_completes_operator_auth_handshake() {
+        let keystore = operator_auth::default_operator_key_store();
+        let public_key = keystore
+            .public_key_openssh()
+            .expect("default operator key should be available");
+        let auth_dir = std::env::temp_dir().join(format!(
+            "waitagent-transport-auth-dial-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        std::fs::create_dir_all(&auth_dir).expect("auth dir should create");
+        std::fs::write(auth_dir.join("operator.pub"), public_key)
+            .expect("authorized operator should persist");
+
+        let bind_addr = unused_local_addr();
+        let listener = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let (server_event_tx, _server_event_rx) = mpsc::channel();
+        let _listener_guard = listener
+            .listen_inbound(bind_addr, server_event_tx)
+            .expect("grpc listener should start");
+
+        let dialer = GrpcRemoteNodeTransport::new();
+        let (event_tx, event_rx) = mpsc::channel();
+        // Regression: without the server returning the response stream before
+        // authentication, this dial blocks forever waiting for the challenge.
+        let _dial_guard = dialer
+            .connect_outbound(
+                OutboundNodeSessionRequest {
+                    node_id: "peer-dial".to_string(),
+                    endpoint_uri: format!("http://{bind_addr}"),
+                    tls_pin_sha256: None,
+                },
+                event_tx,
+            )
+            .expect("dial should complete operator authentication and open the session");
+
+        let opened = event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("dialer should observe SessionOpened after authentication");
+        assert!(
+            matches!(opened, RemoteNodeTransportEvent::SessionOpened { .. }),
+            "unexpected transport event: {opened:?}"
+        );
+    }
+
+    fn authorized_operator_fixture(tag: &str) -> (PathBuf, MemoryOperatorKeyStore) {
+        let keystore = MemoryOperatorKeyStore::generate().expect("operator key should generate");
+        let dir = std::env::temp_dir().join(format!(
+            "waitagent-transport-auth-{tag}-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        std::fs::create_dir_all(&dir).expect("auth dir should create");
+        let public_key = keystore
+            .public_key_openssh()
+            .expect("operator public key should export");
+        std::fs::write(dir.join("operator.pub"), public_key)
+            .expect("authorized operator should persist");
+        (dir, keystore)
     }
 
     fn client_hello_envelope(node_id: &str) -> NodeSessionEnvelope {
