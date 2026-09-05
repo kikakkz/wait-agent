@@ -16,7 +16,9 @@ use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
 use crate::ratatui_node::node_runtime::ServerMessageJson;
 use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -143,7 +145,13 @@ impl ConnectRemoteHostPaneRuntime {
                         Err(_) => return Ok(()),
                     };
                     let action = match event {
-                        Event::Key(key) => state.apply_key(key),
+                        // Windows consoles deliver a Release event for every
+                        // key; applying both Press and Release would insert
+                        // each character twice.
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            state.apply_key(key)
+                        }
+                        Event::Key(_) | Event::FocusGained | Event::FocusLost => PaneAction::None,
                         Event::Mouse(mouse) => {
                             state.apply_mouse(mouse, crossterm::terminal::size().unwrap_or((96, 24)))
                         }
