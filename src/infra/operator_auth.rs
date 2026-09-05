@@ -149,45 +149,68 @@ pub fn ensure_operator_key_in_keyring() -> Result<(), OperatorAuthError> {
 /// or can store the operator key, otherwise the `~/.waitagent/operator.key`
 /// file fallback. The selection is cached for the lifetime of the process so
 /// all call sites agree on a single backend.
+///
+/// On Linux the kernel keyutils backend (`linux-native`) is deliberately NOT
+/// used for the operator key: those keys are volatile (lost on reboot) and
+/// only visible to processes whose session keyring links the user keyring, so
+/// enrollment (which exports the file key's public key) and authentication
+/// (which may pick the keyutils key) can disagree, and every remote operator
+/// challenge then fails with "operator challenge signature invalid". The file
+/// store is the single consistent identity on Linux; macOS and Windows keep
+/// their system-wide persistent keychain backends.
+#[allow(clippy::needless_return)]
 fn select_operator_key_store() -> Arc<dyn OperatorKeyStore> {
-    if let Ok(entry) = KeyringOperatorKeyStore::entry() {
-        match entry.get_password() {
-            Ok(_) => return Arc::new(KeyringOperatorKeyStore),
-            Err(keyring::Error::NoEntry) => {
-                match generate_operator_private_key()
-                    .and_then(|key| encode_operator_private_key(&key).map(|pem| (key, pem)))
-                {
-                    Ok((private_key, pem)) => {
-                        if entry.set_password(pem.as_str()).is_ok() {
-                            return Arc::new(KeyringOperatorKeyStore);
+    #[cfg(target_os = "linux")]
+    {
+        let store = Arc::new(FileOperatorKeyStore::default());
+        if let Err(error) = store.load_or_generate() {
+            crate::infra::error_log::ERROR_LOG.log(format!(
+                "[operator-auth] file operator key store failed: {error}"
+            ));
+        }
+        return store;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Ok(entry) = KeyringOperatorKeyStore::entry() {
+            match entry.get_password() {
+                Ok(_) => return Arc::new(KeyringOperatorKeyStore),
+                Err(keyring::Error::NoEntry) => {
+                    match generate_operator_private_key()
+                        .and_then(|key| encode_operator_private_key(&key).map(|pem| (key, pem)))
+                    {
+                        Ok((private_key, pem)) => {
+                            if entry.set_password(pem.as_str()).is_ok() {
+                                return Arc::new(KeyringOperatorKeyStore);
+                            }
+                            // The keyring cannot store the new key; persist it in
+                            // the file fallback instead so remote operator auth
+                            // keeps working.
+                            match FileOperatorKeyStore::default().store_private_key(&private_key) {
+                                Ok(()) => return Arc::new(FileOperatorKeyStore::default()),
+                                Err(error) => crate::infra::error_log::ERROR_LOG.log(format!(
+                                    "[operator-auth] failed to persist operator key: {error}"
+                                )),
+                            }
                         }
-                        // The keyring cannot store the new key; persist it in
-                        // the file fallback instead so remote operator auth
-                        // keeps working.
-                        match FileOperatorKeyStore::default().store_private_key(&private_key) {
-                            Ok(()) => return Arc::new(FileOperatorKeyStore::default()),
-                            Err(error) => crate::infra::error_log::ERROR_LOG.log(format!(
-                                "[operator-auth] failed to persist operator key: {error}"
-                            )),
-                        }
+                        Err(error) => crate::infra::error_log::ERROR_LOG.log(format!(
+                            "[operator-auth] operator key generation failed: {error}"
+                        )),
                     }
-                    Err(error) => crate::infra::error_log::ERROR_LOG.log(format!(
-                        "[operator-auth] operator key generation failed: {error}"
-                    )),
+                }
+                Err(_) => {
+                    // Keyring backend unavailable; fall through to the file store.
                 }
             }
-            Err(_) => {
-                // Keyring backend unavailable; fall through to the file store.
-            }
         }
+        let store = Arc::new(FileOperatorKeyStore::default());
+        if let Err(error) = store.load_or_generate() {
+            crate::infra::error_log::ERROR_LOG.log(format!(
+                "[operator-auth] file operator key store failed: {error}"
+            ));
+        }
+        store
     }
-    let store = Arc::new(FileOperatorKeyStore::default());
-    if let Err(error) = store.load_or_generate() {
-        crate::infra::error_log::ERROR_LOG.log(format!(
-            "[operator-auth] file operator key store failed: {error}"
-        ));
-    }
-    store
 }
 
 /// Returns the operator key store for this host (see
