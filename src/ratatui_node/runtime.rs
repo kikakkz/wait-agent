@@ -1219,6 +1219,16 @@ impl RatatuiNodeRuntime {
                 // Bind the same local control socket that legacy sidecar
                 // ingress owners use, so __remote-session-creation and Ctrl+W
                 // connect can reach this single-process server.
+                #[cfg(not(unix))]
+                {
+                    // No Unix control socket on Windows; expose the ingress
+                    // event sender directly so in-process connect can dial out.
+                    if let Some(owner_tx) = guard.owner_event_sender() {
+                        if let Ok(mut guard) = self.shared.ingress_internal_tx.lock() {
+                            *guard = Some(owner_tx.clone());
+                        }
+                    }
+                }
                 #[cfg(unix)]
                 {
                     let owner_socket_path = remote_node_ingress_owner_socket_path(&self.network);
