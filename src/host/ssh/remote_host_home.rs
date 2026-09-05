@@ -1,12 +1,18 @@
 use std::path::PathBuf;
 
+/// Returns the current user's home directory. `HOME` is set on Unix; on
+/// Windows it is usually absent and `USERPROFILE` is the equivalent.
+pub fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 pub fn waitagent_home() -> PathBuf {
     if let Some(value) = std::env::var_os("WAITAGENT_HOME") {
         return PathBuf::from(value);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = user_home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".waitagent")
 }
 

@@ -262,9 +262,9 @@ async fn authenticate(
 }
 
 fn default_known_hosts_path() -> Result<PathBuf, RemoteSshError> {
-    let home = std::env::var_os("HOME")
+    let home = crate::host::ssh::remote_host_home::user_home_dir()
         .ok_or_else(|| RemoteSshError::new("HOME is not set; cannot locate OpenSSH known_hosts"))?;
-    Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
+    Ok(home.join(".ssh").join("known_hosts"))
 }
 
 fn verify_or_accept_known_host(
