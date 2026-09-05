@@ -1204,7 +1204,21 @@ mod tests {
     #[test]
     fn inbound_listener_reports_session_events_and_forwards_outbound_envelopes() {
         let bind_addr = unused_local_addr();
-        let transport = GrpcRemoteNodeTransport::new();
+        // Pin the listener to an empty authorized-operators dir: this test
+        // speaks the raw protocol without answering the operator challenge,
+        // so it only works in the no-authorized-keys accept path. Using the
+        // host default dir would break the test once the real node has
+        // authorized peers (e.g. after a genuine inbound connect).
+        let auth_dir = std::env::temp_dir().join(format!(
+            "waitagent-transport-inbound-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        std::fs::create_dir_all(&auth_dir).expect("auth dir should create");
+        let transport = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
         let (event_tx, event_rx) = mpsc::channel();
         let _guard = transport
             .listen_inbound(bind_addr, event_tx)

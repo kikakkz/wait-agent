@@ -8,10 +8,11 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::lifecycle::LifecycleError;
 use crate::platform::local_ipc::{LocalListener, LocalStream};
+#[cfg(windows)]
+use crate::platform::remote_ipc::{remote_node_ingress_owner_addr, RemoteControlListener};
 use crate::ports::hooks_config::HooksConfigPort;
 use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
-#[cfg(unix)]
 use crate::remote::node::remote_node_ingress_server_runtime::{
     start_owner_control_acceptor, OwnerLifecycleEvent,
 };
@@ -1222,10 +1223,22 @@ impl RatatuiNodeRuntime {
                 #[cfg(not(unix))]
                 {
                     // No Unix control socket on Windows; expose the ingress
-                    // event sender directly so in-process connect can dial out.
+                    // event sender directly so in-process connect can dial out,
+                    // and bind the TCP loopback control listener that
+                    // session attach (authority-socket-ready) connects back to.
                     if let Some(owner_tx) = guard.owner_event_sender() {
                         if let Ok(mut guard) = self.shared.ingress_internal_tx.lock() {
                             *guard = Some(owner_tx.clone());
+                        }
+                        let owner_addr = remote_node_ingress_owner_addr(&self.network);
+                        if let Ok(owner_listener) = RemoteControlListener::bind(&owner_addr) {
+                            let (_lifecycle_tx, _lifecycle_rx) =
+                                std::sync::mpsc::channel::<OwnerLifecycleEvent>();
+                            let _owner_acceptor = start_owner_control_acceptor(
+                                owner_listener,
+                                &owner_tx,
+                                _lifecycle_tx,
+                            );
                         }
                     }
                 }
