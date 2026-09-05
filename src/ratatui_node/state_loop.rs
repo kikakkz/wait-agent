@@ -116,6 +116,12 @@ fn run_state_event_loop(
     let mut peer_reachability_handles: HashMap<String, PeerReachabilityProbeWorker> =
         HashMap::new();
     let mut last_retry_reset: HashMap<String, Instant> = HashMap::new();
+    // Profiles with a connect() currently running (user-initiated or snapshot
+    // reconnect).  Both paths dial, wait, and SSH-bootstrap on their own
+    // thread; without this guard a network-online flap can overlap a
+    // user-initiated connect for the same profile, and the second dial's
+    // CloseNodeIngressSession kills the first dial's freshly opened session.
+    let mut connecting_profiles: HashSet<String> = HashSet::new();
     // Nodes already known to be offline. `RemoteNodeOffline` can be re-signaled
     // by the ingress close path or by transport failures; without this dedup
     // the handler and the ingress server ping-pong the same event forever and
@@ -201,6 +207,7 @@ fn run_state_event_loop(
                     &client_writer,
                     &connected_clients,
                     &mut reconnect_handles,
+                    &mut connecting_profiles,
                     client_id,
                     command,
                     &settings_store,
@@ -215,6 +222,7 @@ fn run_state_event_loop(
                 result,
                 activate,
             } => {
+                connecting_profiles.remove(&profile_name);
                 if let Ok(outcome) = result.as_ref() {
                     offline_nodes.remove(&outcome.authority_node_id);
                 }
@@ -445,6 +453,7 @@ fn run_state_event_loop(
                     &state_event_tx,
                     &outbound_dial_retry_handles,
                     &inbound_connect_wait_handles,
+                    &mut connecting_profiles,
                 );
             }
 
@@ -452,30 +461,33 @@ fn run_state_event_loop(
                 profile_name,
                 authority_node_id,
                 result,
-            } => match *result {
-                Ok(outcome) => {
-                    offline_nodes.remove(&authority_node_id);
-                    apply_remote_host_connect_outcome(
-                        &shared,
-                        &snapshot_store,
-                        &profile_name,
-                        false,
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    ERROR_LOG.log(format!(
+            } => {
+                connecting_profiles.remove(&profile_name);
+                match *result {
+                    Ok(outcome) => {
+                        offline_nodes.remove(&authority_node_id);
+                        apply_remote_host_connect_outcome(
+                            &shared,
+                            &snapshot_store,
+                            &profile_name,
+                            false,
+                            outcome,
+                        );
+                    }
+                    Err(error) => {
+                        ERROR_LOG.log(format!(
                         "[ratatui-state-loop] snapshot reconnect failed for profile `{profile_name}` node={authority_node_id}: {error}"
                     ));
-                    if network_online {
-                        if let Err(remove_error) = snapshot_store.remove(&authority_node_id) {
-                            ERROR_LOG.log(format!(
+                        if network_online {
+                            if let Err(remove_error) = snapshot_store.remove(&authority_node_id) {
+                                ERROR_LOG.log(format!(
                                 "[ratatui-state-loop] failed to remove snapshot for {authority_node_id}: {remove_error}"
                             ));
+                            }
                         }
                     }
                 }
-            },
+            }
         }
     }
     Ok(())
@@ -598,6 +610,7 @@ fn handle_client_command_event(
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
+    connecting_profiles: &mut HashSet<String>,
     client_id: u64,
     command: ClientCommand,
     settings_store: &SettingsStore,
@@ -617,6 +630,7 @@ fn handle_client_command_event(
             remote_owner,
             client_id,
             profile_name,
+            connecting_profiles,
             state_event_tx,
         );
         return;
@@ -645,6 +659,7 @@ fn handle_client_command_event(
             command,
             settings_store,
             snapshot_store,
+            connecting_profiles,
             state_event_tx.clone(),
         )
     };
@@ -1216,6 +1231,7 @@ fn handle_client_command(
     command: ClientCommand,
     settings_store: &SettingsStore,
     _snapshot_store: &OutboundConnectionSnapshotStore,
+    connecting_profiles: &mut HashSet<String>,
     state_event_tx: mpsc::Sender<StateEvent>,
 ) -> CommandOutcome {
     match command {
@@ -1292,6 +1308,7 @@ fn handle_client_command(
                 remote_owner,
                 0, // client_id is filled in by the event-loop dispatcher above
                 &profile_name,
+                connecting_profiles,
                 state_event_tx,
             )
         }
@@ -1884,8 +1901,14 @@ fn connect_remote_host_target(
     remote_owner: &RemoteRuntimeOwnerRuntime,
     client_id: u64,
     profile_name: &str,
+    connecting_profiles: &mut HashSet<String>,
     state_event_tx: mpsc::Sender<StateEvent>,
 ) -> CommandOutcome {
+    if !connecting_profiles.insert(profile_name.to_string()) {
+        return CommandOutcome::Error(format!(
+            "connect already in progress for profile `{profile_name}`"
+        ));
+    }
     let profile_name = profile_name.to_string();
     let shared = shared.clone();
     let remote_owner = remote_owner.clone();
@@ -2074,6 +2097,7 @@ fn reconnect_snapshot_hosts(
     state_event_tx: &mpsc::Sender<StateEvent>,
     outbound_dial_retry_handles: &HashMap<String, OutboundDialRetryWorker>,
     inbound_connect_wait_handles: &HashMap<String, InboundConnectWaitWorker>,
+    connecting_profiles: &mut HashSet<String>,
 ) {
     let entries = match snapshot_store.load() {
         Ok(entries) => entries,
@@ -2120,6 +2144,14 @@ fn reconnect_snapshot_hosts(
         if outbound_dial_retry_handles.contains_key(&entry.authority_node_id)
             || inbound_connect_wait_handles.contains_key(&entry.authority_node_id)
         {
+            continue;
+        }
+
+        // Skip profiles with a connect already in flight (e.g. a
+        // user-initiated Ctrl+W connect still waiting for its dial).  A
+        // parallel connect for the same profile would evict the in-flight
+        // dial's fresh session via CloseNodeIngressSession.
+        if !connecting_profiles.insert(entry.profile_name.clone()) {
             continue;
         }
 
