@@ -1,5 +1,6 @@
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::ratatui_node::runtime::RemoteNodeConnectionInfo;
 use crate::ratatui_node::runtime::RemoteNodeConnectionMode;
@@ -157,6 +158,33 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
                 qualified_target.to_string()
             }
         };
+        // Self-referential guard: when the authority (control host) shares this
+        // node's advertised node id, the rewrite above maps the authority's own
+        // session id onto this node's node-owned session.  Such sessions are
+        // created locally and never requested by a remote viewer (`opened_by`
+        // is empty), so a remote TargetExited for them describes the
+        // authority's session, not ours.  Closing ours here would kill a live
+        // node-owned session, so the signal is ignored.  The sessions lock is
+        // released before any event is sent.
+        let is_node_owned_local_session = {
+            let guard = self
+                .shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.get(&local_target).is_some_and(|record| {
+                record.address.authority_id() == self.shared.local_authority_id()
+                    && record.opened_by.is_empty()
+            })
+        };
+        if is_node_owned_local_session {
+            ERROR_LOG.log(format!(
+                "[ratatui-node] ignoring remote TargetExited for node-owned session \
+                 {local_target}: the signal describes the authority's own session"
+            ));
+            return Ok(());
+        }
         let _ = self.shared.state_sender().send(StateEvent::SessionClosed {
             target_id: local_target,
         });
@@ -301,5 +329,132 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         _executable: &Path,
     ) -> Result<(), LifecycleError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::session_catalog::{
+        ConsoleAttachment, ConsoleLocation, ManagedSessionAddress, ManagedSessionTaskState,
+        SessionAvailability,
+    };
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn test_network() -> RemoteNetworkConfig {
+        // The authority runs on the same host and port as this node server, so
+        // its advertised node id equals this node's advertised node id.
+        RemoteNetworkConfig {
+            port: 7474,
+            node_id: Some("192.168.1.9#7474".to_string()),
+            ..RemoteNetworkConfig::default()
+        }
+    }
+
+    fn authority_host_record(opened_by: Vec<ConsoleAttachment>) -> ManagedSessionRecord {
+        ManagedSessionRecord {
+            address: ManagedSessionAddress::local("local#7474", "1"),
+            selector: None,
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(crate::domain::workspace::WorkspaceSessionRole::TargetHost),
+            opened_by,
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            display_command_name: None,
+            agent_command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Input,
+        }
+    }
+
+    fn backend_with_record(
+        record: Option<ManagedSessionRecord>,
+    ) -> (
+        RatatuiRemoteTargetPublicationBackend,
+        mpsc::Receiver<StateEvent>,
+    ) {
+        let network = test_network();
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let (tx, rx) = mpsc::channel();
+        shared.set_state_tx(tx);
+        if let Some(record) = record {
+            let target_id = record.address.qualified_target();
+            shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(target_id, record);
+        }
+        (
+            RatatuiRemoteTargetPublicationBackend::new(shared, network),
+            rx,
+        )
+    }
+
+    fn signal_target_exited(
+        backend: &RatatuiRemoteTargetPublicationBackend,
+    ) -> Result<(), LifecycleError> {
+        backend.signal_remote_target_exited(
+            "ratatui-7474",
+            "",
+            "remote-peer:192.168.1.9#7474:1",
+            Path::new("/bin/true"),
+        )
+    }
+
+    #[test]
+    fn signal_remote_target_exited_ignores_node_owned_authority_host_session() {
+        let (backend, rx) = backend_with_record(Some(authority_host_record(Vec::new())));
+
+        signal_target_exited(&backend).expect("signal should succeed");
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no SessionClosed event should be sent for a node-owned session"
+        );
+    }
+
+    #[test]
+    fn signal_remote_target_exited_closes_viewer_owned_session() {
+        let opened_by = vec![ConsoleAttachment {
+            console_id: "viewer-1".to_string(),
+            location: ConsoleLocation::ServerConsole,
+            has_pty_resize_authority: true,
+        }];
+        let (backend, rx) = backend_with_record(Some(authority_host_record(opened_by)));
+
+        signal_target_exited(&backend).expect("signal should succeed");
+
+        match rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect("SessionClosed should be sent for a viewer-owned session")
+        {
+            StateEvent::SessionClosed { target_id } => {
+                assert_eq!(target_id, "local#7474:1");
+            }
+            other => panic!("expected SessionClosed for viewer-owned session, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signal_remote_target_exited_keeps_behavior_for_unknown_target() {
+        let (backend, rx) = backend_with_record(None);
+
+        signal_target_exited(&backend).expect("signal should succeed");
+
+        match rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect("SessionClosed should be sent for an unknown target")
+        {
+            StateEvent::SessionClosed { target_id } => {
+                assert_eq!(target_id, "local#7474:1");
+            }
+            other => panic!("expected SessionClosed for unknown target, got {other:?}"),
+        }
     }
 }

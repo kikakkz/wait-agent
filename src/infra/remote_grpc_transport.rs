@@ -260,15 +260,19 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 };
                 let mut client = NodeSessionServiceClient::new(channel);
                 let grpc_start = Instant::now();
-                let response = client
-                    .open_node_session(Request::new(UnboundedReceiverStream::new(outbound_rx)))
-                    .await;
+                let response = tokio::time::timeout(
+                    CONNECT_TIMEOUT,
+                    client.open_node_session(Request::new(UnboundedReceiverStream::new(
+                        outbound_rx,
+                    ))),
+                )
+                .await;
                 let mut inbound = match response {
-                    Ok(response) => {
+                    Ok(Ok(response)) => {
                         let _t_grpc = grpc_start.elapsed();
                         response.into_inner()
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         let _t_fail = grpc_start.elapsed();
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
@@ -280,14 +284,32 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         let _ = started_tx.send(Err(transport_error));
                         return;
                     }
+                    Err(_elapsed) => {
+                        let t_fail = grpc_start.elapsed();
+                        ERROR_LOG.log_error(format!(
+                            "connect_outbound open_node_session timed out after {t_fail:?}"
+                        ));
+                        let transport_error = RemoteNodeTransportError::new(format!(
+                            "open_node_session timed out after {CONNECT_TIMEOUT:?}"
+                        ));
+                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                            node_id: Some(request.node_id.clone()),
+                            session_instance_id: None,
+                            message: transport_error.to_string(),
+                        });
+                        let _ = started_tx.send(Err(transport_error));
+                        return;
+                    }
                 };
                 let server_hello_start = Instant::now();
-                let first_envelope = match inbound.message().await {
-                    Ok(Some(envelope)) => {
+                let first_envelope = match tokio::time::timeout(CONNECT_TIMEOUT, inbound.message())
+                    .await
+                {
+                    Ok(Ok(Some(envelope))) => {
                         let _t_hello = server_hello_start.elapsed();
                         envelope
                     }
-                    Ok(None) => {
+                    Ok(Ok(None)) => {
                         let transport_error = RemoteNodeTransportError::new(
                             "grpc node session closed before server hello arrived",
                         );
@@ -299,13 +321,29 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         let _ = started_tx.send(Err(transport_error));
                         return;
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         let t_fail = server_hello_start.elapsed();
                         ERROR_LOG.log_error(format!(
                             "connect_outbound ServerHello error after {t_fail:?}: {error}"
                         ));
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
+                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                            node_id: Some(request.node_id.clone()),
+                            session_instance_id: None,
+                            message: transport_error.to_string(),
+                        });
+                        let _ = started_tx.send(Err(transport_error));
+                        return;
+                    }
+                    Err(_elapsed) => {
+                        let t_fail = server_hello_start.elapsed();
+                        ERROR_LOG.log_error(format!(
+                            "connect_outbound ServerHello timed out after {t_fail:?}"
+                        ));
+                        let transport_error = RemoteNodeTransportError::new(format!(
+                            "timed out waiting for server hello after {CONNECT_TIMEOUT:?}"
+                        ));
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
                             session_instance_id: None,
@@ -1187,7 +1225,8 @@ fn now_millis() -> u128 {
 mod tests {
     use super::{
         auth_response_envelope, Body, GrpcRemoteNodeTransport, NodeSessionEnvelope,
-        OutboundNodeSessionRequest, ProtocolVersion, RemoteNodeTransport, RemoteNodeTransportEvent,
+        NodeSessionService, NodeSessionServiceServer, OutboundNodeSessionRequest, ProtocolVersion,
+        RemoteNodeTransport, RemoteNodeTransportEvent,
     };
     use crate::infra::operator_auth::{self, MemoryOperatorKeyStore, OperatorKeyStore};
     use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
@@ -1510,6 +1549,100 @@ mod tests {
             matches!(opened, RemoteNodeTransportEvent::SessionOpened { .. }),
             "unexpected transport event: {opened:?}"
         );
+    }
+
+    #[test]
+    fn outbound_dial_times_out_when_server_hello_never_arrives() {
+        let bind_addr = unused_local_addr();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_thread = std::thread::spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build");
+            runtime.block_on(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(NodeSessionServiceServer::new(SilentHelloNodeSessionService))
+                    .serve_with_shutdown(bind_addr, async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+        });
+
+        let dialer = GrpcRemoteNodeTransport::new();
+        let (event_tx, event_rx) = mpsc::channel();
+        let t_start = std::time::Instant::now();
+        let result = dialer.connect_outbound(
+            OutboundNodeSessionRequest {
+                node_id: "peer-silent-hello".to_string(),
+                endpoint_uri: format!("http://{bind_addr}"),
+                tls_pin_sha256: None,
+            },
+            event_tx,
+        );
+        let elapsed = t_start.elapsed();
+        let _ = shutdown_tx.send(());
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_guard) => panic!("dial should fail when the server hello never arrives"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for server hello"),
+            "unexpected dial error: {error}"
+        );
+        assert!(
+            elapsed >= super::CONNECT_TIMEOUT,
+            "dial should hold until the {:?} deadline, failed after {elapsed:?}",
+            super::CONNECT_TIMEOUT
+        );
+
+        match event_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(RemoteNodeTransportEvent::TransportFailed { message, .. }) => {
+                assert!(
+                    message.contains("timed out waiting for server hello"),
+                    "unexpected failure message: {message}"
+                );
+            }
+            other => panic!("expected TransportFailed event, got {other:?}"),
+        }
+
+        server_thread
+            .join()
+            .expect("stub server thread should exit");
+    }
+
+    /// Stub gRPC service that accepts the node session but never yields a
+    /// server hello, emulating a half-wedged peer that holds the HTTP/2
+    /// connection open without speaking the session protocol.
+    struct SilentHelloNodeSessionService;
+
+    #[tonic::async_trait]
+    impl NodeSessionService for SilentHelloNodeSessionService {
+        type OpenNodeSessionStream = super::NodeSessionResponseStream;
+
+        async fn open_node_session(
+            &self,
+            _request: tonic::Request<tonic::Streaming<NodeSessionEnvelope>>,
+        ) -> Result<tonic::Response<Self::OpenNodeSessionStream>, tonic::Status> {
+            Ok(tonic::Response::new(Box::pin(NeverYieldingStream)))
+        }
+    }
+
+    struct NeverYieldingStream;
+
+    impl tokio_stream::Stream for NeverYieldingStream {
+        type Item = Result<NodeSessionEnvelope, tonic::Status>;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
     }
 
     fn authorized_operator_fixture(tag: &str) -> (PathBuf, MemoryOperatorKeyStore) {

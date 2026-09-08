@@ -906,9 +906,10 @@ pub fn install_reachability_preflight_command(env_prefixes: &[String]) -> String
     command
 }
 
-/// Windows install preflight: `curl.exe` must exist and be able to fetch the
-/// release zip (proxies are injected as `$env:` assignments inside the
-/// script, per `docs/windows-ssh-target-design.md` §2).
+/// Windows install preflight: `curl.exe` must exist and be able to reach the
+/// release zip (HEAD request only — the zip is multi-MB and full downloads
+/// time out through slow proxies). Proxies are injected as `$env:`
+/// assignments inside the script, per `docs/windows-ssh-target-design.md` §2.
 pub fn windows_install_reachability_preflight_command(
     all_proxy: Option<&str>,
     https_proxy: Option<&str>,
@@ -917,7 +918,7 @@ pub fn windows_install_reachability_preflight_command(
     let mut script = missing_curl_or_tar_guard();
     push_proxy_assignments(&mut script, all_proxy, https_proxy);
     script.push_str(&format!(
-        "curl.exe -fsSL --connect-timeout {REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS} --max-time {REMOTE_INSTALL_PREFLIGHT_TIMEOUT_SECS} -o NUL {}; exit $LASTEXITCODE",
+        "curl.exe -fsSIL --connect-timeout {REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS} --max-time {REMOTE_INSTALL_PREFLIGHT_TIMEOUT_SECS} -o NUL {}; exit $LASTEXITCODE",
         ps_single_quote(&url)
     ));
     powershell_command(&script)
@@ -1550,7 +1551,8 @@ mod tests {
             windows_install_reachability_preflight_command(Some("socks5://127.0.0.1:7897"), None);
 
         let script = decode_powershell_command(&command);
-        assert!(script.contains("curl.exe -fsSL"));
+        assert!(script.contains("curl.exe -fsSIL"));
+        assert!(!script.contains("curl.exe -fsSL "));
         assert!(script.contains("-o NUL"));
         assert!(script.contains("$env:ALL_PROXY = 'socks5://127.0.0.1:7897'"));
         assert!(!script.contains("$env:HTTPS_PROXY"));

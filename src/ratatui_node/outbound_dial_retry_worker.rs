@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_ATTEMPTS: u32 = 60;
+const MAX_RETRY_DURATION: Duration = Duration::from_secs(600);
 
 /// Background worker that re-establishes an outbound-dial gRPC node session to
 /// a remote peer after the connection drops.
@@ -51,6 +52,7 @@ fn run_retry_loop(
 ) {
     let mut attempt: u32 = 0;
     let mut backoff = INITIAL_RETRY_DELAY;
+    let started = Instant::now();
 
     loop {
         if cancel_rx.try_recv().is_ok() {
@@ -62,9 +64,10 @@ fn run_retry_loop(
         }
 
         attempt += 1;
-        if attempt > MAX_RETRY_ATTEMPTS {
+        let elapsed = started.elapsed();
+        if attempt > MAX_RETRY_ATTEMPTS || elapsed > MAX_RETRY_DURATION {
             ERROR_LOG.log(format!(
-                "[outbound-dial-retry] {node_id} giving up after {MAX_RETRY_ATTEMPTS} attempts"
+                "[outbound-dial-retry] {node_id} giving up after {attempt} attempts over {elapsed:?}"
             ));
             let _ = state_tx.send(StateEvent::RemoteNodeReconnectFailed {
                 node_id: node_id.clone(),
