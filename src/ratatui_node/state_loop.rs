@@ -1335,14 +1335,7 @@ fn handle_client_command(
         }
 
         ClientCommand::CreateLocalSession => {
-            let id = {
-                let guard = shared
-                    .sessions
-                    .sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                format!("{}", guard.len() + 1)
-            };
+            let id = shared.next_local_session_id();
             match shared.create_local_session(&id, 80, 24) {
                 Ok(target) => {
                     let _ = catalog_tx.send(LocalCatalogChangeRequest {

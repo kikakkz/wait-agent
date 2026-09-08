@@ -643,6 +643,27 @@ impl SharedState {
         }
     }
 
+    /// Allocate the next free numeric session id for this node's local
+    /// sessions (`local#<port>:<n>`).  Scanning for the max existing numeric
+    /// suffix keeps ids unique even after middle sessions exit; the previous
+    /// `map.len() + 1` scheme collided with (and silently overwrote) a still
+    /// running session whenever any non-last session had exited.
+    pub(crate) fn next_local_session_id(&self) -> String {
+        let prefix = format!("{}:", self.local_authority_id());
+        let guard = self
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let max_suffix = guard
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("{}", max_suffix + 1)
+    }
+
     /// Spawn a real local PTY session and register it in the catalog.
     /// Called once during server startup before `StateEventLoop` is running.
     /// This is the only allowed direct mutation of `SharedState` outside the
@@ -726,14 +747,7 @@ impl SharedState {
         rows: u16,
     ) -> Result<(String, RatatuiAuthorityHostSession, String), LifecycleError> {
         let authority_id = self.local_authority_id();
-        let id = {
-            let guard = self
-                .sessions
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            format!("{}", guard.len() + 1)
-        };
+        let id = self.next_local_session_id();
         let target_id = ManagedSessionAddress::local(&authority_id, &id).qualified_target();
 
         let command_name = std::env::var("SHELL")
@@ -1451,5 +1465,93 @@ mod runtime_tests {
             shared.advertised_public_endpoint_label(),
             "cli.example:17474"
         );
+    }
+
+    fn test_network_port_7474() -> RemoteNetworkConfig {
+        RemoteNetworkConfig {
+            port: 7474,
+            node_id: Some("192.168.1.9#7474".to_string()),
+            ..RemoteNetworkConfig::default()
+        }
+    }
+
+    fn record_for(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
+        ManagedSessionRecord {
+            address: ManagedSessionAddress::local(authority_id, session_id),
+            selector: None,
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(crate::domain::workspace::WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            display_command_name: None,
+            agent_command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Input,
+        }
+    }
+
+    fn insert_record(shared: &SharedState, record: ManagedSessionRecord) -> String {
+        let target_id = record.address.qualified_target();
+        shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(target_id.clone(), record);
+        target_id
+    }
+
+    #[test]
+    fn next_local_session_id_starts_at_one_for_empty_catalog() {
+        let shared =
+            SharedState::new(test_network_port_7474()).expect("SharedState::new should succeed");
+
+        assert_eq!(shared.next_local_session_id(), "1");
+    }
+
+    #[test]
+    fn next_local_session_id_continues_after_max_suffix() {
+        let shared =
+            SharedState::new(test_network_port_7474()).expect("SharedState::new should succeed");
+        for id in ["1", "2", "3", "4", "5"] {
+            insert_record(&shared, record_for("local#7474", id));
+        }
+
+        assert_eq!(shared.next_local_session_id(), "6");
+    }
+
+    #[test]
+    fn next_local_session_id_skips_exited_middle_session() {
+        let shared =
+            SharedState::new(test_network_port_7474()).expect("SharedState::new should succeed");
+        for id in ["1", "2", "3", "4", "5"] {
+            insert_record(&shared, record_for("local#7474", id));
+        }
+        let removed = "local#7474:3".to_string();
+        shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&removed);
+
+        assert_eq!(
+            shared.next_local_session_id(),
+            "6",
+            "exited middle session must not cause an id collision"
+        );
+    }
+
+    #[test]
+    fn next_local_session_id_ignores_remote_peer_keys() {
+        let shared =
+            SharedState::new(test_network_port_7474()).expect("SharedState::new should succeed");
+        insert_record(&shared, record_for("192.168.1.9#7474", "3"));
+
+        assert_eq!(shared.next_local_session_id(), "1");
     }
 }
