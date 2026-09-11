@@ -852,23 +852,28 @@ fn bootstrap_ansi_for_term(term: &Term<VoidListener>) -> Vec<u8> {
     let history_to_render = history_len.min(MAX_BOOTSTRAP_HISTORY_LINES);
 
     let mut payload = Vec::with_capacity(total_lines * (columns * 8 + 32) + 64);
-    // Hide cursor, clear screen, and move to home to draw the bootstrap frame
-    // without intermediate flicker.
-    payload.extend_from_slice(b"\x1b[?25l\x1b[2J\x1b[H");
+    // Hide cursor while drawing the bootstrap frame.
+    payload.extend_from_slice(b"\x1b[?25l");
 
-    // Render scrollback history first, then the visible screen. Lines are drawn
-    // using absolute row positioning so the bootstrap is independent of the
-    // viewer's terminal size.
+    // Render scrollback history first as plain line-feed-delimited rows so it
+    // flows into the viewer's own scrollback, then clear the visible screen
+    // and draw it with absolute row positioning. Absolute positioning only
+    // works for rows the viewer actually has; history rendered with absolute
+    // coordinates would be clamped into the visible grid by viewers that are
+    // exactly screen-sized (the normal case) and corrupt the current screen.
     for offset in (1..=history_to_render).rev() {
         let line = Line(-(offset as i32));
-        let row = history_to_render - offset + 1;
         let (_, styled) = render_grid_line(grid, line, columns);
-        payload.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
         payload.extend_from_slice(styled.as_bytes());
+        payload.extend_from_slice(b"\r\n");
     }
+
+    // Clear screen and move to home to draw the visible screen without
+    // intermediate flicker.
+    payload.extend_from_slice(b"\x1b[2J\x1b[H");
     for row in 0..screen_lines {
         let line = Line(row as i32 - display_offset);
-        let absolute_row = history_to_render + row + 1;
+        let absolute_row = row + 1;
         let (_, styled) = render_grid_line(grid, line, columns);
         payload.extend_from_slice(format!("\x1b[{absolute_row};1H").as_bytes());
         payload.extend_from_slice(styled.as_bytes());
@@ -876,7 +881,7 @@ fn bootstrap_ansi_for_term(term: &Term<VoidListener>) -> Vec<u8> {
 
     let point = grid.cursor.point;
     let cursor_col = point.column.0 as u16 + 1;
-    let cursor_row = (point.line.0 + display_offset + history_to_render as i32) as u16 + 1;
+    let cursor_row = (point.line.0 + display_offset) as u16 + 1;
     payload.extend_from_slice(format!("\x1b[{cursor_row};{cursor_col}H").as_bytes());
     payload.extend_from_slice(b"\x1b[?25h");
     payload
@@ -1251,6 +1256,74 @@ mod tests {
         assert!(
             !sessions.get("sess").unwrap().bootstrap_pending,
             "bootstrap should no longer be pending"
+        );
+    }
+
+    #[test]
+    fn bootstrap_replay_matches_term_screen_with_scrollback() {
+        // Regression: a session with scrollback history must replay into a
+        // screen-sized terminal engine to exactly the Term's visible screen.
+        // Absolute row positioning beyond the viewer height used to clamp into
+        // the visible grid and overwrite the current screen with stale
+        // scrollback lines.
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        let mut term = make_term(176, 50);
+        for i in 0..1000usize {
+            parser.advance(
+                &mut term,
+                format!(
+                    "\x1b[38;5;{}mscrollback-{i:04}\x1b]8;;https://example.com/{i}\x07link{i}\x1b]8;;\x07\x1b[0m plain tail {i}\r\n",
+                    100 + (i % 50)
+                )
+                .as_bytes(),
+            );
+        }
+        // kimi-like full-screen repaint on the normal screen
+        let frame: String = {
+            let mut s = String::from("\x1b[2J\x1b[H\x1b[?25l");
+            for row in 0..50usize {
+                s.push_str(&format!("\x1b[{};1H\x1b[48;5;236mROW{row:02}-", row + 1));
+                for col in 0..20usize {
+                    s.push_str(&format!("c{col} "));
+                }
+                s.push_str("\x1b[0m");
+            }
+            s.push_str("\x1b[50;1H\x1b[1;32mMODELINE-CONTENT\x1b[0m");
+            s
+        };
+        parser.advance(&mut term, frame.as_bytes());
+
+        let bootstrap = bootstrap_ansi_for_term(&term);
+        let mut engine = crate::terminal::TerminalEngine::new(crate::terminal::TerminalSize {
+            cols: 176,
+            rows: 50,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(&bootstrap);
+        let screen = engine.snapshot_visible();
+
+        // Ground truth: the Term's visible screen.
+        let grid = term.grid();
+        let mut mismatches = Vec::new();
+        for row in 0..50usize {
+            let line = &grid[Line(row as i32 - grid.display_offset() as i32)];
+            let mut truth = String::new();
+            use alacritty_terminal::index::Column;
+            for c in 0..grid.columns() {
+                let ch = line[Column(c)].c;
+                if ch == ' ' && truth.is_empty() {
+                    continue;
+                }
+                truth.push(ch);
+            }
+            if screen.lines[row].trim_end() != truth.trim_end() {
+                mismatches.push(row);
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "engine screen should match term screen, mismatched rows: {mismatches:?}"
         );
     }
 
