@@ -176,6 +176,15 @@ fn read_image() -> Result<(Vec<u8>, String), String> {
             ("wl-paste image/png", Box::new(read_image_wlpaste)),
             ("xclip image/png", Box::new(read_image_xclip)),
         ]
+    } else if cfg!(target_os = "windows") {
+        // Screenshot tools (WeChat, Snipping Tool) usually place classic
+        // `CF_DIB` on the clipboard, which arboard's Windows backend does not
+        // decode. WinForms `Clipboard.GetImage()` understands CF_DIB, so keep
+        // a PowerShell fallback after arboard.
+        vec![
+            ("arboard", Box::new(read_image_arboard)),
+            ("powershell image", Box::new(read_image_powershell_native)),
+        ]
     } else {
         vec![("arboard", Box::new(read_image_arboard))]
     };
@@ -305,6 +314,34 @@ fn read_image_powershell() -> Result<(Vec<u8>, String), String> {
     let bytes = std::fs::read(&wsl_path)
         .map_err(|e| format!("failed to read WSL temp image {}: {e}", wsl_path.display()))?;
     let _ = std::fs::remove_file(&wsl_path);
+    Ok((bytes, "clipboard.png".to_string()))
+}
+
+/// Native Windows fallback: save the clipboard image to a temp PNG via
+/// WinForms `Clipboard.GetImage()` (understands classic `CF_DIB` that arboard
+/// rejects) and read it back.
+fn read_image_powershell_native() -> Result<(Vec<u8>, String), String> {
+    let windows_temp = std::env::var("TEMP")
+        .or_else(|_| std::env::var("TMP"))
+        .unwrap_or_else(|_| "C:\\Windows\\Temp".to_string());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let windows_file = format!("{windows_temp}\\waitagent-paste-{timestamp}.png");
+
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $img = [System.Windows.Forms.Clipboard]::GetImage(); \
+         if ($img -eq $null) {{ throw 'no image on clipboard' }}; \
+         $img.Save('{}')",
+        windows_file.replace('\\', "\\\\").replace('\'', "''")
+    );
+    run_command("powershell", &["-NoProfile", "-Command", &script])?;
+
+    let bytes = std::fs::read(&windows_file)
+        .map_err(|e| format!("failed to read temp image {windows_file}: {e}"))?;
+    let _ = std::fs::remove_file(&windows_file);
     Ok((bytes, "clipboard.png".to_string()))
 }
 
