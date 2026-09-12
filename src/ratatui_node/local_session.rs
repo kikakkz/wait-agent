@@ -439,10 +439,59 @@ fn default_shell() -> String {
 
 #[cfg(windows)]
 pub(crate) fn default_shell() -> String {
-    std::env::var("PSModulePath")
-        .ok()
-        .map(|_| "powershell.exe".to_string())
-        .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()))
+    resolve_windows_shell(
+        find_bash(),
+        std::env::var("PSModulePath").ok().as_deref().is_some(),
+        std::env::var("COMSPEC").ok(),
+    )
+}
+
+/// Locate a `bash.exe` on Windows: first on `PATH`, then at well-known
+/// Git for Windows / MSYS2 install locations.
+#[cfg(windows)]
+fn find_bash() -> Option<std::path::PathBuf> {
+    let from_path = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join("bash.exe"))
+            .find(|candidate| candidate.is_file())
+    });
+    from_path.or_else(well_known_bash)
+}
+
+#[cfg(windows)]
+fn well_known_bash() -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::with_capacity(6);
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = std::env::var_os(var) {
+            let root = std::path::PathBuf::from(root);
+            candidates.push(root.join(r"Git\bin\bash.exe"));
+            candidates.push(root.join(r"Git\usr\bin\bash.exe"));
+        }
+    }
+    candidates.push(std::path::PathBuf::from(r"C:\msys64\usr\bin\bash.exe"));
+    candidates.push(std::path::PathBuf::from(
+        r"C:\tools\msys64\usr\bin\bash.exe",
+    ));
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+/// Resolve the shell command for a new local session on Windows: prefer
+/// bash when one is available, then PowerShell, then `%COMSPEC%`, then
+/// `cmd.exe`. Platform-neutral so the priority rules are unit-testable
+/// on any host.
+#[cfg(any(windows, test))]
+fn resolve_windows_shell(
+    bash: Option<std::path::PathBuf>,
+    ps_module_path_present: bool,
+    comspec: Option<String>,
+) -> String {
+    if let Some(bash) = bash {
+        return bash.to_string_lossy().into_owned();
+    }
+    if ps_module_path_present {
+        return "powershell.exe".to_string();
+    }
+    comspec.unwrap_or_else(|| "cmd.exe".to_string())
 }
 
 #[cfg(unix)]
@@ -504,6 +553,36 @@ mod local_session_tests {
     use crate::cli::RemoteNetworkConfig;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn windows_shell_prefers_bash() {
+        let bash = std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+        assert_eq!(
+            resolve_windows_shell(Some(bash.clone()), true, Some("cmd.exe".to_string())),
+            bash.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn windows_shell_falls_back_to_powershell_then_comspec_then_cmd() {
+        assert_eq!(
+            resolve_windows_shell(
+                None,
+                true,
+                Some("C:\\Windows\\system32\\cmd.exe".to_string())
+            ),
+            "powershell.exe"
+        );
+        assert_eq!(
+            resolve_windows_shell(
+                None,
+                false,
+                Some("C:\\Windows\\system32\\cmd.exe".to_string())
+            ),
+            "C:\\Windows\\system32\\cmd.exe"
+        );
+        assert_eq!(resolve_windows_shell(None, false, None), "cmd.exe");
+    }
 
     fn with_shell_env() {
         std::env::set_var("SHELL", "/bin/sh");
