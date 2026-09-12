@@ -1,0 +1,40 @@
+id: task.relay-3-invite-join-enrollment
+kind: task
+version: 1
+title: implement relay invite/join enrollment with automatic mutual fingerprint pinning
+status: backlog
+priority: high
+design_ref:
+  doc: docs/relay-design.md
+  section: 身份认证与入网, node 生命周期, 管理通道
+  why:
+    - Phase 1 task split item 3 enrollment must bind both directions in one
+      flow without manual fingerprint transcription and without a MitM window.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-2-relay-daemon-core-routing.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - `relay invite` mints one-time short-lived tokens via the local admin
+    socket, with a long-lived deploy token option for batch installs.
+  - `relay join <address> <token>` opens a token-authenticated enrollment
+    session; relay delivers its own certificate fingerprint over that
+    authenticated channel and the node writes it to relay.toml; relay adds
+    the node fingerprint to authorized_nodes/.
+  - Bidirectional binding completes in one flow with no manual fingerprint
+    transcription and no MitM window.
+  - `relay remove <fingerprint>` revokes the node whitelist entry is deleted
+    and the live connection dropped; re-registration fails at mTLS.
+verification:
+  - cargo test invite join
+  - docker e2e two-node enrollment through a relay container
+touched_paths:
+  - src/command
+  - src/infra
+notes:
+  - Device identity reuses the node_credentials.rs SPKI fingerprint mechanism;
+    no CA.

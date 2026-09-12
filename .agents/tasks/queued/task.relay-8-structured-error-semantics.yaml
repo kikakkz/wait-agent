@@ -1,0 +1,36 @@
+id: task.relay-8-structured-error-semantics
+kind: task
+version: 1
+title: define structured relay error semantics from relay through node to console
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/relay-design.md
+  section: 错误语义, node 生命周期
+  why:
+    - Phase 1 task split item 7 in the design doc quota, key, revocation, and
+      capacity failures must surface as error codes plus human-readable
+      messages on the sidebar and status line, never raw strings.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-2-relay-daemon-core-routing.done
+  - task.relay-4-node-relay-client.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Error codes plus human-readable messages defined for quota exceeded,
+    unknown target node, revoked node, capacity rejection, and heartbeat
+    loss.
+  - Errors render on sidebar item status and status line via the structured
+    channel; no raw strings.
+verification:
+  - cargo test
+  - manual trigger each error class and confirm console rendering
+touched_paths:
+  - src/infra
+  - src/ratatui_node
+notes:
+  - Same structured channel carries presence (online/offline) events.

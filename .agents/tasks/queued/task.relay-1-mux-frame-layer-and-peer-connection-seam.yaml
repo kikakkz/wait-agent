@@ -1,0 +1,44 @@
+id: task.relay-1-mux-frame-layer-and-peer-connection-seam
+kind: task
+version: 1
+title: introduce relay mux frame layer and the PeerConnection transport seam
+status: backlog
+priority: high
+design_ref:
+  doc: docs/relay-design.md
+  section: 架构, 协议分层
+  why:
+    - Phase 1 task split item 1 the node-to-node TCP dial must become a
+      pluggable ordered reliable duplex byte stream (PeerConnection) so a
+      relay stream can become a second implementation without touching any
+      session protocol.
+    - Direct TCP is folded behind the same seam with byte-identical behavior.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+  - primitive.network-registry-scope
+done_criteria:
+  - PeerConnection abstraction (ordered, reliable, full-duplex byte stream)
+    defined at the node dial boundary.
+  - Mux frame layer implemented with stream open/close/data/window frames
+    multiplexed over one connection.
+  - Existing direct TCP dial in src/infra/remote_grpc_transport.rs folded
+    behind the PeerConnection seam with byte-identical behavior.
+  - No changes to node-to-node inner TLS, AuthorityTransport, ControlPlane,
+    or session protocols.
+  - All existing session and transport tests pass unchanged.
+verification:
+  - cargo test
+  - cargo clippy -- -D warnings
+  - direct-dial regression (existing remote session e2e) stays green
+touched_paths:
+  - src/infra/remote_grpc_transport.rs
+  - src/infra
+  - docs/relay-design.md
+notes:
+  - Compatibility promise from the design doc relay is only a new dial-path
+    transport branch; behavior without relay config is unchanged.

@@ -1,0 +1,40 @@
+id: task.relay-7-config-surface
+kind: task
+version: 1
+title: land relay config surface with relay.toml, remote-hosts via selector, and connect-path integration
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/relay-design.md
+  section: 配置面, 兼容性承诺
+  why:
+    - Phase 1 task split item 7 relay mode becomes reachable from the product
+      only when remote-hosts entries can explicitly select relay or direct
+      and the Ctrl-W connect path dials through the seam.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-3-invite-join-enrollment.done
+  - task.relay-4-node-relay-client.done
+  - task.relay-6-single-node-capacity-model.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Node relay.toml (address, relay_fingerprint, heartbeat) and relay
+    relay.toml (listen, admin socket, whitelist dir, token params, heartbeat,
+    capacity limits) load and validate.
+  - remote-hosts entries gain an explicit via = "relay" | "direct" selector;
+    no implicit fallback; errors guide the user.
+  - Ctrl-W connect path dials through the PeerConnection seam choosing relay
+    or direct per the via selector.
+verification:
+  - cargo test
+  - manual Ctrl-W connect in relay mode and in direct mode
+touched_paths:
+  - src/infra
+  - src/ratatui_node
+  - src/application
+notes:
+  - Direct TCP and socks5 proxy paths stay untouched.

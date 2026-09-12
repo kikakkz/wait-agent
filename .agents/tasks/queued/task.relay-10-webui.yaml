@@ -1,0 +1,49 @@
+id: task.relay-10-webui
+kind: task
+version: 1
+title: implement WebUI as special-node web service with browser terminal and management plane
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/relay-design.md
+  section: 目标与非目标, 管理通道（WebUI / CLI ↔ relay）, Phase 1 任务拆分 10
+  why:
+    - Phase 1 task split item 10 the WebUI is the daily management plane and
+      the browser coding surface; the web service enrolls as a special node
+      so no relay protocol change is needed.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-2-relay-daemon-core-routing.done
+  - task.relay-4-node-relay-client.done
+  - task.relay-8-structured-error-semantics.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Web service enrolls as a special node (own certificate, standard
+    register); single-binary deployment started by relay serve; the
+    web-to-relay leg is the standard loopback node protocol with no
+    in-process shortcut.
+  - Browser terminal reuses OpenMirror/RawPty/Resize over WebSocket as an
+    observer participant; the web service is a trusted endpoint under the
+    self-hosted model.
+  - Management plane covers connection table, usage/capacity, invite, remove,
+    and online status.
+  - CLI is reduced to the bootstrap minimum (serve, join, one-line install
+    command); the admin socket stays only as an emergency channel.
+  - Relay still sees only frame headers; no session or traffic data is
+    persisted.
+verification:
+  - cargo test
+  - cargo clippy -- -D warnings
+  - manual browser terminal session plus management operations end to end
+touched_paths:
+  - src/command
+  - src/infra
+  - src/ratatui_node
+  - Cargo.toml
+notes:
+  - Self-hosted single-admin trust model; browser-side E2E and multi-account
+    authorization are explicit non-goals until the public cloud version.

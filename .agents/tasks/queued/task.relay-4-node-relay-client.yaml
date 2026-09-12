@@ -1,0 +1,43 @@
+id: task.relay-4-node-relay-client
+kind: task
+version: 1
+title: implement node relay client with persistent connection, on-demand streams, and re-registration
+status: backlog
+priority: high
+design_ref:
+  doc: docs/relay-design.md
+  section: 架构, node 生命周期, 管理通道
+  why:
+    - Phase 1 task split item 4 nodes must keep one persistent outbound
+      connection, open streams on demand, and re-register after drops before
+      any relay-mode session can exist.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-1-mux-frame-layer-and-peer-connection-seam.done
+  - task.relay-3-invite-join-enrollment.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+  - primitive.network-registry-scope
+done_criteria:
+  - Node keeps one persistent outbound TLS connection to the configured
+    relay (address plus pinned fingerprint from relay.toml).
+  - open_stream(target_node_id) dials the remote node through the relay as a
+    PeerConnection; all existing session protocols run unmodified on the seam.
+  - Presence events (register, unregister, heartbeat timeout) flow into the
+    console structured channel for sidebar and status-line display.
+  - Disconnects trigger reconnect and re-registration using the existing
+    reconnect worker pattern.
+verification:
+  - cargo test
+  - cargo test --release ratatui session_sync
+  - docker e2e node-to-node session through a relay
+touched_paths:
+  - src/infra
+  - src/ratatui_node
+notes:
+  - SharedState single-writer and broadcast_snapshot single-caller rules from
+    AGENTS.md apply to presence handling; relay-triggered UI refreshes must go
+    through StateEventLoop as state events.

@@ -1,0 +1,48 @@
+id: task.relay-2-relay-daemon-core-routing
+kind: task
+version: 1
+title: implement relay daemon with connection table, routing, heartbeat, and whitelist auth
+status: backlog
+priority: high
+design_ref:
+  doc: docs/relay-design.md
+  section: 架构, 协议分层, node 生命周期, 管理通道
+  why:
+    - Phase 1 task split item 2 the hub owns the connection table, stream
+      routing, heartbeat, whitelist auth, and the local admin socket.
+    - Lifecycle decisions are fixed in the design doc heartbeat 10s interval,
+      3 missed beats (30s) means offline, relay remove revokes.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-1-mux-frame-layer-and-peer-connection-seam.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - `waitagent relay serve` runs the hub TLS listener requiring client
+    certificates, connection table (node_id -> connection), stream open/close
+    routing, fair scheduling, and heartbeat.
+  - Heartbeat per lifecycle section 10s interval, 3 missed beats (30s)
+    offline, connection table cleanup, capacity released.
+  - Whitelist auth via authorized_nodes/ directory following the
+    authorized_operators pattern (src/infra/operator_auth.rs); unknown
+    fingerprints rejected at the transport layer.
+  - Local admin socket (remote_node_ingress_owner_socket_path pattern) serves
+    a local admin protocol for bootstrap and emergency ops.
+  - Relay persists no session or traffic data; on-disk state is limited to
+    relay.toml, the whitelist directory, and token parameters.
+verification:
+  - cargo test relay
+  - cargo clippy -- -D warnings
+  - manual relay serve plus two local nodes register and re-register
+touched_paths:
+  - src/command
+  - src/bin
+  - src/infra
+  - src/infra/node_credentials.rs
+  - src/infra/operator_auth.rs
+notes:
+  - Relay remains untrusted it only decodes outer frame headers; node-to-node
+    content stays inner-TLS ciphertext.

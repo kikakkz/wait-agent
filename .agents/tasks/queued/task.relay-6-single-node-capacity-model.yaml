@@ -1,0 +1,41 @@
+id: task.relay-6-single-node-capacity-model
+kind: task
+version: 1
+title: implement single-relay capacity model with usage metering and admission control
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/relay-design.md
+  section: 容量评估与准入控制, 配置面
+  why:
+    - Phase 1 task split item 6 the single-node capacity model (max_nodes,
+      max_streams, throughput threshold) is the future cluster scheduler
+      input, so it must be calibrated, configurable, and observable now.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-2-relay-daemon-core-routing.done
+  - task.relay-4-node-relay-client.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - relay.toml accepts max_nodes, max_streams, and a throughput protection
+    threshold; heartbeat defaults recorded (10s interval, 3 misses).
+  - Usage is metered on the connection/stream tables active nodes, active
+    streams, per-stream window occupancy, forward byte rates.
+  - register over max_nodes and open_stream over max_streams are rejected
+    with structured reason codes through the Policy hook seam.
+  - Heartbeat-timeout cleanup releases capacity; reconnect re-admits.
+  - A relay subcommand shows capacity versus usage; a load-test calibration
+    script produces baseline defaults.
+verification:
+  - cargo test capacity
+  - load-test script run against the docker relay topology
+touched_paths:
+  - src/command
+  - src/infra
+  - scripts/e2e
+notes:
+  - Rejection path feeds task.relay-8 structured error semantics.

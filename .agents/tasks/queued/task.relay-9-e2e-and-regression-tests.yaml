@@ -1,0 +1,39 @@
+id: task.relay-9-e2e-and-regression-tests
+kind: task
+version: 1
+title: build relay e2e suite with docker-isolated topology, reconnect, concurrency, and direct regression
+status: backlog
+priority: high
+design_ref:
+  doc: docs/relay-design.md
+  section: Phase 1 任务拆分 9, 兼容性承诺
+  why:
+    - Phase 1 task split item 8 in the design doc the relay topology must be
+      proven under docker network isolation with reconnect, concurrency, and
+      a green direct-dial regression before relay mode ships.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-5-stream-backpressure-fair-scheduling.done
+  - task.relay-6-single-node-capacity-model.done
+  - task.relay-8-structured-error-semantics.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Docker network-isolated topology scripts run two nodes plus a relay with
+    no LAN shortcuts.
+  - Disconnect/reconnect, re-registration, and concurrent multi-session
+    scenarios are covered.
+  - Windows CI is green; the existing direct-dial regression suite is green.
+verification:
+  - scripts/e2e relay topology runs green
+  - cargo test --release
+  - Windows CI pass
+touched_paths:
+  - scripts/e2e
+  - tests
+  - .github
+notes:
+  - Load calibration from task.relay-6 feeds the topology sizing here.
