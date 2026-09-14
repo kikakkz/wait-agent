@@ -291,9 +291,11 @@ mod tests {
         let path = unique_path("clear.toml");
         let store = SettingsStore::new(&path);
 
-        let mut settings = Settings::default();
-        settings.public_endpoint = Some("x:1".to_string());
-        settings.save_public = true;
+        let settings = Settings {
+            public_endpoint: Some("x:1".to_string()),
+            save_public: true,
+            ..Settings::default()
+        };
         store.save(&settings).unwrap();
 
         store.clear_public().unwrap();

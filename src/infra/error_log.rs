@@ -287,7 +287,7 @@ mod tests {
     fn parse_entry_extracts_timestamp_and_message() {
         let line = "[1234567890.123] [INFO] hello world";
         let (ts, level, msg) = parse_entry(line).unwrap();
-        assert_eq!(ts, 1234567890_123);
+        assert_eq!(ts, 1234567890123);
         assert_eq!(level, LogLevel::Info);
         assert_eq!(msg, "hello world");
     }
@@ -301,7 +301,7 @@ mod tests {
     fn parse_entry_falls_back_to_info_for_legacy_format() {
         let line = "[1234567890.123] hello world";
         let (ts, level, msg) = parse_entry(line).unwrap();
-        assert_eq!(ts, 1234567890_123);
+        assert_eq!(ts, 1234567890123);
         assert_eq!(level, LogLevel::Info);
         assert_eq!(msg, "hello world");
     }

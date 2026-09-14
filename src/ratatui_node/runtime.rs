@@ -1447,8 +1447,10 @@ mod runtime_tests {
 
     #[test]
     fn shared_state_public_endpoint_override_is_advertised() {
-        let mut network = RemoteNetworkConfig::default();
-        network.public_endpoint = Some("cli.example:17474".to_string());
+        let network = RemoteNetworkConfig {
+            public_endpoint: Some("cli.example:17474".to_string()),
+            ..RemoteNetworkConfig::default()
+        };
         let shared = SharedState::new(network).expect("SharedState::new should succeed");
 
         assert_eq!(

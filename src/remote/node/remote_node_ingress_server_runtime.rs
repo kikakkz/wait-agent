@@ -64,9 +64,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BRIDGE_DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(25);
+/// A session younger than this just completed handshake (possibly the peer's
+/// fresh inbound dial-in) and must survive eviction triggered by reconnect
+/// bookkeeping; heartbeat timeout (45s, src/infra/remote_grpc_transport.rs)
+/// removes genuinely dead sessions independently.
+const SESSION_EVICTION_GRACE: Duration = Duration::from_secs(30);
 const BRIDGE_DISCOVERY_RETRY_ATTEMPTS: u8 = 20;
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
@@ -122,6 +127,7 @@ struct ActiveNodeIngressSession {
     published_sessions: HashMap<String, ManagedSessionRecord>,
     observed_initialized: bool,
     next_message_id: u64,
+    opened_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1808,6 +1814,7 @@ fn run_node_ingress_server_loop<
             }
             IngressServerEvent::Internal(event) => {
                 handle_internal_event(
+                    &publication_runtime,
                     &mut sessions,
                     &mut registered_workspace_sockets,
                     internal_tx.clone(),
@@ -1981,6 +1988,7 @@ fn handle_transport_event<
                 published_sessions: HashMap::new(),
                 observed_initialized: false,
                 next_message_id: 0,
+                opened_at: Instant::now(),
             };
 
             // Publish the current local session catalog as a full baseline to the
@@ -2085,6 +2093,9 @@ fn handle_transport_event<
             session_instance_id,
             ..
         } => {
+            ERROR_LOG.log(format!(
+                "[remote-node-ingress] ingress session closed node={node_id} session_instance_id={session_instance_id}"
+            ));
             sessions.remove(&session_instance_id);
             closed_session_instances.insert(session_instance_id.clone());
             // Drop the outbound transport guard for this session so the worker
@@ -2106,8 +2117,12 @@ fn handle_transport_event<
         RemoteNodeTransportEvent::TransportFailed {
             node_id,
             session_instance_id,
-            ..
+            message,
         } => {
+            ERROR_LOG.log(format!(
+                "[remote-node-ingress] ingress transport failed node={} session_instance_id={session_instance_id:?} reason={message}",
+                node_id.as_deref().unwrap_or("<unknown>")
+            ));
             if let Some(session_instance_id) = session_instance_id {
                 sessions.remove(&session_instance_id);
                 closed_session_instances.insert(session_instance_id.clone());
@@ -2245,7 +2260,17 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
     let removed_instance_ids: Vec<String> = sessions
         .iter()
         .filter(|(_session_instance_id, active)| active.session.node_id() == node_id)
-        .map(|(session_instance_id, _active)| session_instance_id.clone())
+        .filter_map(|(session_instance_id, active)| {
+            let age = active.opened_at.elapsed();
+            if age < SESSION_EVICTION_GRACE {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] keeping fresh ingress session for node={node_id} session_instance_id={session_instance_id} opened {}ms ago during eviction",
+                    age.as_millis()
+                ));
+                return None;
+            }
+            Some(session_instance_id.clone())
+        })
         .collect();
     for session_instance_id in &removed_instance_ids {
         sessions.remove(session_instance_id);
@@ -2482,7 +2507,35 @@ fn local_create_session_rejected_grpc_envelope(
     }
 }
 
-fn handle_internal_event<G: LocalSessionCatalog>(
+/// Resolve the ingress session that should carry an authority-routed message.
+///
+/// Exact `session_instance_id` match wins. When the id is stale — its session
+/// was closed and the peer reconnected under a new id — fall back to the
+/// node's only live session, mirroring the server-side rebind done by
+/// `SessionSyncAuthorityManager::ensure_authority_host`
+/// (src/remote/node/remote_node_session_sync_runtime.rs:748-801). Returns
+/// `None` when there is no unambiguous live session (zero, or more than one
+/// concurrent session for the node).
+fn resolve_session_for_authority_route<'a>(
+    sessions: &'a HashMap<String, ActiveNodeIngressSession>,
+    node_id: &str,
+    session_instance_id: &str,
+) -> Option<(&'a ActiveNodeIngressSession, bool)> {
+    if let Some(active) = sessions.get(session_instance_id) {
+        return Some((active, false));
+    }
+    let mut live = sessions
+        .values()
+        .filter(|active| active.session.node_id() == node_id);
+    let active = live.next()?;
+    if live.next().is_some() {
+        return None;
+    }
+    Some((active, true))
+}
+
+fn handle_internal_event<B: RemoteTargetPublicationBackend, G: LocalSessionCatalog>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     registered_workspace_sockets: &mut BTreeSet<String>,
     internal_tx: mpsc::Sender<InternalEvent>,
@@ -2507,12 +2560,27 @@ fn handle_internal_event<G: LocalSessionCatalog>(
             ERROR_LOG.log_debug(format!(
                 "[remote-node-ingress] authority command received node={node_id} session_instance_id={session_instance_id} endpoint={endpoint} command={command:?}",
             ));
-            let Some(active) = sessions.get(&session_instance_id) else {
+            let Some((active, rebound)) =
+                resolve_session_for_authority_route(sessions, &node_id, &session_instance_id)
+            else {
                 ERROR_LOG.log(format!(
                     "[remote-node-ingress] dropping authority command for node={node_id} session_instance_id={session_instance_id} endpoint={endpoint} because no active session is open",
                 ));
+                if !has_active_ingress_session_for_node(sessions, &node_id) {
+                    mark_discovered_node_offline_if_last_ingress_session(
+                        publication_runtime,
+                        sessions,
+                        &node_id,
+                    );
+                }
                 return;
             };
+            if rebound {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] rebound authority command for node={node_id} from stale session_instance_id={session_instance_id} to live session_instance_id={} endpoint={endpoint}",
+                    active.session.session_instance_id()
+                ));
+            }
             let envelope = match map_authority_command_to_grpc(&active.session, command) {
                 Ok(envelope) => envelope,
                 Err(error) => {
@@ -2533,13 +2601,29 @@ fn handle_internal_event<G: LocalSessionCatalog>(
             session_instance_id,
             envelope,
         } => {
-            let Some(active) = sessions.get(&session_instance_id) else {
+            let Some((active, rebound)) =
+                resolve_session_for_authority_route(sessions, &node_id, &session_instance_id)
+            else {
                 ERROR_LOG.log(format!(
                     "[remote-node-ingress] dropping authority output for node={node_id} session_instance_id={session_instance_id} type={} because no active session is open",
                     envelope.payload.message_type()
                 ));
+                if !has_active_ingress_session_for_node(sessions, &node_id) {
+                    mark_discovered_node_offline_if_last_ingress_session(
+                        publication_runtime,
+                        sessions,
+                        &node_id,
+                    );
+                }
                 return;
             };
+            if rebound {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] rebound authority output for node={node_id} from stale session_instance_id={session_instance_id} to live session_instance_id={} type={}",
+                    active.session.session_instance_id(),
+                    envelope.payload.message_type()
+                ));
+            }
             let grpc = match map_outbound_grpc_envelope(
                 active.session.node_id(),
                 crate::infra::remote_protocol::NodeSessionChannel::Authority,
@@ -3986,6 +4070,170 @@ mod tests {
         assert!(
             state_rx.try_recv().is_err(),
             "close with nothing to close must not re-signal RemoteNodeOffline"
+        );
+    }
+
+    fn test_active_session(
+        node_id: &str,
+        session_instance_id: &str,
+        opened_at: Instant,
+    ) -> ActiveNodeIngressSession {
+        ActiveNodeIngressSession {
+            session: RemoteNodeSessionHandle::for_test(node_id, session_instance_id),
+            bridges: HashMap::new(),
+            published_fingerprints: HashMap::new(),
+            source_publication_tracker: SourcePublicationTracker::new(),
+            observed_sessions: HashMap::new(),
+            published_sessions: HashMap::new(),
+            observed_initialized: false,
+            next_message_id: 0,
+            opened_at,
+        }
+    }
+
+    #[test]
+    fn resolve_session_for_authority_route_prefers_exact_match() {
+        let mut sessions: HashMap<String, ActiveNodeIngressSession> = HashMap::new();
+        sessions.insert(
+            "session-a".to_string(),
+            test_active_session("peer#42424", "session-a", Instant::now()),
+        );
+        sessions.insert(
+            "session-b".to_string(),
+            test_active_session("peer#42424", "session-b", Instant::now()),
+        );
+
+        let resolved = resolve_session_for_authority_route(&sessions, "peer#42424", "session-b");
+
+        let (active, rebound) = resolved.expect("exact match should resolve");
+        assert_eq!(active.session.session_instance_id(), "session-b");
+        assert!(!rebound, "exact match must not count as a rebind");
+    }
+
+    #[test]
+    fn resolve_session_for_authority_route_rebinds_to_single_live_session() {
+        let mut sessions: HashMap<String, ActiveNodeIngressSession> = HashMap::new();
+        sessions.insert(
+            "session-new".to_string(),
+            test_active_session("peer#42424", "session-new", Instant::now()),
+        );
+
+        let resolved =
+            resolve_session_for_authority_route(&sessions, "peer#42424", "session-stale");
+
+        let (active, rebound) = resolved.expect("stale id with one live session should rebind");
+        assert_eq!(active.session.session_instance_id(), "session-new");
+        assert!(rebound, "stale id must be reported as a rebind");
+    }
+
+    #[test]
+    fn resolve_session_for_authority_route_none_when_ambiguous_or_absent() {
+        let mut sessions: HashMap<String, ActiveNodeIngressSession> = HashMap::new();
+        assert!(
+            resolve_session_for_authority_route(&sessions, "peer#42424", "session-stale").is_none(),
+            "no session for the node must not resolve"
+        );
+
+        sessions.insert(
+            "session-a".to_string(),
+            test_active_session("peer#42424", "session-a", Instant::now()),
+        );
+        sessions.insert(
+            "session-b".to_string(),
+            test_active_session("peer#42424", "session-b", Instant::now()),
+        );
+        assert!(
+            resolve_session_for_authority_route(&sessions, "peer#42424", "session-stale").is_none(),
+            "two live sessions for the node are ambiguous and must not resolve"
+        );
+    }
+
+    #[test]
+    fn close_ingress_sessions_for_node_keeps_fresh_sessions() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let (state_tx, state_rx) = mpsc::channel::<StateEvent>();
+        shared.set_state_tx(state_tx);
+        let backend = RatatuiRemoteTargetPublicationBackend::new(shared, network.clone());
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::with_network_backend_and_noop_owner(network, backend)
+                .expect("publication runtime should build");
+
+        let mut sessions: HashMap<String, ActiveNodeIngressSession> = HashMap::new();
+        sessions.insert(
+            "session-fresh".to_string(),
+            test_active_session("peer#42424", "session-fresh", Instant::now()),
+        );
+        sessions.insert(
+            "session-old".to_string(),
+            test_active_session(
+                "peer#42424",
+                "session-old",
+                Instant::now() - Duration::from_secs(60),
+            ),
+        );
+        let mut outbound_guards: HashMap<String, GrpcRemoteNodeTransportGuard> = HashMap::new();
+        let mut pending_outbound_guards: HashMap<String, GrpcRemoteNodeTransportGuard> =
+            HashMap::new();
+        let mut pending_outbound_dials: HashSet<String> = HashSet::new();
+        let mut closed_session_instances: HashSet<String> = HashSet::new();
+
+        close_ingress_sessions_for_node(
+            &publication_runtime,
+            &mut sessions,
+            &mut outbound_guards,
+            &mut pending_outbound_guards,
+            &mut pending_outbound_dials,
+            &mut closed_session_instances,
+            "peer#42424",
+        );
+
+        assert!(
+            sessions.contains_key("session-fresh"),
+            "fresh session must survive reconnect eviction"
+        );
+        assert!(
+            !sessions.contains_key("session-old"),
+            "old session must be evicted"
+        );
+        assert!(
+            state_rx.try_recv().is_err(),
+            "offline must not be signaled while the fresh session lives"
+        );
+
+        // Age the surviving session past the grace window; the next eviction
+        // must then remove it and signal offline as the last session.
+        let survived = sessions
+            .get_mut("session-fresh")
+            .expect("fresh session must still be present");
+        survived.opened_at = Instant::now() - Duration::from_secs(60);
+
+        close_ingress_sessions_for_node(
+            &publication_runtime,
+            &mut sessions,
+            &mut outbound_guards,
+            &mut pending_outbound_guards,
+            &mut pending_outbound_dials,
+            &mut closed_session_instances,
+            "peer#42424",
+        );
+        assert!(
+            sessions.is_empty(),
+            "once the grace window passes the fresh session is evicted too"
+        );
+        // mark_discovered_remote_node_offline emits owner bookkeeping events
+        // before the offline signal; drain until the offline event arrives.
+        let mut offline = None;
+        while let Ok(event) = state_rx.try_recv() {
+            if let StateEvent::RemoteNodeOffline { node_id } = event {
+                offline = Some(node_id);
+                break;
+            }
+        }
+        assert_eq!(
+            offline.as_deref(),
+            Some("peer#42424"),
+            "offline must be signaled once the last session is gone"
         );
     }
 }
