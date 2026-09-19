@@ -144,6 +144,7 @@ pub fn remote_node_ingress_startup_lock_path(network: &RemoteNetworkConfig) -> P
 }
 
 /// Startup lock file for the remote runtime owner control socket.
+#[allow(dead_code)]
 pub fn remote_runtime_owner_startup_lock_path(network: &RemoteNetworkConfig) -> PathBuf {
     startup_lock_path("waitagent-remote-runtime-owner-", network)
 }

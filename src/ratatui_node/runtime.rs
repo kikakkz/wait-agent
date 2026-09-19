@@ -884,6 +884,13 @@ impl SharedState {
         };
         if let Some(session) = session {
             session.feed_input(bytes);
+        } else {
+            // Silent drops here used to make frozen remote panes look like
+            // "keyboard does nothing" with zero evidence in the diagnostics
+            // log; always leave a trace instead.
+            ERROR_LOG.log(format!(
+                "[ratatui-node] feed_remote_session_input: no remote session for {target_id}"
+            ));
         }
     }
 

@@ -2096,7 +2096,9 @@ fn handle_transport_event<
             ERROR_LOG.log(format!(
                 "[remote-node-ingress] ingress session closed node={node_id} session_instance_id={session_instance_id}"
             ));
-            sessions.remove(&session_instance_id);
+            if let Some(mut removed) = sessions.remove(&session_instance_id) {
+                close_removed_session_bridges(&mut removed);
+            }
             closed_session_instances.insert(session_instance_id.clone());
             // Drop the outbound transport guard for this session so the worker
             // thread exits and the TCP connection is closed.
@@ -2124,7 +2126,9 @@ fn handle_transport_event<
                 node_id.as_deref().unwrap_or("<unknown>")
             ));
             if let Some(session_instance_id) = session_instance_id {
-                sessions.remove(&session_instance_id);
+                if let Some(mut removed) = sessions.remove(&session_instance_id) {
+                    close_removed_session_bridges(&mut removed);
+                }
                 closed_session_instances.insert(session_instance_id.clone());
                 outbound_guards.remove(&session_instance_id);
                 // Authority hosts are not tied to the inbound gRPC session; see
@@ -2273,7 +2277,9 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
         })
         .collect();
     for session_instance_id in &removed_instance_ids {
-        sessions.remove(session_instance_id);
+        if let Some(mut removed) = sessions.remove(session_instance_id) {
+            close_removed_session_bridges(&mut removed);
+        }
         closed_session_instances.insert(session_instance_id.clone());
         outbound_guards.remove(session_instance_id);
     }
@@ -2285,6 +2291,28 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
             sessions,
             node_id,
         );
+    }
+}
+
+/// Close every authority bridge bound to a removed ingress session.
+///
+/// A bridge that outlives its gRPC session otherwise blocks forever: its
+/// reader thread never sees EOF, and the remote session side keeps the stale
+/// connection stuck in its accept loop, so the replacement bridge is never
+/// accepted and authority frames keep the dead session's stamp. Closing the
+/// transport makes the bridge reader exit within one read timeout, which
+/// unblocks the remote session and lets it accept the fresh bridge.
+fn close_removed_session_bridges(active: &mut ActiveNodeIngressSession) {
+    if active.bridges.is_empty() {
+        return;
+    }
+    let node_id = active.session.node_id().to_string();
+    let session_instance_id = active.session.session_instance_id().to_string();
+    for (endpoint, bridge) in active.bridges.drain() {
+        bridge.transport.close();
+        ERROR_LOG.log(format!(
+            "[remote-node-ingress] closed authority bridge for removed session node={node_id} session_instance_id={session_instance_id} endpoint={endpoint}"
+        ));
     }
 }
 

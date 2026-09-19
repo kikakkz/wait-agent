@@ -1,6 +1,6 @@
 // Legacy tmux-era remote runtime owner kept during the ratatui migration; most items are currently unused.
 
-use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, RemoteRuntimeOwnerCommand};
+use crate::cli::{RemoteNetworkConfig, RemoteRuntimeOwnerCommand};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
@@ -9,20 +9,16 @@ use crate::infra::error_log::ERROR_LOG;
 
 use crate::lifecycle::LifecycleError;
 use crate::platform::remote_ipc::{
-    cleanup_remote_listener, remote_ready_addr, remote_runtime_owner_addr,
-    remote_runtime_owner_startup_lock_path, RemoteControlAddr, RemoteControlAsyncListener,
-    RemoteControlAsyncStream, RemoteControlListener, RemoteControlStream,
+    cleanup_remote_listener, remote_runtime_owner_addr, RemoteControlAddr,
+    RemoteControlAsyncListener, RemoteControlAsyncStream, RemoteControlStream,
 };
 use crate::process::current_executable::current_waitagent_executable;
-use crate::process::startup_lock::StartupLock;
-use crate::process::workspace::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep_until, Instant as TokioInstant};
@@ -648,11 +644,13 @@ impl RemoteRuntimeOwnerRuntime {
 
 #[cfg(all(test, unix))]
 fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
+    use std::thread;
+
     let socket_path = remote_runtime_owner_socket_path(network);
     crate::infra::best_effort::remove_file(&socket_path);
     let addr = RemoteControlAddr::Unix(socket_path);
-    let listener =
-        RemoteControlListener::bind(&addr).expect("test remote runtime owner socket should bind");
+    let listener = crate::platform::remote_ipc::RemoteControlListener::bind(&addr)
+        .expect("test remote runtime owner socket should bind");
     let state = RemoteRuntimeOwnerSharedState {
         records: Arc::new(Mutex::new(HashMap::new())),
         offline_nodes: Arc::new(Mutex::new(HashMap::new())),
@@ -945,44 +943,23 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
     current_executable: &Path,
     network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
+    // In the ratatui single-process model the runtime owner always runs
+    // in-process (started by the node server runtime); there is no
+    // `__remote-runtime-owner` sidecar subcommand to fall back to — the old
+    // spawn path failed deterministically with "unknown subcommand" and
+    // produced misleading "exited before reporting ready" errors. When the
+    // owner socket is unavailable the owner thread is gone (crashed or the
+    // process is shutting down), and respawning one mid-teardown is
+    // meaningless, so report the unavailability as-is.
+    let _ = current_executable;
     let addr = remote_runtime_owner_addr(network);
     if remote_runtime_owner_available(&addr) {
         return Ok(());
     }
-    let lock_path = remote_runtime_owner_startup_lock_path(network);
-    let Some(_startup_lock) =
-        StartupLock::try_acquire(&lock_path).map_err(remote_runtime_owner_error)?
-    else {
-        let _startup_lock = StartupLock::acquire(&lock_path).map_err(remote_runtime_owner_error)?;
-        if remote_runtime_owner_available(&addr) {
-            return Ok(());
-        }
-        return Err(LifecycleError::Protocol(format!(
-            "remote runtime owner for listener `{}` was not ready after startup lock {} released",
-            network.listener_addr(),
-            lock_path.display()
-        )));
-    };
-    if remote_runtime_owner_available(&addr) {
-        return Ok(());
-    }
-    cleanup_remote_listener(&addr);
-
-    let ready_addr = remote_ready_addr();
-    let ready_listener =
-        RemoteControlListener::bind(&ready_addr).map_err(remote_runtime_owner_error)?;
-    // On Windows the listener resolves the ephemeral port; the child must be
-    // handed the concrete address, not the pre-bind `127.0.0.1:0`.
-    let bound_ready_addr = ready_listener.local_addr().clone();
-
-    let child = spawn_waitagent_sidecar_child(
-        current_executable,
-        remote_runtime_owner_args(network, Some(&bound_ready_addr)),
-    )
-    .map_err(remote_runtime_owner_error)?;
-    let ready = wait_for_remote_runtime_owner_ready(ready_listener, &bound_ready_addr, child);
-    cleanup_remote_listener(&bound_ready_addr);
-    ready
+    Err(LifecycleError::Protocol(format!(
+        "remote runtime owner for listener `{}` is not running (in-process owner unavailable)",
+        network.listener_addr()
+    )))
 }
 
 fn remote_runtime_owner_available(addr: &RemoteControlAddr) -> bool {
@@ -1033,75 +1010,6 @@ fn notify_remote_runtime_owner_ready(
         }
     }
     stream.flush()
-}
-
-fn wait_for_remote_runtime_owner_ready(
-    listener: RemoteControlListener,
-    ready_addr: &RemoteControlAddr,
-    mut child: std::process::Child,
-) -> Result<(), LifecycleError> {
-    enum RemoteRuntimeOwnerReadyEvent {
-        Ready(io::Result<String>),
-        Exited(io::Result<std::process::ExitStatus>),
-    }
-
-    let (event_tx, event_rx) = mpsc::channel();
-    let ready_tx = event_tx.clone();
-    thread::spawn(move || {
-        let response = listener.accept().and_then(|(mut stream, _)| {
-            let mut response = String::new();
-            stream.read_to_string(&mut response)?;
-            Ok(response)
-        });
-        let _ = ready_tx.send(RemoteRuntimeOwnerReadyEvent::Ready(response));
-    });
-
-    thread::spawn(move || {
-        let status = child.wait();
-        let _ = event_tx.send(RemoteRuntimeOwnerReadyEvent::Exited(status));
-    });
-
-    match event_rx.recv() {
-        Ok(RemoteRuntimeOwnerReadyEvent::Ready(Ok(response))) => {
-            let response = response.trim();
-            if response == "ok" {
-                return Ok(());
-            }
-            if let Some(error) = response.strip_prefix("err\t") {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote runtime owner failed to start: {error}"
-                )));
-            }
-            Err(LifecycleError::Protocol(format!(
-                "remote runtime owner sent invalid ready response `{response}`"
-            )))
-        }
-        Ok(RemoteRuntimeOwnerReadyEvent::Ready(Err(error))) => {
-            Err(remote_runtime_owner_error(error))
-        }
-        Ok(RemoteRuntimeOwnerReadyEvent::Exited(Ok(status))) => Err(LifecycleError::Protocol(
-            format!("remote runtime owner exited before reporting ready: {status}"),
-        )),
-        Ok(RemoteRuntimeOwnerReadyEvent::Exited(Err(error))) => {
-            Err(remote_runtime_owner_error(error))
-        }
-        Err(_) => Err(LifecycleError::Protocol(format!(
-            "remote runtime owner ready socket `{}` closed before reporting ready",
-            ready_addr.to_arg_string()
-        ))),
-    }
-}
-
-pub(crate) fn remote_runtime_owner_args(
-    network: &RemoteNetworkConfig,
-    ready_socket: Option<&RemoteControlAddr>,
-) -> Vec<String> {
-    let mut args = vec!["__remote-runtime-owner".to_string()];
-    if let Some(ready_socket) = ready_socket {
-        args.push("--ready-socket".to_string());
-        args.push(ready_socket.to_arg_string());
-    }
-    prepend_global_network_args(args, network)
 }
 
 fn signal_remote_runtime_owner_command(
@@ -1720,11 +1628,10 @@ mod tests {
     use super::{
         handle_remote_runtime_owner_client, parse_remote_runtime_owner_command,
         parse_remote_runtime_owner_snapshot, prune_expired_offline_nodes,
-        remote_runtime_owner_args, remote_runtime_owner_socket_path,
-        render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
-        run_remote_runtime_owner_event_loop, OwnerStateRecord, PublishedTargetSourceBinding,
-        RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState,
-        RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
+        remote_runtime_owner_socket_path, render_remote_runtime_owner_command,
+        render_remote_runtime_owner_snapshot, run_remote_runtime_owner_event_loop,
+        OwnerStateRecord, PublishedTargetSourceBinding, RemoteRuntimeOwnerCommandEnvelope,
+        RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -1760,53 +1667,6 @@ mod tests {
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }
-    }
-
-    #[test]
-    fn remote_runtime_owner_args_include_hidden_command_and_network_flags() {
-        let network = RemoteNetworkConfig {
-            port: 9001,
-            connect: Some("10.0.0.8:7474".to_string()),
-            node_id: None,
-            public_endpoint: None,
-            node_key_path: None,
-            node_cert_path: None,
-        };
-
-        let args = remote_runtime_owner_args(&network, None);
-
-        assert_eq!(
-            args,
-            vec![
-                "--port",
-                "9001",
-                "--connect",
-                "10.0.0.8:7474",
-                "__remote-runtime-owner",
-            ]
-        );
-    }
-
-    #[test]
-    fn remote_runtime_owner_args_include_ready_socket_when_requested() {
-        let network = RemoteNetworkConfig {
-            port: 9001,
-            connect: Some("10.0.0.8:7474".to_string()),
-            node_id: None,
-            public_endpoint: None,
-            node_key_path: None,
-            node_cert_path: None,
-        };
-
-        let args = remote_runtime_owner_args(
-            &network,
-            Some(&RemoteControlAddr::Unix(PathBuf::from(
-                "/tmp/runtime-ready.sock",
-            ))),
-        );
-
-        assert!(args.iter().any(|arg| arg == "--ready-socket"));
-        assert!(args.iter().any(|arg| arg == "/tmp/runtime-ready.sock"));
     }
 
     #[test]

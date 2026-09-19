@@ -37,6 +37,13 @@ pub struct RatatuiRemoteSession {
     pub authority_node_id: String,
     observer: Mutex<RemoteObserverRuntime>,
     writer: Mutex<Option<RemoteControlStream>>,
+    /// Identity of the connection whose clone is currently stored in
+    /// `writer`. Each accepted authority connection gets a fresh sequence
+    /// number; a connection whose read loop ends only tears the session down
+    /// when it is still the current writer, so a replaced (stale) connection
+    /// can exit without killing the session.
+    next_connection_seq: AtomicU64,
+    current_writer_seq: AtomicU64,
     listener: Mutex<Option<AuthorityEndpointListener>>,
     running: Arc<AtomicBool>,
     closed: AtomicBool,
@@ -100,6 +107,8 @@ impl RatatuiRemoteSession {
             authority_node_id: authority_node_id.clone(),
             observer: Mutex::new(observer),
             writer: Mutex::new(None),
+            next_connection_seq: AtomicU64::new(1),
+            current_writer_seq: AtomicU64::new(0),
             listener: Mutex::new(Some(listener)),
             running: Arc::new(AtomicBool::new(true)),
             closed: AtomicBool::new(false),
@@ -558,20 +567,26 @@ fn spawn_authority_transport_acceptor(
         let Some(listener) = listener else {
             return;
         };
-        // Accept in a loop: after a bridge connection drops (e.g. during a
-        // node reconnect), the ingress reconnects a new bridge to this same
-        // listener.  A single accept would leave subsequent connections
-        // stranded in the backlog, stalling the reconnect forever.
+        // Accept in a loop and give every connection its own thread: a bridge
+        // connection lives until its transport dies, and a single long-lived
+        // connection must not block the next bridge from being accepted (the
+        // ingress server reconnects a fresh bridge after a node reconnect).
         while session.running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    handle_authority_transport_stream(
-                        stream,
-                        session.clone(),
-                        &target_id,
-                        &session_id,
-                        &authority_node_id,
-                    );
+                    let session = session.clone();
+                    let target_id = target_id.clone();
+                    let session_id = session_id.clone();
+                    let authority_node_id = authority_node_id.clone();
+                    thread::spawn(move || {
+                        handle_authority_transport_stream(
+                            stream,
+                            session,
+                            &target_id,
+                            &session_id,
+                            &authority_node_id,
+                        );
+                    });
                 }
                 Err(error) => {
                     ERROR_LOG.log(format!(
@@ -599,6 +614,7 @@ fn handle_authority_transport_stream(
     _session_id: &str,
     _authority_node_id: &str,
 ) {
+    let connection_seq = session.next_connection_seq.fetch_add(1, Ordering::SeqCst);
     if let Err(error) = (|| -> Result<(), LifecycleError> {
         let _client_node_id = read_client_hello(&mut stream).map_err(|error| {
             LifecycleError::Io("failed to read authority client hello".to_string(), error)
@@ -612,12 +628,22 @@ fn handle_authority_transport_stream(
             "[ratatui-remote-session] authority handshake failed: {error}"
         ));
         signal_connected(&session, Err(error));
-        session.running.store(false, Ordering::Relaxed);
         return;
     }
 
     signal_connected(&session, Ok(()));
 
+    // A pong writer local to this connection: answering a ping on any other
+    // connection would leave the pinger waiting forever.
+    let mut pong_writer = match stream.try_clone() {
+        Ok(cloned) => cloned,
+        Err(error) => {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] failed to clone authority stream for {target_id}: {error}"
+            ));
+            return;
+        }
+    };
     {
         let cloned = match stream.try_clone() {
             Ok(cloned) => cloned,
@@ -625,16 +651,24 @@ fn handle_authority_transport_stream(
                 ERROR_LOG.log(format!(
                     "[ratatui-remote-session] failed to clone authority stream for {target_id}: {error}"
                 ));
-                session.running.store(false, Ordering::Relaxed);
                 return;
             }
         };
+        // The newest connection always wins: shutting the previous writer
+        // down unblocks its reader thread (sequence mismatch below), which
+        // then exits without reporting a disconnect.
         let mut writer_guard = session.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = writer_guard.take() {
+            let _ = previous.shutdown(Shutdown::Both);
+        }
         *writer_guard = Some(cloned);
+        session
+            .current_writer_seq
+            .store(connection_seq, Ordering::SeqCst);
     }
     session.flush_open_mirror();
     ERROR_LOG.log(format!(
-        "[ratatui-remote-session] authority reader started for {target_id} writer_ready=true"
+        "[ratatui-remote-session] authority reader started for {target_id} writer_ready=true seq={connection_seq}"
     ));
 
     let mut output_seq: u64 = 0;
@@ -699,11 +733,11 @@ fn handle_authority_transport_stream(
                 _ => {}
             },
             Ok(AuthorityTransportFrame::Ping) => {
-                let mut guard = session.writer.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(writer) = guard.as_mut() {
-                    let _ = write_authority_transport_frame(writer, &AuthorityTransportFrame::Pong);
-                    let _ = writer.flush();
-                }
+                let _ = write_authority_transport_frame(
+                    &mut pong_writer,
+                    &AuthorityTransportFrame::Pong,
+                );
+                let _ = pong_writer.flush();
             }
             Ok(AuthorityTransportFrame::Pong) => {}
             Ok(other) => {
@@ -720,13 +754,22 @@ fn handle_authority_transport_stream(
         }
     }
     ERROR_LOG.log(format!(
-        "[ratatui-remote-session] authority reader exiting for {target_id}"
+        "[ratatui-remote-session] authority reader exiting for {target_id} seq={connection_seq}"
     ));
-    session.running.store(false, Ordering::Relaxed);
-    // Only report a disconnect when the session was not explicitly stopped by
-    // StateEventLoop. The loop will decide whether to start a reconnect worker
-    // or tear the session down.
-    if !session.closed.load(Ordering::SeqCst) {
+    // Only the connection that owns the current writer reports a disconnect:
+    // a replaced (stale) connection ending is part of normal takeover, not a
+    // teardown. Disconnect reporting is also skipped when the session was
+    // explicitly stopped by StateEventLoop, which owns the lifecycle decision
+    // (reconnect worker or teardown).
+    let mut is_current = false;
+    {
+        let mut writer_guard = session.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if session.current_writer_seq.load(Ordering::SeqCst) == connection_seq {
+            is_current = true;
+            let _ = writer_guard.take();
+        }
+    }
+    if is_current && !session.closed.load(Ordering::SeqCst) {
         let _ = session
             .shared
             .state_sender()
@@ -772,6 +815,9 @@ mod remote_session_tests {
     };
     use crate::platform::remote_ipc::{remote_ready_addr, RemoteControlListener};
     use crate::ratatui_node::runtime::SharedState;
+    use crate::remote::node::remote_node_transport_runtime::{
+        read_server_hello, write_client_hello,
+    };
     use std::io::{ErrorKind, Read};
     use std::time::Duration;
 
@@ -909,6 +955,74 @@ mod remote_session_tests {
             authority_endpoint_file(&socket_name, &session.session_id, &session.target_id);
         session.stop();
         crate::infra::best_effort::remove_file(&endpoint_file);
+    }
+
+    #[test]
+    fn remote_session_replaces_stale_bridge_connection() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let record = test_record("sess-takeover");
+        let socket_name = shared.workspace_id();
+        let session = RatatuiRemoteSession::open(&record, &socket_name, &network, &shared, None)
+            .expect("open remote session");
+        let addr = authority_transport_addr(&socket_name, &session.session_id, &session.target_id);
+
+        // First bridge connection becomes the current writer.
+        let mut bridge_a = RemoteControlStream::connect(&addr).expect("bridge a connects");
+        write_client_hello(&mut bridge_a, "peer-a").expect("bridge a hello");
+        read_server_hello(&mut bridge_a).expect("bridge a server hello");
+        wait_until("bridge a becomes writer", || {
+            session
+                .writer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        });
+        let bridge_a_seq = session.current_writer_seq.load(Ordering::SeqCst);
+
+        // A second bridge connection (the ingress reconnecting after a node
+        // reconnect) must be accepted while the first is still open, take over
+        // the writer, and shut the stale connection down.
+        let mut bridge_b = RemoteControlStream::connect(&addr).expect("bridge b connects");
+        write_client_hello(&mut bridge_b, "peer-a").expect("bridge b hello");
+        read_server_hello(&mut bridge_b).expect("bridge b server hello");
+        wait_until("bridge b takes over", || {
+            session.current_writer_seq.load(Ordering::SeqCst) > bridge_a_seq
+        });
+
+        // The stale bridge sees its connection shut down instead of blocking
+        // the accept loop forever.
+        let mut stale_read = [0u8; 1];
+        let stale_result = bridge_a.read(&mut stale_read);
+        assert!(
+            matches!(stale_result, Ok(0) | Err(_)),
+            "stale bridge connection must be shut down, got {stale_result:?}"
+        );
+
+        // Input flows through the current (second) bridge.
+        session.feed_input(b"z".to_vec());
+        let frame = read_authority_transport_frame(&mut bridge_b).expect("frame on bridge b");
+        match frame {
+            AuthorityTransportFrame::RawPtyInput(payload) => {
+                assert_eq!(payload.input_bytes, b"z".to_vec());
+            }
+            other => panic!("expected raw pty input on current bridge, got {other:?}"),
+        }
+
+        let endpoint_file =
+            authority_endpoint_file(&socket_name, &session.session_id, &session.target_id);
+        session.stop();
+        crate::infra::best_effort::remove_file(&endpoint_file);
+    }
+
+    fn wait_until(name: &str, mut condition: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {name}");
     }
 
     /// The endpoint's on-disk identity file: the UDS socket path on Unix, the

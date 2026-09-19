@@ -28,9 +28,7 @@ use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::path::PathBuf;
-#[cfg(unix)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -56,6 +54,11 @@ pub struct RemoteAuthorityTransportRuntime {
     reader: Mutex<RemoteControlStream>,
     writer: Mutex<RemoteControlStream>,
     next_message_id: AtomicU64,
+    /// Set when the owning ingress session is removed. `recv_command`
+    /// observes the flag on its read-timeout tick and exits instead of
+    /// waiting forever on a socket whose peer (the remote session) may
+    /// still be alive but whose gRPC session is gone.
+    closed: AtomicBool,
 }
 
 #[cfg(unix)]
@@ -126,7 +129,16 @@ impl RemoteAuthorityTransportRuntime {
             reader: Mutex::new(stream),
             writer: Mutex::new(writer),
             next_message_id: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
         })
+    }
+
+    /// Mark the transport as closed. The blocked `recv_command` observes the
+    /// flag at the latest on its next read timeout and returns an error,
+    /// which ends the bridge reader thread. This avoids cross-thread socket
+    /// shutdowns, which would deadlock against the reader-held mutex.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 
     pub fn recv_command(&self) -> Result<RemoteAuthorityCommand, RemoteAuthorityTransportError> {
@@ -159,6 +171,11 @@ impl RemoteAuthorityTransportRuntime {
                     )));
                 }
                 Err(ref e) if e.is_read_timeout() => {
+                    if self.closed.load(Ordering::SeqCst) {
+                        return Err(RemoteAuthorityTransportError::new(
+                            "authority transport closed by ingress session teardown",
+                        ));
+                    }
                     // SO_RCVTIMEO triggered - no command available yet, keep waiting.
                     continue;
                 }
