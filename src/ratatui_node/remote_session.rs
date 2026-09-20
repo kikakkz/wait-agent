@@ -48,6 +48,13 @@ pub struct RatatuiRemoteSession {
     running: Arc<AtomicBool>,
     closed: AtomicBool,
     opened: AtomicBool,
+    /// Set once the reader receives the first output frame. The peer sends
+    /// the mirror bootstrap exactly once, so a frame lost on the way would
+    /// otherwise leave the pane black forever; the open-mirror watchdog uses
+    /// this flag to decide when re-requesting the mirror is safe.
+    first_output_received: AtomicBool,
+    /// Number of `OpenMirrorRequest` re-sends issued by the watchdog.
+    open_mirror_resends: AtomicU64,
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
@@ -113,6 +120,8 @@ impl RatatuiRemoteSession {
             running: Arc::new(AtomicBool::new(true)),
             closed: AtomicBool::new(false),
             opened: AtomicBool::new(false),
+            first_output_received: AtomicBool::new(false),
+            open_mirror_resends: AtomicU64::new(0),
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
@@ -137,6 +146,8 @@ impl RatatuiRemoteSession {
                 "[ratatui-remote-session] failed to notify ingress owner for {target_id}: {error}"
             ));
         }
+
+        spawn_open_mirror_watchdog(session.clone());
 
         Ok(session)
     }
@@ -599,6 +610,83 @@ fn spawn_authority_transport_acceptor(
     });
 }
 
+/// How often the open-mirror watchdog checks whether the first output frame
+/// has arrived.
+const OPEN_MIRROR_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Maximum number of OpenMirrorRequest re-sends before the watchdog gives up.
+/// Spaced `OPEN_MIRROR_WATCHDOG_INTERVAL` apart this covers bootstrap delays
+/// of roughly 10+ seconds.
+const OPEN_MIRROR_WATCHDOG_MAX_RESENDS: u64 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogAction {
+    Resend,
+    GiveUp,
+}
+
+/// Decide what the open-mirror watchdog should do. Re-send only while no
+/// output frame has ever arrived: an idle shell legitimately produces no
+/// output, so once the first frame lands the watchdog must stay silent
+/// forever.
+fn watchdog_action(
+    opened: bool,
+    first_output_received: bool,
+    resends: u64,
+    max_resends: u64,
+) -> Option<WatchdogAction> {
+    if !opened || first_output_received {
+        return None;
+    }
+    if resends >= max_resends {
+        return Some(WatchdogAction::GiveUp);
+    }
+    Some(WatchdogAction::Resend)
+}
+
+fn spawn_open_mirror_watchdog(session: Arc<RatatuiRemoteSession>) {
+    thread::spawn(move || {
+        while session.running.load(Ordering::Relaxed) {
+            thread::sleep(OPEN_MIRROR_WATCHDOG_INTERVAL);
+            let action = watchdog_action(
+                session.opened.load(Ordering::SeqCst),
+                session.first_output_received.load(Ordering::Relaxed),
+                session.open_mirror_resends.load(Ordering::Relaxed),
+                OPEN_MIRROR_WATCHDOG_MAX_RESENDS,
+            );
+            match action {
+                Some(WatchdogAction::Resend) => {
+                    let (cols, rows) = {
+                        let cols = *session
+                            .initial_cols
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let rows = *session
+                            .initial_rows
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        (cols, rows)
+                    };
+                    session.open_mirror_resends.fetch_add(1, Ordering::Relaxed);
+                    ERROR_LOG.log(format!(
+                        "[ratatui-remote-session] open_mirror watchdog re-request for {} (resend {})",
+                        session.target_id,
+                        session.open_mirror_resends.load(Ordering::Relaxed),
+                    ));
+                    session.send_open_mirror(cols, rows);
+                }
+                Some(WatchdogAction::GiveUp) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-remote-session] open_mirror watchdog gave up for {}: no output after {} re-requests",
+                        session.target_id, OPEN_MIRROR_WATCHDOG_MAX_RESENDS,
+                    ));
+                    break;
+                }
+                None => {}
+            }
+        }
+    });
+}
+
 fn signal_connected(session: &RatatuiRemoteSession, result: Result<(), LifecycleError>) {
     if let Ok(mut guard) = session.connected_tx.lock() {
         if let Some(tx) = guard.take() {
@@ -679,6 +767,7 @@ fn handle_authority_transport_stream(
                 output_seq = output_seq.max(payload.output_seq);
                 if first_output {
                     first_output = false;
+                    session.first_output_received.store(true, Ordering::Relaxed);
                     ERROR_LOG.log(format!(
                         "[timing] remote FIRST raw pty output for {target_id} seq={} bytes={}",
                         payload.output_seq,
@@ -712,6 +801,7 @@ fn handle_authority_transport_stream(
                     output_seq = output_seq.max(payload.output_seq);
                     if first_output {
                         first_output = false;
+                        session.first_output_received.store(true, Ordering::Relaxed);
                         ERROR_LOG.log(format!(
                             "[timing] remote FIRST control raw pty output for {target_id} seq={} bytes={}",
                             payload.output_seq,
@@ -1043,5 +1133,58 @@ mod remote_session_tests {
         {
             authority_transport_marker_path(socket_name, session_id, target_id)
         }
+    }
+
+    #[test]
+    fn watchdog_action_waits_until_mirror_opened() {
+        assert_eq!(
+            watchdog_action(false, false, 0, OPEN_MIRROR_WATCHDOG_MAX_RESENDS),
+            None,
+            "mirror not opened yet: nothing to re-request"
+        );
+    }
+
+    #[test]
+    fn watchdog_action_stays_silent_after_first_output() {
+        assert_eq!(
+            watchdog_action(true, true, 0, OPEN_MIRROR_WATCHDOG_MAX_RESENDS),
+            None,
+            "first output received: an idle shell legitimately stays silent"
+        );
+        assert_eq!(
+            watchdog_action(
+                true,
+                true,
+                OPEN_MIRROR_WATCHDOG_MAX_RESENDS,
+                OPEN_MIRROR_WATCHDOG_MAX_RESENDS
+            ),
+            None,
+            "first output received: give-up limit must not apply"
+        );
+    }
+
+    #[test]
+    fn watchdog_action_resends_until_limit() {
+        for resends in 0..OPEN_MIRROR_WATCHDOG_MAX_RESENDS {
+            assert_eq!(
+                watchdog_action(true, false, resends, OPEN_MIRROR_WATCHDOG_MAX_RESENDS),
+                Some(WatchdogAction::Resend),
+                "opened with no output ever: re-request (resends={resends})"
+            );
+        }
+    }
+
+    #[test]
+    fn watchdog_action_gives_up_at_limit() {
+        assert_eq!(
+            watchdog_action(
+                true,
+                false,
+                OPEN_MIRROR_WATCHDOG_MAX_RESENDS,
+                OPEN_MIRROR_WATCHDOG_MAX_RESENDS,
+            ),
+            Some(WatchdogAction::GiveUp),
+            "opened with no output ever and limit reached: give up"
+        );
     }
 }

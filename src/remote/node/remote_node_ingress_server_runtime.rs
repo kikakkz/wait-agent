@@ -2078,6 +2078,9 @@ fn handle_transport_event<
                     publication_revisions,
                 );
             } else {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] envelope for unknown session_instance_id={session_instance_id} node={node_id}; dropping"
+                ));
                 let _ = route_transport_envelope(
                     publication_runtime,
                     &node_id,
@@ -2283,8 +2286,12 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
         closed_session_instances.insert(session_instance_id.clone());
         outbound_guards.remove(session_instance_id);
     }
-    pending_outbound_guards.remove(node_id);
-    pending_outbound_dials.remove(node_id);
+    // Never clear pending_outbound_guards/pending_outbound_dials here: they
+    // represent in-flight dial work owned by the retry worker / connect path.
+    // Clearing them re-opens the duplicate-dial race (two concurrent dials for
+    // the same node both pass the guard and create duplicate gRPC sessions,
+    // which strands authority output on stale bridges). The pending entry is
+    // cleared when the dial guard arrives (outbound_guard_rx handling).
     if !removed_instance_ids.is_empty() || had_pending {
         mark_discovered_node_offline_if_last_ingress_session(
             publication_runtime,
@@ -3469,7 +3476,10 @@ where
             continue;
         }
         if let Err(error) = deliver(&bridge.transport, &session_id, &target_id) {
-            let _ = error;
+            ERROR_LOG.log(format!(
+                "[remote-node-ingress] authority bridge delivery failed node={node_id} session_instance_id={} endpoint={endpoint}: {error}",
+                session.session.session_instance_id(),
+            ));
             stale.push(endpoint.clone());
         }
     }
@@ -4098,6 +4108,46 @@ mod tests {
         assert!(
             state_rx.try_recv().is_err(),
             "close with nothing to close must not re-signal RemoteNodeOffline"
+        );
+    }
+
+    #[test]
+    fn close_ingress_sessions_for_node_preserves_pending_outbound_dials() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let (state_tx, _state_rx) = mpsc::channel::<StateEvent>();
+        shared.set_state_tx(state_tx);
+        let backend = RatatuiRemoteTargetPublicationBackend::new(shared, network.clone());
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::with_network_backend_and_noop_owner(network, backend)
+                .expect("publication runtime should build");
+
+        let mut sessions: HashMap<String, ActiveNodeIngressSession> = HashMap::new();
+        let mut outbound_guards: HashMap<String, GrpcRemoteNodeTransportGuard> = HashMap::new();
+        let mut pending_outbound_guards: HashMap<String, GrpcRemoteNodeTransportGuard> =
+            HashMap::new();
+        let mut pending_outbound_dials: HashSet<String> = HashSet::new();
+        let mut closed_session_instances: HashSet<String> = HashSet::new();
+
+        // A dial is in flight for this node (owned by the retry worker / connect
+        // path). Closing stale sessions must not release the duplicate-dial
+        // guard, otherwise a second InitiateOutboundConnection for the same node
+        // races the in-flight dial and creates duplicate gRPC sessions.
+        pending_outbound_dials.insert("peer#42424".to_string());
+
+        close_ingress_sessions_for_node(
+            &publication_runtime,
+            &mut sessions,
+            &mut outbound_guards,
+            &mut pending_outbound_guards,
+            &mut pending_outbound_dials,
+            &mut closed_session_instances,
+            "peer#42424",
+        );
+
+        assert!(
+            pending_outbound_dials.contains("peer#42424"),
+            "close must preserve the pending dial so the duplicate-dial guard stays effective"
         );
     }
 
