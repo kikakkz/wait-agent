@@ -23,7 +23,7 @@ linked_primitives:
 done_criteria:
   - `waitagent relay serve` runs the hub TLS listener requiring client
     certificates, connection table (node_id -> connection), stream open/close
-    routing, fair scheduling, and heartbeat.
+    routing, and heartbeat.
   - Heartbeat per lifecycle section 10s interval, 3 missed beats (30s)
     offline, connection table cleanup, capacity released.
   - Whitelist auth via authorized_nodes/ directory following the

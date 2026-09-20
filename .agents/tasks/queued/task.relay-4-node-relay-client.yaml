@@ -26,8 +26,10 @@ done_criteria:
     relay (address plus pinned fingerprint from relay.toml).
   - open_stream(target_node_id) dials the remote node through the relay as a
     PeerConnection; all existing session protocols run unmodified on the seam.
-  - Presence events (register, unregister, heartbeat timeout) flow into the
-    console structured channel for sidebar and status-line display.
+  - Presence events (register, unregister, heartbeat timeout) are delivered
+    over a structured node-side event channel that this task defines; the
+    channel reaches sidebar and status-line display, and task.relay-8 reuses
+    it for error semantics.
   - Disconnects trigger reconnect and re-registration using the existing
     reconnect worker pattern.
 verification:

@@ -33,4 +33,5 @@ touched_paths:
   - src/infra
   - src/ratatui_node
 notes:
-  - Same structured channel carries presence (online/offline) events.
+  - Reuses the structured event channel defined in task.relay-4 and extends
+    it with error codes; presence keeps its own event types on that channel.
