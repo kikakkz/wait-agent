@@ -57,6 +57,11 @@ tower = "0.4"
 hyper-util = "0.1"
 unicode-width = "0.1.14"
 alacritty_terminal = "0.25"
+# MSYS2 runtime provisioning on Windows (download + sha256 + tar.xz unpack).
+# ureq uses rustls to match the existing TLS stack; xz2 bundles liblzma.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+xz2 = "0.1"
+tar = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

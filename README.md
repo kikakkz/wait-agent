@@ -104,6 +104,12 @@ release artifact. They do not build from `main`. The Windows installer performs
 a per-user install under `%LOCALAPPDATA%\Programs\waitagent` (no admin rights
 required) and adds that directory to your user `PATH`.
 
+On the first start (or during installation), WaitAgent on Windows downloads a
+~50 MB MSYS2 runtime in the background so local sessions get a modern
+OpenSSH/`git` with correct Ctrl+C handling over ConPTY. It is cached under
+`%LOCALAPPDATA%\waitagent\msys64`; offline or failed downloads automatically
+fall back to the system shell. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
 Manual downloads are available from the
 [GitHub releases page](https://github.com/kikakkz/wait-agent/releases).
 

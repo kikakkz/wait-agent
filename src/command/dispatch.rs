@@ -77,8 +77,25 @@ impl CommandDispatcher {
                         ))
                     },
                 )?;
+                #[cfg(windows)]
+                crate::platform::msys_env::provision_in_background();
                 self.ratatui_node_server(command)
                     .and_then(|runtime| runtime.run().map_err(AppError::from))
+            }
+            Command::ProvisionMsys => {
+                #[cfg(windows)]
+                {
+                    crate::platform::msys_env::provision_sync(std::io::stdout()).map_err(
+                        |error| {
+                            AppError::Lifecycle(crate::lifecycle::LifecycleError::Protocol(
+                                error.to_string(),
+                            ))
+                        },
+                    )?;
+                }
+                #[cfg(not(windows))]
+                println!("MSYS2 runtime provisioning only applies to Windows; nothing to do.");
+                Ok(())
             }
             Command::RatatuiClient(command) => self
                 .ratatui_client(command)

@@ -50,6 +50,28 @@ impl RatatuiLocalSession {
             token: shared.agent_signal.token.clone(),
         };
         signal_env.apply_to_hashmap(&mut env)?;
+        // When the vendored MSYS2 runtime is provisioned, prepend its
+        // `usr\bin` to the session PATH so `ssh`/`git` resolve to the vendored
+        // cygwin 3.5 + current OpenSSH builds (correct ConPTY Ctrl+C handling).
+        // alacritty merges `Options::env` over the inherited environment with
+        // custom keys winning, so the full PATH value must be set explicitly.
+        #[cfg(windows)]
+        if let Some(vendored_bin) = crate::platform::msys_env::vendored_bin_dir() {
+            env.insert(
+                "PATH".to_string(),
+                crate::platform::msys_env::vendored_path_value(
+                    &vendored_bin,
+                    std::env::var("PATH").ok().as_deref(),
+                ),
+            );
+            // The vendored runtime's nsswitch.conf is configured for
+            // `db_home: env windows`; point HOME at the real user profile so
+            // ssh/git pick up the user's `~/.ssh` keys and dotfiles instead
+            // of the empty `<msys>\home\<user>` tree.
+            if let Some(profile) = std::env::var_os("USERPROFILE") {
+                env.insert("HOME".to_string(), profile.to_string_lossy().into_owned());
+            }
+        }
         if let Err(error) = crate::platform::shell_prompt::ensure_bashrc_compact_prompt() {
             ERROR_LOG.log_warn(format!(
                 "[ratatui-local-session] failed to provision compact shell prompt: {error}"
@@ -458,8 +480,10 @@ pub(crate) fn default_shell() -> String {
     )
 }
 
-/// Locate a `bash.exe` on Windows: first on `PATH`, then at well-known
-/// Git for Windows / MSYS2 install locations.
+/// Locate a `bash.exe` on Windows: first the waitagent-provisioned MSYS2
+/// runtime (it ships a cygwin new enough for correct ConPTY Ctrl+C handling),
+/// then on `PATH`, then at well-known Git for Windows / MSYS2 install
+/// locations.
 #[cfg(windows)]
 fn find_bash() -> Option<std::path::PathBuf> {
     let from_path = std::env::var_os("PATH").and_then(|paths| {
@@ -467,7 +491,23 @@ fn find_bash() -> Option<std::path::PathBuf> {
             .map(|dir| dir.join("bash.exe"))
             .find(|candidate| candidate.is_file())
     });
-    from_path.or_else(well_known_bash)
+    select_bash(
+        crate::platform::msys_env::vendored_bash(),
+        from_path,
+        well_known_bash(),
+    )
+}
+
+/// bash selection order: vendored runtime first, then PATH, then well-known
+/// install locations. Pure function so the priority rule is unit-testable on
+/// any host.
+#[cfg(any(windows, test))]
+fn select_bash(
+    vendored: Option<std::path::PathBuf>,
+    from_path: Option<std::path::PathBuf>,
+    well_known: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    vendored.or(from_path).or(well_known)
 }
 
 #[cfg(windows)]
@@ -529,8 +569,9 @@ fn register_with_process_monitor(
     child_pid: u32,
     session: Arc<RatatuiLocalSession>,
 ) {
-    // Windows local sessions use pipes without a PTY master (ConPTY is not
-    // implemented yet), so the monitor receives the placeholder PTY handle 0.
+    // Windows local sessions run on an alacritty ConPTY (since 3b083cf); the
+    // process monitor tracks the child pid but there is no PTY master fd to
+    // watch, so the monitor receives the placeholder handle 0.
     monitor.register_session(
         session_id,
         child_pid,
@@ -572,6 +613,81 @@ mod local_session_tests {
         assert_eq!(
             resolve_windows_shell(Some(bash.clone()), true, Some("cmd.exe".to_string())),
             bash.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn find_bash_prefers_vendored_over_path_and_well_known() {
+        let vendored =
+            std::path::PathBuf::from(r"C:\Users\u\AppData\Local\waitagent\msys64\usr\bin\bash.exe");
+        let from_path = std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+        let well_known = std::path::PathBuf::from(r"C:\msys64\usr\bin\bash.exe");
+        assert_eq!(
+            select_bash(
+                Some(vendored.clone()),
+                Some(from_path.clone()),
+                Some(well_known.clone())
+            ),
+            Some(vendored)
+        );
+        assert_eq!(
+            select_bash(None, Some(from_path.clone()), Some(well_known.clone())),
+            Some(from_path)
+        );
+        assert_eq!(
+            select_bash(None, None, Some(well_known.clone())),
+            Some(well_known)
+        );
+        assert_eq!(select_bash(None, None, None), None);
+    }
+
+    #[test]
+    fn windows_shell_uses_vendored_bash_when_marker_ready() {
+        let home = std::env::temp_dir().join(format!(
+            "waitagent-local-session-test-vendored-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create temp home");
+        // Without a marker the vendored bash is not offered.
+        assert!(crate::platform::msys_env::vendored_bash_at(&home).is_none());
+        assert_eq!(
+            resolve_windows_shell(None, true, Some("cmd.exe".to_string())),
+            "powershell.exe"
+        );
+        // With a ready marker the vendored bash wins over powershell/comspec.
+        let state_dir = home.join("waitagent");
+        std::fs::create_dir_all(&state_dir).expect("create state dir");
+        std::fs::write(
+            state_dir.join(crate::platform::msys_env::MARKER_FILE_NAME),
+            format!("{}\n", crate::platform::msys_env::BASE_VERSION),
+        )
+        .expect("write marker");
+        // Marker alone is not enough; the bash binary must exist on disk.
+        assert!(crate::platform::msys_env::vendored_bash_at(&home).is_none());
+        let vendored =
+            crate::platform::msys_env::provision_dir_for(&home).join(r"usr\bin\bash.exe");
+        std::fs::create_dir_all(vendored.parent().expect("bash parent")).expect("create usr/bin");
+        std::fs::write(&vendored, "").expect("write fake bash.exe");
+        let vendored = crate::platform::msys_env::vendored_bash_at(&home)
+            .expect("ready marker must yield vendored bash");
+        assert_eq!(
+            resolve_windows_shell(Some(vendored.clone()), true, Some("cmd.exe".to_string())),
+            vendored.to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn vendored_path_value_prepends_vendored_bin() {
+        let vendored_bin =
+            std::path::PathBuf::from(r"C:\Users\u\AppData\Local\waitagent\msys64\usr\bin");
+        assert_eq!(
+            crate::platform::msys_env::vendored_path_value(
+                &vendored_bin,
+                Some("C:\\Windows\\system32")
+            ),
+            r"C:\Users\u\AppData\Local\waitagent\msys64\usr\bin;C:\Windows\system32"
         );
     }
 

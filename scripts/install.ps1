@@ -74,6 +74,20 @@ try {
 
     Add-ToUserPath $InstallDir
 
+    # Best-effort: pre-provision the vendored MSYS2 runtime (OpenSSH/Git) that
+    # Windows local sessions use. This downloads ~50 MB and can take several
+    # minutes; failure only falls back to the system shell, so it must not
+    # abort the install.
+    Write-Host ">>> Provisioning the MSYS2 runtime (downloads ~50 MB, may take a few minutes)..."
+    try {
+        & $installed __provision-msys
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "MSYS2 runtime provisioning failed (exit code $LASTEXITCODE); WaitAgent will fall back to the system shell and retry provisioning on next start."
+        }
+    } catch {
+        Write-Warning "MSYS2 runtime provisioning failed: $_; WaitAgent will fall back to the system shell and retry provisioning on next start."
+    }
+
     Write-Host ""
     Write-Host "waitagent $resolved installed to $InstallDir" -ForegroundColor Green
     Write-Host ""

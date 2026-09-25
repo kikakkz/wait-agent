@@ -174,6 +174,7 @@ pub enum Command {
     RatatuiNodeServer(RatatuiNodeServerCommand),
     RatatuiClient(RatatuiClientCommand),
     GenerateNodeCredentials,
+    ProvisionMsys,
     Help(String),
     Version,
 }
@@ -311,6 +312,11 @@ impl Cli {
                 args.remove(0);
                 parse_no_args(args)?;
                 Command::GenerateNodeCredentials
+            }
+            "__provision-msys" => {
+                args.remove(0);
+                parse_no_args(args)?;
+                Command::ProvisionMsys
             }
             "version" => Command::Version,
             "help" => Command::Help(help_text()),
@@ -747,6 +753,20 @@ mod tests {
             parse(&["waitagent", "__generate-node-credentials"]).command,
             Command::GenerateNodeCredentials
         ));
+    }
+
+    #[test]
+    fn parses_provision_msys_command() {
+        assert!(matches!(
+            parse(&["waitagent", "__provision-msys"]).command,
+            Command::ProvisionMsys
+        ));
+        let argv = ["waitagent", "__provision-msys", "extra"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        let error = Cli::parse(argv).expect_err("extra argument should be rejected");
+        assert_eq!(error.to_string(), "unexpected argument: extra");
     }
 
     #[test]

@@ -8,6 +8,7 @@
 pub mod file_lock;
 pub mod file_watcher;
 pub mod local_ipc;
+pub mod msys_env;
 pub mod process;
 pub mod pty;
 pub mod remote_ipc;
