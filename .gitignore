@@ -6,3 +6,5 @@
 # Added by cargo
 
 /target
+.claude/
+.kimi-code/
