@@ -903,7 +903,9 @@ mod remote_session_tests {
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
-    use crate::platform::remote_ipc::{remote_ready_addr, RemoteControlListener};
+    use crate::platform::remote_ipc::{
+        remote_ready_addr, RemoteControlAddr, RemoteControlListener,
+    };
     use crate::ratatui_node::runtime::SharedState;
     use crate::remote::node::remote_node_transport_runtime::{
         read_server_hello, write_client_hello,
@@ -1055,7 +1057,7 @@ mod remote_session_tests {
         let socket_name = shared.workspace_id();
         let session = RatatuiRemoteSession::open(&record, &socket_name, &network, &shared, None)
             .expect("open remote session");
-        let addr = authority_transport_addr(&socket_name, &session.session_id, &session.target_id);
+        let addr = session_bridge_addr(&socket_name, &session);
 
         // First bridge connection becomes the current writer.
         let mut bridge_a = RemoteControlStream::connect(&addr).expect("bridge a connects");
@@ -1103,6 +1105,31 @@ mod remote_session_tests {
             authority_endpoint_file(&socket_name, &session.session_id, &session.target_id);
         session.stop();
         crate::infra::best_effort::remove_file(&endpoint_file);
+    }
+
+    /// The address a bridge client connects to for an open session: the UDS
+    /// path on Unix; on Windows the real TCP port published in the `.port`
+    /// marker (the abstract `authority_transport_addr` is `127.0.0.1:0`
+    /// there and connecting to port 0 fails with WSAEADDRNOTAVAIL).
+    fn session_bridge_addr(socket_name: &str, session: &RatatuiRemoteSession) -> RemoteControlAddr {
+        #[cfg(unix)]
+        {
+            authority_transport_addr(socket_name, &session.session_id, &session.target_id)
+        }
+        #[cfg(windows)]
+        {
+            let marker = authority_transport_marker_path(
+                socket_name,
+                &session.session_id,
+                &session.target_id,
+            );
+            let port: u16 = std::fs::read_to_string(&marker)
+                .expect("authority marker file should exist after open")
+                .trim()
+                .parse()
+                .expect("authority marker file should contain the TCP port");
+            RemoteControlAddr::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+        }
     }
 
     fn wait_until(name: &str, mut condition: impl FnMut() -> bool) {
