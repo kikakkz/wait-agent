@@ -15,6 +15,7 @@ use crate::host::ssh::remote_install_proxy_store::{
 use crate::host::ssh::remote_shell::RemoteShellKind;
 use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
+use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardReadResult};
 use crate::ratatui_node::node_runtime::ServerMessageJson;
 use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use crossterm::event::{
@@ -132,6 +133,7 @@ impl ConnectRemoteHostPaneRuntime {
         if let Some(request) = initial_secret_request {
             spawn_secret_loader(request, secret_tx.clone());
         }
+        let (clipboard_tx, clipboard_rx) = unbounded::<Result<ClipboardReadResult, String>>();
         terminal
             .draw(|frame| {
                 render_background(frame);
@@ -156,11 +158,17 @@ impl ConnectRemoteHostPaneRuntime {
                         Event::Mouse(mouse) => {
                             state.apply_mouse(mouse, crossterm::terminal::size().unwrap_or((96, 24)))
                         }
+                        Event::Paste(text) => state.apply_paste(&text),
                         Event::Resize(_, _) => PaneAction::Redraw,
-                        _ => PaneAction::None,
                     };
                     match action {
                         PaneAction::None | PaneAction::Redraw => {}
+                        PaneAction::ReadClipboard => {
+                            let tx = clipboard_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(read_clipboard());
+                            });
+                        }
                         PaneAction::Close => return Ok(()),
                         PaneAction::LoadSecrets(request) => {
                             if let Some(request) = request {
@@ -235,6 +243,22 @@ impl ConnectRemoteHostPaneRuntime {
                     // blocked so the UI reflects the final state.
                     while let Ok(result) = secret_rx.try_recv() {
                         state.apply_secret_result(result);
+                    }
+                }
+                recv(clipboard_rx) -> result => {
+                    match result {
+                        Ok(Ok(ClipboardReadResult::Text(text))) => {
+                            state.apply_paste(&text);
+                        }
+                        Ok(Ok(_)) => {
+                            state.status =
+                                Status::Hint("clipboard does not contain text".to_string());
+                        }
+                        Ok(Err(message)) => {
+                            state.status =
+                                Status::Hint(format!("clipboard read failed: {message}"));
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -615,6 +639,29 @@ impl ConnectRemoteHostState {
     }
 
     fn apply_edit_key(&mut self, key: KeyEvent, field: EditField) -> PaneAction {
+        if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return PaneAction::ReadClipboard;
+        }
+        if key.code == KeyCode::Insert && key.modifiers.contains(KeyModifiers::SHIFT) {
+            return PaneAction::ReadClipboard;
+        }
+        if field == EditField::Host
+            && matches!(
+                key.code,
+                KeyCode::Esc
+                    | KeyCode::Enter
+                    | KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Up
+                    | KeyCode::Down
+            )
+        {
+            // Accept `host:port` (e.g. pasted) and move the port into the
+            // dedicated port field before focus leaves the host edit.
+            self.normalize_host_port();
+        }
         if matches!(field, EditField::SshPassword | EditField::SudoPassword)
             && key.code == KeyCode::Char(' ')
         {
@@ -685,6 +732,50 @@ impl ConnectRemoteHostState {
             _ => {}
         }
         PaneAction::None
+    }
+
+    /// Insert pasted text into the currently edited field.
+    ///
+    /// Only the first line is used so multi-line clipboard content (e.g.
+    /// `echo secret | xclip`) cannot smuggle newlines into a single-line
+    /// field. Password fields follow the same Saved→Enter/Replace transitions
+    /// as typed input. A `host:port` paste into the host field is split into
+    /// the host and port fields immediately.
+    fn apply_paste(&mut self, text: &str) -> PaneAction {
+        if !matches!(self.delete_confirm, DeleteConfirmState::Idle)
+            || matches!(self.status, Status::Error(_))
+        {
+            return PaneAction::None;
+        }
+        let Some(field) = self.editing else {
+            return PaneAction::None;
+        };
+        let Some(line) = text.lines().next() else {
+            return PaneAction::None;
+        };
+        if line.trim().is_empty() {
+            return PaneAction::None;
+        }
+        if field == EditField::SshPassword && self.password_mode == PasswordMode::Saved {
+            self.password_mode = PasswordMode::Enter;
+        }
+        if field == EditField::SudoPassword && self.sudo_mode == SudoMode::Saved {
+            self.sudo_mode = SudoMode::Replace;
+        }
+        for ch in line.chars().filter(|ch| !ch.is_control()) {
+            self.edit_field_push(field, ch);
+        }
+        if field == EditField::Host {
+            self.normalize_host_port();
+        }
+        PaneAction::None
+    }
+
+    fn normalize_host_port(&mut self) {
+        if let Some((host, port)) = split_host_port(&self.host) {
+            self.host = host;
+            self.remote_port_preference = port.to_string();
+        }
     }
 
     fn apply_mouse(&mut self, mouse: crossterm::event::MouseEvent, size: (u16, u16)) -> PaneAction {
@@ -977,7 +1068,10 @@ impl ConnectRemoteHostState {
         }
     }
 
-    fn connect_action(&self) -> PaneAction {
+    fn connect_action(&mut self) -> PaneAction {
+        // Safety net: the user may have typed `host:port` and clicked Connect
+        // without ever leaving the host field.
+        self.normalize_host_port();
         if matches!(self.status, Status::Working(_)) || self.credentials_loading() {
             PaneAction::None
         } else {
@@ -1496,6 +1590,7 @@ enum PaneAction {
     Redraw,
     Close,
     Connect,
+    ReadClipboard,
     DeleteSelectedHost { profile_name: String },
     LoadSecrets(Option<SecretLoadRequest>),
     SaveProxyConfig,
@@ -3805,6 +3900,35 @@ fn normalized_port(value: &str) -> String {
     }
 }
 
+/// Split a `host:port` / `[ipv6]:port` string into host and port.
+///
+/// Returns `None` when the input has no port suffix, so plain hostnames and
+/// bare IPv6 addresses pass through unchanged. The port must be all digits
+/// and fit in `u16`; anything else is treated as part of the host.
+fn split_host_port(raw: &str) -> Option<(String, u16)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (host, port) = if let Some(rest) = trimmed.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        (host, port)
+    } else {
+        let (host, port) = trimmed.rsplit_once(':')?;
+        if host.contains(':') {
+            // Bare IPv6 address without brackets; the colons belong to the
+            // address, not a port separator.
+            return None;
+        }
+        (host, port)
+    };
+    if host.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let port = port.parse::<u16>().ok()?;
+    Some((host.to_string(), port))
+}
+
 fn saved_ssh_secret_id(state: &ConnectRemoteHostState) -> Option<String> {
     match state.selected_profile().map(|profile| &profile.auth) {
         Some(RemoteHostAuthProfile::Password {
@@ -4010,6 +4134,119 @@ mod tests {
             state.selected_profile().unwrap(),
             &state
         ));
+    }
+
+    fn blank_state() -> ConnectRemoteHostState {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = Vec::new();
+        state.selected = 0;
+        state.host.clear();
+        state.ssh_user.clear();
+        state.remote_port_preference = "auto".to_string();
+        state.password_mode = PasswordMode::Enter;
+        state.sudo_mode = SudoMode::None;
+        state.secret_load = SecretLoadState::Idle;
+        state
+    }
+
+    #[test]
+    fn split_host_port_parses_ipv4_with_port() {
+        assert_eq!(
+            split_host_port("117.157.77.4:50045"),
+            Some(("117.157.77.4".to_string(), 50045))
+        );
+    }
+
+    #[test]
+    fn split_host_port_parses_hostname_and_bracketed_ipv6() {
+        assert_eq!(
+            split_host_port("example.com:22"),
+            Some(("example.com".to_string(), 22))
+        );
+        assert_eq!(split_host_port("[::1]:22"), Some(("::1".to_string(), 22)));
+    }
+
+    #[test]
+    fn split_host_port_leaves_plain_hosts_and_bare_ipv6_unchanged() {
+        assert_eq!(split_host_port("plain-host"), None);
+        assert_eq!(split_host_port("fe80::1"), None);
+        assert_eq!(split_host_port("host:"), None);
+        assert_eq!(split_host_port(":22"), None);
+        assert_eq!(split_host_port("host:abc"), None);
+        assert_eq!(split_host_port("host:99999"), None);
+        assert_eq!(split_host_port(""), None);
+    }
+
+    #[test]
+    fn host_edit_leaving_field_splits_host_and_port() {
+        let mut state = blank_state();
+        state.set_focus(Focus::Host);
+        for ch in "117.157.77.4:50045".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        state.apply_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(state.host, "117.157.77.4");
+        assert_eq!(state.remote_port_preference, "50045");
+    }
+
+    #[test]
+    fn connect_action_splits_host_and_port_without_leaving_field() {
+        let mut state = blank_state();
+        state.set_focus(Focus::Host);
+        for ch in "117.157.77.4:50045".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+
+        assert_eq!(state.connect_action(), PaneAction::Connect);
+        assert_eq!(state.host, "117.157.77.4");
+        assert_eq!(state.remote_port_preference, "50045");
+    }
+
+    #[test]
+    fn paste_into_host_field_splits_host_and_port() {
+        let mut state = blank_state();
+        state.set_focus(Focus::Host);
+
+        state.apply_paste("117.157.77.4:50045\n");
+
+        assert_eq!(state.host, "117.157.77.4");
+        assert_eq!(state.remote_port_preference, "50045");
+    }
+
+    #[test]
+    fn paste_into_ssh_password_uses_first_line_and_switches_saved_to_enter() {
+        let mut state = ConnectRemoteHostState::load();
+        state.set_focus(Focus::Password);
+        state.password_mode = PasswordMode::Saved;
+
+        state.apply_paste("s3\tcret\nignored-second-line");
+
+        assert_eq!(state.ssh_password, "s3cret");
+        assert_eq!(state.password_mode, PasswordMode::Enter);
+    }
+
+    #[test]
+    fn paste_into_sudo_password_switches_saved_to_replace() {
+        let mut state = ConnectRemoteHostState::load();
+        state.set_focus(Focus::Sudo);
+        state.sudo_mode = SudoMode::Saved;
+
+        state.apply_paste("sudos3cret\n");
+
+        assert_eq!(state.sudo_password, "sudos3cret");
+        assert_eq!(state.sudo_mode, SudoMode::Replace);
+    }
+
+    #[test]
+    fn paste_without_edit_focus_is_ignored() {
+        let mut state = blank_state();
+        state.set_focus(Focus::Hosts);
+
+        state.apply_paste("117.157.77.4:50045");
+
+        assert_eq!(state.host, "");
+        assert_eq!(state.remote_port_preference, "auto");
     }
 
     #[test]
