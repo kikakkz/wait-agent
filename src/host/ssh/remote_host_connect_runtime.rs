@@ -541,6 +541,22 @@ where
     }
 }
 
+/// Split a trailing `:port` from `host` when the suffix parses as a valid
+/// port; otherwise return the host unchanged. Bracketed IPv6 without a port
+/// is left untouched because the trailing segment never parses as a port.
+fn split_host_ssh_port(host: &str) -> (String, Option<u16>) {
+    let Some((head, tail)) = host.rsplit_once(':') else {
+        return (host.to_string(), None);
+    };
+    if head.is_empty() {
+        return (host.to_string(), None);
+    }
+    match tail.parse::<u16>() {
+        Ok(port) => (head.to_string(), Some(port)),
+        Err(_) => (host.to_string(), None),
+    }
+}
+
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 pub fn request_from_command(
@@ -639,14 +655,30 @@ fn profile_from_direct_args(
         .map(RemoteHostKind::from_str)
         .transpose()
         .map_err(LifecycleError::Protocol)?;
+    // `--ssh-port` wins; otherwise accept `host:port` in `--host` directly.
+    let ssh_port_arg = command
+        .ssh_port
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (host, ssh_port) = match ssh_port_arg {
+        Some(value) => {
+            let port = value
+                .parse::<u16>()
+                .map_err(|_| LifecycleError::Protocol(format!("invalid --ssh-port `{value}`")))?;
+            (host.to_string(), Some(port))
+        }
+        None => split_host_ssh_port(host),
+    };
 
     Ok(RemoteHostProfile {
         name: profile_name,
-        host: host.to_string(),
+        host,
         ssh_user,
         auth,
         sudo_password_secret_id,
         preferred_remote_port: parse_remote_port(command.remote_port.as_deref())?,
+        ssh_port,
         last_remote_port: None,
         last_endpoint: None,
         last_connected_at: None,
@@ -816,6 +848,32 @@ mod tests {
 
     fn test_operator_key_store() -> Arc<dyn OperatorKeyStore> {
         Arc::new(MemoryOperatorKeyStore::generate().unwrap())
+    }
+
+    #[test]
+    fn split_host_ssh_port_strips_numeric_suffix() {
+        assert_eq!(
+            split_host_ssh_port("117.157.77.4:50045"),
+            ("117.157.77.4".to_string(), Some(50045))
+        );
+        assert_eq!(
+            split_host_ssh_port("example.com:22"),
+            ("example.com".to_string(), Some(22))
+        );
+        assert_eq!(
+            split_host_ssh_port("[::1]:2200"),
+            ("[::1]".to_string(), Some(2200))
+        );
+        assert_eq!(
+            split_host_ssh_port("plain-host"),
+            ("plain-host".to_string(), None)
+        );
+        assert_eq!(
+            split_host_ssh_port("host:abc"),
+            ("host:abc".to_string(), None)
+        );
+        assert_eq!(split_host_ssh_port(":22"), (":22".to_string(), None));
+        assert_eq!(split_host_ssh_port(""), ("".to_string(), None));
     }
 
     #[derive(Clone)]

@@ -279,6 +279,9 @@ struct ConnectRemoteHostState {
     focus: Focus,
     host: String,
     ssh_user: String,
+    /// Port the remote `sshd` listens on ("22" by default). Entered either
+    /// directly or via `host:port` input in the Host field.
+    ssh_port: String,
     remote_port_preference: String,
     last_remote_port: Option<u16>,
     host_kind: RemoteHostKind,
@@ -318,6 +321,7 @@ impl ConnectRemoteHostState {
             focus: Focus::Hosts,
             host: String::new(),
             ssh_user: std::env::var("USER").unwrap_or_default(),
+            ssh_port: "22".to_string(),
             remote_port_preference: "auto".to_string(),
             last_remote_port: None,
             host_kind: RemoteHostKind::Lan,
@@ -356,6 +360,7 @@ impl ConnectRemoteHostState {
         if self.selected >= self.profiles.len() {
             self.host.clear();
             self.ssh_user = std::env::var("USER").unwrap_or_default();
+            self.ssh_port = "22".to_string();
             self.remote_port_preference = "auto".to_string();
             self.last_remote_port = None;
             self.host_kind = RemoteHostKind::Lan;
@@ -379,6 +384,7 @@ impl ConnectRemoteHostState {
             RemotePortPreference::Auto => "auto".to_string(),
             RemotePortPreference::Port(port) => port.to_string(),
         };
+        self.ssh_port = profile.ssh_port().to_string();
         self.last_remote_port = profile.last_remote_port;
         self.host_kind = profile.host_kind;
         let mut request = SecretLoadRequest {
@@ -774,7 +780,7 @@ impl ConnectRemoteHostState {
     fn normalize_host_port(&mut self) {
         if let Some((host, port)) = split_host_port(&self.host) {
             self.host = host;
-            self.remote_port_preference = port.to_string();
+            self.ssh_port = port.to_string();
         }
     }
 
@@ -2982,8 +2988,10 @@ const PASSWORD_EMPTY_PLACEHOLDER: &str = "________";
 fn host_display(state: &ConnectRemoteHostState) -> String {
     if state.host.is_empty() {
         HOST_EMPTY_PLACEHOLDER.to_string()
-    } else {
+    } else if state_ssh_port(state) == 22 {
         state.host.clone()
+    } else {
+        format!("{}:{}", state.host, state_ssh_port(state))
     }
 }
 
@@ -3551,6 +3559,7 @@ where
         auth,
         sudo_password_secret_id,
         preferred_remote_port: remote_port_preference_from_state(state),
+        ssh_port: ssh_port_from_state(state),
         last_remote_port,
         last_endpoint,
         last_connected_at: None,
@@ -3661,6 +3670,10 @@ fn run_connect(
             "--remote-port".to_string(),
             normalized_port(&state.remote_port_preference),
         ]);
+        if let Some(port) = ssh_port_from_state(state) {
+            args.push("--ssh-port".to_string());
+            args.push(port.to_string());
+        }
         if state.remember {
             args.push("--save-profile".to_string());
             args.push(save_profile_name_for_state(state));
@@ -3821,6 +3834,23 @@ fn secret_id_for_profile_name(
         .map_err(|error| error.to_string())
 }
 
+/// Port the remote `sshd` listens on as entered in the pane; defaults to 22
+/// when the field is empty or unparsable.
+fn state_ssh_port(state: &ConnectRemoteHostState) -> u16 {
+    let trimmed = state.ssh_port.trim();
+    if trimmed.is_empty() {
+        return 22;
+    }
+    trimmed.parse::<u16>().unwrap_or(22)
+}
+
+/// SSH port to persist on the profile: `None` unless the user set a
+/// non-default port, keeping the history file free of noise.
+fn ssh_port_from_state(state: &ConnectRemoteHostState) -> Option<u16> {
+    let port = state_ssh_port(state);
+    (port != 22).then_some(port)
+}
+
 fn remote_port_preference_from_state(state: &ConnectRemoteHostState) -> RemotePortPreference {
     let trimmed = state.remote_port_preference.trim();
     if trimmed.is_empty() || trimmed == "auto" {
@@ -3836,6 +3866,7 @@ fn remote_port_preference_from_state(state: &ConnectRemoteHostState) -> RemotePo
 fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostState) -> bool {
     profile.host == state.host
         && profile.ssh_user == state.ssh_user
+        && profile.ssh_port() == state_ssh_port(state)
         && normalized_port_matches_profile(&state.remote_port_preference, profile)
         && profile.host_kind == state.host_kind
         && auth_matches_state(&profile.auth, state)
@@ -3983,6 +4014,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4001,6 +4033,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4187,7 +4220,8 @@ mod tests {
         state.apply_key(KeyEvent::from(KeyCode::Enter));
 
         assert_eq!(state.host, "117.157.77.4");
-        assert_eq!(state.remote_port_preference, "50045");
+        assert_eq!(state.ssh_port, "50045");
+        assert_eq!(state.remote_port_preference, "auto");
     }
 
     #[test]
@@ -4200,7 +4234,8 @@ mod tests {
 
         assert_eq!(state.connect_action(), PaneAction::Connect);
         assert_eq!(state.host, "117.157.77.4");
-        assert_eq!(state.remote_port_preference, "50045");
+        assert_eq!(state.ssh_port, "50045");
+        assert_eq!(state.remote_port_preference, "auto");
     }
 
     #[test]
@@ -4211,7 +4246,8 @@ mod tests {
         state.apply_paste("117.157.77.4:50045\n");
 
         assert_eq!(state.host, "117.157.77.4");
-        assert_eq!(state.remote_port_preference, "50045");
+        assert_eq!(state.ssh_port, "50045");
+        assert_eq!(state.remote_port_preference, "auto");
     }
 
     #[test]
@@ -4261,6 +4297,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4290,6 +4327,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4315,6 +4353,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4401,6 +4440,7 @@ mod tests {
                 },
                 sudo_password_secret_id: Some(sudo_id.clone()),
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: Some(7575),
                 last_endpoint: None,
                 last_connected_at: None,
@@ -4416,6 +4456,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: Some(7575),
                 last_endpoint: None,
                 last_connected_at: None,
@@ -4448,6 +4489,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4484,6 +4526,7 @@ mod tests {
             },
             sudo_password_secret_id: Some(sudo_id.clone()),
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4533,6 +4576,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4555,6 +4599,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4600,6 +4645,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4634,6 +4680,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4657,6 +4704,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -4748,6 +4796,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: None,
                 last_endpoint: None,
                 last_connected_at: None,
@@ -4763,6 +4812,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: None,
                 last_endpoint: None,
                 last_connected_at: None,
@@ -5116,6 +5166,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -5771,6 +5822,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: Some(7474),
                 last_endpoint: None,
                 last_connected_at: None,
@@ -5786,6 +5838,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: Some(7575),
                 last_endpoint: None,
                 last_connected_at: None,
@@ -5861,6 +5914,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
@@ -5876,6 +5930,65 @@ mod tests {
 
         state.host_kind = RemoteHostKind::Lan;
         assert!(!profile_matches_state(&profile, &state));
+    }
+
+    #[test]
+    fn profile_matches_state_includes_ssh_port() {
+        let mut state = ConnectRemoteHostState::load();
+        let profile = RemoteHostProfile {
+            name: "root@117.157.77.4".to_string(),
+            host: "117.157.77.4".to_string(),
+            ssh_user: "root".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: None,
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: Some(50045),
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            host_kind: RemoteHostKind::Lan,
+            ..RemoteHostProfile::default()
+        };
+        state.profiles = vec![profile.clone()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_port = "50045".to_string();
+
+        assert!(profile_matches_state(&profile, &state));
+
+        state.ssh_port = "22".to_string();
+        assert!(!profile_matches_state(&profile, &state));
+    }
+
+    #[test]
+    fn ensure_connectable_profile_saves_host_port_input_as_ssh_port() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Host);
+        for ch in "117.157.77.4:50045".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        state.apply_key(KeyEvent::from(KeyCode::Enter));
+        state.ssh_user = "root".to_string();
+        state.auth = AuthChoice::Key;
+        state.key_path = "/home/k/.ssh/id_rsa".to_string();
+        state.sudo_mode = SudoMode::None;
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+
+        assert_eq!(profile.host, "117.157.77.4");
+        assert_eq!(profile.ssh_port, Some(50045));
+        assert_eq!(profile.preferred_remote_port, RemotePortPreference::Auto);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -6055,6 +6168,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
@@ -6100,6 +6214,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: Some(7474),
             last_endpoint: Some("192.168.1.14:7474".to_string()),
             last_connected_at: None,

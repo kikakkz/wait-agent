@@ -167,6 +167,7 @@ where
         let ssh_password = self.ssh_password(profile)?;
         let target = RemoteSshTarget::from_profile(
             profile.host.clone(),
+            profile.ssh_port(),
             profile.ssh_user.clone(),
             &profile.auth,
             ssh_password,
@@ -299,6 +300,7 @@ mod tests {
             },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,

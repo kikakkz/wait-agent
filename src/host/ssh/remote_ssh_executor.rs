@@ -33,6 +33,7 @@ pub struct RemoteSshTarget {
 impl RemoteSshTarget {
     pub fn from_profile(
         host: impl Into<String>,
+        port: u16,
         user: impl Into<String>,
         auth: &RemoteHostAuthProfile,
         ssh_password: Option<RemoteHostSecretValue>,
@@ -52,7 +53,7 @@ impl RemoteSshTarget {
         };
         Ok(Self {
             host: host.into(),
-            port: 22,
+            port,
             user: user.into(),
             auth,
         })

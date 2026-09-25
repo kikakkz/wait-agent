@@ -234,6 +234,7 @@ pub struct ConnectRemoteHostCommand {
     pub ssh_password_stdin: bool,
     pub sudo_password_stdin: bool,
     pub remote_port: Option<String>,
+    pub ssh_port: Option<String>,
     pub save_profile: Option<String>,
     pub replace_profile: Option<String>,
     pub use_install_proxy: Option<bool>,

@@ -69,6 +69,7 @@ fn ssh_target(profile: &RemoteHostProfile) -> Result<RemoteSshTarget, String> {
     };
     RemoteSshTarget::from_profile(
         profile.host.clone(),
+        profile.ssh_port(),
         profile.ssh_user.clone(),
         &profile.auth,
         ssh_password,

@@ -60,6 +60,10 @@ pub struct RemoteHostProfile {
     pub auth: RemoteHostAuthProfile,
     pub sudo_password_secret_id: Option<RemoteHostSecretId>,
     pub preferred_remote_port: RemotePortPreference,
+    /// Port the remote `sshd` listens on. `None` means the default 22.
+    /// Distinct from `preferred_remote_port`, which is the waitagent listen
+    /// port probed on the remote host after the SSH connection is up.
+    pub ssh_port: Option<u16>,
     pub last_remote_port: Option<u16>,
     pub last_endpoint: Option<String>,
     pub last_connected_at: Option<String>,
@@ -70,6 +74,13 @@ pub struct RemoteHostProfile {
     /// probed yet (profiles written before shell detection existed); the
     /// connect flow detects and caches it on the first SSH bootstrap.
     pub remote_shell: Option<RemoteShellKind>,
+}
+
+impl RemoteHostProfile {
+    /// Port the remote `sshd` listens on; defaults to 22 when unset.
+    pub fn ssh_port(&self) -> u16 {
+        self.ssh_port.unwrap_or(22)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +239,9 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
                 out.push_str(&format!("preferred_remote_port = {port}\n"));
             }
         }
+        if let Some(port) = host.ssh_port {
+            out.push_str(&format!("ssh_port = {port}\n"));
+        }
         if let Some(port) = host.last_remote_port {
             out.push_str(&format!("last_remote_port = {port}\n"));
         }
@@ -310,6 +324,7 @@ struct RawProfile {
     sudo_password_secret_id: Option<String>,
     key_path: Option<String>,
     preferred_remote_port: Option<String>,
+    ssh_port: Option<String>,
     last_remote_port: Option<String>,
     last_endpoint: Option<String>,
     last_connected_at: Option<String>,
@@ -330,6 +345,7 @@ impl RawProfile {
             "sudo_password_secret_id" => self.sudo_password_secret_id = Some(value),
             "key_path" => self.key_path = Some(value),
             "preferred_remote_port" => self.preferred_remote_port = Some(value),
+            "ssh_port" => self.ssh_port = Some(value),
             "last_remote_port" => self.last_remote_port = Some(value),
             "last_endpoint" => self.last_endpoint = Some(value),
             "last_connected_at" => self.last_connected_at = Some(value),
@@ -370,6 +386,7 @@ impl RawProfile {
             auth,
             sudo_password_secret_id: optional_secret_id(self.sudo_password_secret_id)?,
             preferred_remote_port: parse_port_preference(self.preferred_remote_port)?,
+            ssh_port: optional_u16(self.ssh_port, "ssh_port")?,
             last_remote_port: optional_u16(self.last_remote_port, "last_remote_port")?,
             last_endpoint: self.last_endpoint.filter(|value| !value.is_empty()),
             last_connected_at: self.last_connected_at.filter(|value| !value.is_empty()),
@@ -553,6 +570,7 @@ mod tests {
                 },
                 sudo_password_secret_id: Some(sudo_secret_id.clone()),
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: Some(7476),
                 last_endpoint: Some("10.1.29.130:7476".to_string()),
                 last_connected_at: Some("2026-06-16T00:00:00Z".to_string()),
@@ -660,6 +678,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: None,
                 last_endpoint: None,
                 last_connected_at: None,
@@ -679,6 +698,7 @@ mod tests {
                 },
                 sudo_password_secret_id: None,
                 preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: None,
                 last_remote_port: None,
                 last_endpoint: None,
                 last_connected_at: None,
@@ -698,6 +718,50 @@ mod tests {
         let lan = loaded.hosts.iter().find(|h| h.name == "lan").unwrap();
         assert_eq!(cloud.host_kind, RemoteHostKind::Cloud);
         assert_eq!(lan.host_kind, RemoteHostKind::Lan);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_ssh_port() {
+        let path = unique_path("remote-hosts-ssh-port.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        store
+            .upsert_profile(RemoteHostProfile {
+                name: "root@117.157.77.4".to_string(),
+                host: "117.157.77.4".to_string(),
+                ssh_user: "root".to_string(),
+                auth: RemoteHostAuthProfile::Password {
+                    password_secret_id: None,
+                },
+                sudo_password_secret_id: None,
+                preferred_remote_port: RemotePortPreference::Auto,
+                ssh_port: Some(50045),
+                last_remote_port: None,
+                last_endpoint: None,
+                last_connected_at: None,
+                use_install_proxy: true,
+                tls_pin_sha256: None,
+                host_kind: RemoteHostKind::Lan,
+                remote_shell: None,
+            })
+            .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("ssh_port = 50045"));
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.hosts.len(), 1);
+        assert_eq!(loaded.hosts[0].ssh_port, Some(50045));
+        assert_eq!(loaded.hosts[0].ssh_port(), 50045);
+
+        // Profiles saved without an ssh_port (older builds) default to 22.
+        let legacy_text = content.replace("ssh_port = 50045\n", "");
+        fs::write(&path, legacy_text).unwrap();
+        let legacy = store.load().unwrap();
+        assert_eq!(legacy.hosts[0].ssh_port, None);
+        assert_eq!(legacy.hosts[0].ssh_port(), 22);
 
         crate::infra::best_effort::remove_file(path);
     }

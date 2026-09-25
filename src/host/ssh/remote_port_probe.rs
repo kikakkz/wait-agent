@@ -153,6 +153,7 @@ where
         let ssh_password = self.ssh_password()?;
         let target = RemoteSshTarget::from_profile(
             self.profile.host.clone(),
+            self.profile.ssh_port(),
             self.profile.ssh_user.clone(),
             &self.profile.auth,
             ssh_password,
