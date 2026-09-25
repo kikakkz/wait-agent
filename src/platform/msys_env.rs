@@ -20,9 +20,6 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::io::Read as _;
 
-#[cfg(windows)]
-use std::io::Write as _;
-
 /// Base image version suffix of the vendored MSYS2 tarball.
 #[cfg(any(windows, test))]
 pub(crate) const BASE_VERSION: &str = "20240727";
