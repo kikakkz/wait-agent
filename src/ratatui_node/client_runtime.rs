@@ -651,12 +651,27 @@ fn handle_crossterm_event(
                         let _ = stream.flush();
                         return Ok(false);
                     }
+                    KeyCode::Char('v') | KeyCode::Char('V')
+                        if *focus == Focus::Main
+                            && error_log_state.is_none()
+                            && settings_state.is_none()
+                            && history_state.is_none() =>
+                    {
+                        // Read the system clipboard ourselves. Unlike Ctrl+V
+                        // (which the terminal usually consumes) the Ctrl-B
+                        // prefix always reaches us, so this is the reliable
+                        // entry point for pasting screenshots and other
+                        // non-text clipboard content on any terminal.
+                        spawn_clipboard_read(clipboard_tx.clone());
+                    }
                     _ => {}
                 }
             } else {
                 match key.code {
                     KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         *prefix_pressed = true;
+                        *status_message =
+                            Some(("Ctrl-B: d detach · v paste".to_string(), Instant::now()));
                     }
                     KeyCode::Char('v') | KeyCode::Char('V')
                         if key.modifiers.contains(KeyModifiers::CONTROL)
