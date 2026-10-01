@@ -9,9 +9,9 @@ constraints:
   - The old custom fullscreen and live-surface path is retired; do not spend new delivery work trying to rehabilitate it.
   - Prefer bounded tmux-first local architecture slices before resuming mirrored-network work.
   - Do not make waitagent depend on a user-installed tmux binary; tmux backend integration must flow through the vendored submodule and Rust glue layer.
-  - Treat docs/execution-status-board.md and docs/local-acceptance-checklist.md as the human source of truth for project status.
+  - Project status and task state live in GitHub issues (AD-0001); docs/ holds design documents and archived status boards only.
   - Keep human-readable process guidance in docs and machine-routable execution state in .agents.
-  - Treat .agents/tasks/ as the complete task inventory; every task must be represented there and orphan tasks outside the unified task source are forbidden.
+  - Every real task must have a GitHub issue; orphan tasks outside the tracker are forbidden.
   - Dirty worktree files may include active user work; understand them before editing and never revert unrelated changes.
   - Favor small validation slices that update verification state and blockers explicitly.
   - Every `.rs` file must stay at or below 1000 lines; if a Rust file grows beyond that limit, split it into smaller modules before continuing feature work.
@@ -29,8 +29,7 @@ constraints:
   - In-workspace target switching must keep the sidebar and footer or menu fixed and only rebind the main slot; revealing the shell or rebuilding the workspace client during a sidebar or footer switch is not accepted behavior.
   - `detach-client -E "waitagent attach ..."` is not an accepted steady-state mechanism for in-workspace target switching, even if it is triggered from an event-driven path.
   - `waitagent` and `workspace` may bootstrap or create a backend when no attach target is specified; `waitagent attach` is only for joining an existing backend and must not be the hidden switching primitive behind sidebar or footer activation.
-  - The current locked implementation batch is `task.event-r2a -> task.event-r3 -> task.event-r4`; no network, remote, or optional local polish task may overtake that batch until it closes or is explicitly re-planned.
-  - Any remaining network or remote implementation slice must depend on `task.event-r4.done` and consume the shared transport-agnostic target catalog plus fixed-chrome main-slot activation model; do not build resumed network work on superseded daemon, attach, or local-only session assumptions.
+  - The current implementation batch is the "relay phase 1" GitHub milestone; pick work from its open issues and keep main releasable after every merge.
   - Fullscreen history browsing must expose the complete tmux pane history available to the zoomed main pane; waitagent must not introduce its own truncated fullscreen-history subset.
   - If fullscreen behavior reproduces in raw tmux, treat it as tmux-native behavior rather than a waitagent layout bug; do not reintroduce waitagent-owned fullscreen redraw, replay, or composition to hide it.
   - If a TUI session starts in a pane narrowed by persistent chrome and later zooms wider, unused right-side columns are accepted until the application redraws itself; do not add app-specific redraw hints or fallback fullscreen composition to hide this.
