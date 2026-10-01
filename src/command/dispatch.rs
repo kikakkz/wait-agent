@@ -100,6 +100,9 @@ impl CommandDispatcher {
             Command::RatatuiClient(command) => self
                 .ratatui_client(command)
                 .and_then(|runtime| runtime.run().map_err(AppError::from)),
+            Command::RelayServe(command) => {
+                crate::command::relay_serve::run(command, &self.network)
+            }
             Command::GenerateNodeCredentials => {
                 let paths = match (&self.network.node_key_path, &self.network.node_cert_path) {
                     (Some(key_path), Some(cert_path)) => NodeCredentialPaths {

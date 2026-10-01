@@ -7,6 +7,7 @@ pub mod peer_connection;
 // relay daemon slices); remove this allow once it is wired in.
 #[allow(dead_code)]
 pub mod relay_mux;
+pub mod relay_server;
 pub mod remote_grpc_proto;
 pub mod remote_grpc_transport;
 pub mod remote_node_paths;

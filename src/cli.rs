@@ -173,6 +173,7 @@ pub enum Command {
     RatatuiListSessions(RatatuiListSessionsCommand),
     RatatuiNodeServer(RatatuiNodeServerCommand),
     RatatuiClient(RatatuiClientCommand),
+    RelayServe(RelayServeCommand),
     GenerateNodeCredentials,
     ProvisionMsys,
     Help(String),
@@ -203,6 +204,14 @@ pub struct RatatuiClientCommand;
 #[derive(Debug, Clone, Default)]
 pub struct RatatuiListSessionsCommand {
     pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RelayServeCommand {
+    /// Listen address override, e.g. `0.0.0.0:7475`.
+    pub listen: Option<String>,
+    /// authorized_nodes whitelist directory override.
+    pub authorized_nodes_dir: Option<String>,
 }
 
 /// Used directly by ratatui runtime code; not parsed from the CLI.
@@ -300,6 +309,10 @@ impl Cli {
             "list-sessions" => {
                 args.remove(0);
                 Command::RatatuiListSessions(parse_ratatui_list_sessions(args)?)
+            }
+            "relay" => {
+                args.remove(0);
+                parse_relay(args)?
             }
             "__ratatui-node-server" => {
                 args.remove(0);
@@ -538,6 +551,50 @@ fn parse_no_args(args: Vec<String>) -> Result<(), CliError> {
     Ok(())
 }
 
+fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
+    let Some(subcommand) = args.first().cloned() else {
+        return Err(CliError::MissingValue(
+            "relay subcommand (serve)".to_string(),
+        ));
+    };
+    match subcommand.as_str() {
+        "serve" => {
+            args.remove(0);
+            Ok(Command::RelayServe(parse_relay_serve(args)?))
+        }
+        other => Err(CliError::UnknownSubcommand(format!("relay {other}"))),
+    }
+}
+
+fn parse_relay_serve(mut args: Vec<String>) -> Result<RelayServeCommand, CliError> {
+    let mut command = RelayServeCommand::default();
+    while let Some(flag) = args.first().cloned() {
+        match flag.as_str() {
+            "--listen" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--listen".to_string()))?;
+                args.remove(0);
+                command.listen = Some(value);
+            }
+            "--authorized-nodes" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--authorized-nodes".to_string()))?;
+                args.remove(0);
+                command.authorized_nodes_dir = Some(value);
+            }
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(flag)),
+        }
+    }
+    Ok(command)
+}
+
 fn help_text() -> String {
     [
         "WaitAgent",
@@ -550,6 +607,7 @@ fn help_text() -> String {
         "  waitagent cleanup",
         "  waitagent detach [<index>]",
         "  waitagent stop [<index>]",
+        "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>]",
         "  waitagent version",
     ]
     .join("\n")
@@ -810,5 +868,50 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_relay_serve_command_with_defaults() {
+        match parse(&["waitagent", "relay", "serve"]).command {
+            Command::RelayServe(command) => {
+                assert_eq!(command.listen, None);
+                assert_eq!(command.authorized_nodes_dir, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_relay_serve_command_flags() {
+        match parse(&[
+            "waitagent",
+            "relay",
+            "serve",
+            "--listen",
+            "0.0.0.0:7475",
+            "--authorized-nodes",
+            "/tmp/authorized_nodes",
+        ])
+        .command
+        {
+            Command::RelayServe(command) => {
+                assert_eq!(command.listen.as_deref(), Some("0.0.0.0:7475"));
+                assert_eq!(
+                    command.authorized_nodes_dir.as_deref(),
+                    Some("/tmp/authorized_nodes")
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_relay_subcommand() {
+        let argv = ["waitagent", "relay", "invite"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        let error = Cli::parse(argv).expect_err("relay invite is not implemented yet");
+        assert_eq!(error.to_string(), "unknown subcommand: relay invite");
     }
 }

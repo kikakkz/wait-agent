@@ -128,9 +128,15 @@ pub fn load_cert_fingerprint(cert_path: &Path) -> Result<String, NodeCredentials
         .next()
         .ok_or(NodeCredentialsError::MissingEndEntityCertificate)?;
 
-    let spki = extract_spki_from_cert_der(&cert)?;
-    let fingerprint = Sha256::digest(&spki);
-    Ok(hex_encode(&fingerprint))
+    cert_fingerprint_from_der(&cert)
+}
+
+/// Returns the lowercase hex SHA-256 fingerprint of the SubjectPublicKeyInfo
+/// of a DER-encoded X.509 certificate — the device identity fingerprint
+/// without touching the filesystem.
+pub fn cert_fingerprint_from_der(cert_der: &[u8]) -> Result<String, NodeCredentialsError> {
+    let spki = extract_spki_from_cert_der(cert_der)?;
+    Ok(hex_encode(&Sha256::digest(&spki)))
 }
 
 /// Extracts the SubjectPublicKeyInfo (SPKI) DER bytes from an X.509 certificate.
