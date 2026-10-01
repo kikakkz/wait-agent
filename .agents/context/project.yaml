@@ -6,28 +6,38 @@ summary:
   repo_type: single_crate_rust_repo
   language: rust
   package_manager: cargo
-  architecture_style: ratatui_first_local_workspace_runtime
-  active_business_goal: replace tmux with ratatui as the local workspace UI substrate while preserving distributed session capabilities
-  framework_policy: prefer mature maintained Rust components over custom infrastructure, and avoid weakly maintained dependencies across the codebase
+  architecture_style: ratatui_first_workspace_runtime_with_remote_nodes
+  active_business_goal: >
+    cross-site host interconnect through a self-hosted relay (relay phase 1,
+    governed by docs/relay-design.md and .agents/decisions/AD-0002); the
+    ratatui-first local runtime and the remote node networking it builds on
+    are complete and in maintenance
+  framework_policy: >
+    prefer mature maintained Rust components over custom infrastructure, and
+    avoid weakly maintained dependencies across the codebase
+task_source:
+  tracker: github_issues
+  policy: see .agents/decisions/AD-0001 — no issue, no code; branches are
+    named <type>/<issue>-<slug> and every PR closes its issue
 current_phase:
-  phase_id: phase-3
-  phase_title: ratatui-first workspace runtime
-  stage_id: ratatui-footer-state
-  stage_title: migrate the footer status bar to a real ratatui widget backed by node-server state
+  phase_id: relay-phase-1
+  phase_title: relay phase 1 (CS star topology, self-hosted)
+  stage_id: relay-1-seam
+  stage_title: introduce the PeerConnection transport seam (issue #29)
 current_focus:
-  default_task_id: task.ratatui-phase-1-footer
-  focus_statement: render the footer status bar with real session state in the ratatui client, building on the phase-0 server/client skeleton
+  default_task_id: "#29"
+  focus_statement: >
+    fold the existing direct TCP dial behind a PeerConnection abstraction
+    with byte-identical behavior; the first implementation slice of the
+    relay phase 1 milestone
 upcoming_focus:
-  - migrate footer state bar to ratatui widget
-  - migrate sidebar session catalog and navigation to ratatui
-  - implement main pane PTY with alacritty_terminal
-  - remove tmux backend once ratatui path is feature-complete
-  - activate distributed control topologies on the server/client foundation
+  - mux frame codec (#51) after #29 lands
+  - relay daemon slices #52-#55
 source_of_truth:
-  - docs/ratatui-replace-tmux-plan.md
-  - docs/execution-status-board.md
-  - docs/remote-network-completion-plan.md
+  - AGENTS.md
+  - docs/relay-design.md
+  - .agents/decisions/README.md
+  - docs/architecture.md
+  - docs/protocol.md
   - docs/remote-node-connection-architecture.md
   - docs/local-acceptance-checklist.md
-  - docs/architecture.md
-  - docs/functional-design.md
