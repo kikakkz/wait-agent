@@ -1,0 +1,44 @@
+name: Bug report
+description: Something is broken.
+title: "fix: "
+labels: ["kind/bug"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which module this belongs to.
+      options:
+        - relay
+        - transport
+        - remote-node
+        - workspace
+        - ratatui-ui
+        - host-ssh
+        - cloud-auth
+        - local-runtime
+        - infra
+        - ci
+        - docs
+        - agents-control
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: What you expected vs. what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduce
+      description: Steps or a minimal reproduction.
+      render: bash
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "e.g. 0.1.84"

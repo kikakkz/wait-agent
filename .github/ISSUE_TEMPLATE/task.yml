@@ -1,0 +1,65 @@
+name: Task
+description: A unit of issue-driven development work (refactor, research, docs, infrastructure).
+title: "chore: "
+labels: ["kind/task"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which module this belongs to.
+      options:
+        - relay
+        - transport
+        - remote-node
+        - workspace
+        - ratatui-ui
+        - host-ssh
+        - cloud-auth
+        - local-runtime
+        - infra
+        - ci
+        - docs
+        - agents-control
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this task exists; link the issue or decision it serves.
+    validations:
+      required: true
+  - type: input
+    id: design_ref
+    attributes:
+      label: Design ref
+      description: Governing design document and section (required for implementation tasks).
+      placeholder: "e.g. docs/relay-design.md — 协议分层"
+  - type: input
+    id: depends_on
+    attributes:
+      label: Depends on
+      description: Issue numbers this task is blocked by.
+      placeholder: "e.g. #12, #15"
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Verifiable statements defining "done".
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Commands or procedures that prove the criteria.
+      placeholder: "e.g. cargo test relay; docker e2e ..."
+  - type: checkboxes
+    id: agent_ready
+    attributes:
+      label: Agent executability
+      options:
+        - label: This task is self-contained enough for an agent to execute (clear inputs, verifiable output)

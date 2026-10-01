@@ -1,63 +1,38 @@
 version: 1
 kind: agent_control_plane
 read_order:
-  - .agents/tasks/current.yaml
-  - .agents/state/current-focus.yaml
-  - .agents/state/prompt-context.yaml
-  - .agents/state/open-blockers.yaml
+  - .agents/AGENTS.md
   - .agents/context/project.yaml
   - .agents/context/constraints.yaml
   - .agents/context/repo-map.yaml
-  - .agents/context/generated-artifacts.yaml
+  - .agents/decisions/README.md
 read_on_demand:
-  - .agents/tasks/backlog.yaml
-  - .agents/state/last-verified.yaml
-  - .agents/state/task-history.yaml
-  - .agents/state/task-history-archive.yaml
-  - .agents/tasks/templates/local-acceptance-cycle.yaml
-  - .agents/tasks/templates/network-implementation-slice.yaml
+  - .agents/decisions/AD-0001-issue-driven-task-source.md
+  - .agents/decisions/AD-0002-relay-phase-1-design.md
+  - .agents/context/generated-artifacts.yaml
 entrypoints:
   default_task: null
-  default_runbook: runbook.continue-default-work
-  next_task_runbook: runbook.select-next-task
-  self_maintenance_runbook: runbook.update-agents-control-plane
+  default_runbook: null
+  next_task_runbook: null
+  self_maintenance_runbook: null
 authoritative_sources:
-  execution_board: docs/execution-status-board.md
-  acceptance_checklist: docs/local-acceptance-checklist.md
+  operating_contract: AGENTS.md
+  relay_design: docs/relay-design.md
   architecture: docs/architecture.md
-  remote_network_completion: docs/remote-network-completion-plan.md
-  remote_node_connection_architecture: docs/remote-node-connection-architecture.md
-  tmux_first_plan: docs/tmux-first-workspace-plan.md
-  tmux_first_runtime_architecture: docs/tmux-first-runtime-architecture.md
-  functional_design: docs/functional-design.md
-  interaction_flows: docs/interaction-flows.md
+  protocol: docs/protocol.md
   human_overview: docs/agents-control-plane.md
 required_rules:
-  - Read this file before exploring the repo.
-  - Use tasks plus primitives to decide the next action.
-  - Keep human-facing rationale in docs rather than .agents.
-  - Treat .agents/tasks/ as the unified task source; every real task must appear there and orphan tasks are not allowed.
-  - Update .agents whenever task focus, blockers, validation state, or reusable execution knowledge changes.
-  - Do not let .agents drift from docs/execution-status-board.md or docs/local-acceptance-checklist.md.
+  - Read AGENTS.md before exploring the repo; it is the operating contract.
+  - Task state lives in GitHub issues (AD-0001). Never recreate a local task board.
+  - Work starts by finding or filing the issue; branches are named per the issue.
+  - Keep decision records in .agents/decisions/ when a decision is made; keep human-facing rationale in docs/.
+  - Treat .agents/archive/ as read-only history.
 directories:
+  decisions: .agents/decisions
+  tools: .agents/tools
   context: .agents/context
-  primitives: .agents/primitives
-  runbooks: .agents/runbooks
-  tasks: .agents/tasks
-  state: .agents/state
-  schemas: .agents/schemas
-  generated: .agents/generated
+  archive: .agents/archive
 active_context:
-  project_phase: phase-2
-  current_stage: remote-network-completion
-  current_focus: remote exit latency and transport stability batch is complete, including remote main-slot authority-gap follow-up; select next task
-recommended_primitives:
-  - primitive.read-current-task
-  - primitive.task-board-sync
-  - primitive.verification-refresh
-  - primitive.task-switch-current
-recommended_runbooks:
-  - runbook.continue-default-work
-  - runbook.select-next-task
-  - runbook.instantiate-task-from-template
-  - runbook.update-agents-control-plane
+  project_phase: relay-phase-1
+  current_stage: issue-driven migration complete; relay implementation is the first issue-driven batch
+  current_focus: relay phase 1 — see the "relay phase 1" milestone on GitHub

@@ -6,6 +6,9 @@ if [ -f "${HOME}/.cargo/env" ]; then
   . "${HOME}/.cargo/env"
 fi
 
+echo "==> Running governance checks..."
+python3 .agents/tools/check_branch_name.py
+
 echo "==> Running cargo fmt --check..."
 cargo fmt --check
 

@@ -1,3 +1,75 @@
+# AGENTS.md
+
+wait-agent is a self-hosted agent workspace runtime with a TUI console and
+node-to-node remote sessions. This file is the operating contract for every
+contributor, human or AI. It is optimized for constraints and commands;
+bulky knowledge lives in `docs/` and is referenced by pointer.
+
+## Hard constraints (non-negotiable)
+
+1. **Issue-driven development.** No issue, no code — and "no issue yet"
+   never means skip: before any development, find or file the issue first
+   (bots and agents too; CI cannot see the tracker, so this is on the
+   contributor). Every PR references an issue (`Closes #N`). Branches are
+   named `<type>/<issue>-<slug>` where `<type>` is one fixed vocabulary —
+   the Conventional Commits types
+   (feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert) — and the
+   prefix must match the PR title's type (CI enforces both). The prefix
+   follows the *change type*, not the issue's `kind/*` label. The issue
+   thread carries plan, status, and review artifacts.
+2. **CI-first.** Every code change lands in the same PR as the CI that
+   checks it. Red CI never merges. Run `make ci-gate` locally before
+   pushing.
+3. **Attribution.** Humans sign DCO (`git commit -s`); AI assistance is
+   disclosed with `Assisted-by:` / `Generated-by:` trailers.
+   `Co-Authored-By:` is banned for AI. AI never signs `Signed-off-by`.
+4. **Never commit secrets.** Credentials, tokens, and private keys do not
+   enter the repository, ever.
+5. **Generated artifacts are read-only.** Anything produced by codegen or
+   automation is regenerated, never hand-edited.
+6. **Process authority.** If an external skill or methodology pack
+   disagrees with this file on *process*, this file wins.
+
+## Commands
+
+- `make ci-gate` — run the full local governance gate (branch name, tool
+  tests, trailer checks, shell lint). Rust checks live in the pre-commit
+  hook and `.github/workflows/ci.yaml`.
+- `make check-branch` — validate the current branch name against the
+  naming rule before push (same rule as the `branch-name` CI check). Run
+  `python3 .agents/tools/check_branch_name.py --title "feat: ..."` to also
+  check prefix/title consistency.
+- `make test-tools` — unit tests for `.agents/tools/`.
+- `make check-trailers` — validate commit-message trailers on `HEAD`.
+  Humans add `--dco` to require `Signed-off-by` on their range.
+
+## Directory map
+
+- `src/` — the Rust workspace runtime (see docs/ for architecture).
+- `docs/` — long-form design documents; one file per design topic.
+- `.agents/` — agent assets: decisions, governance tools, context, and
+  the archived pre-issue task board. Rules: [.agents/AGENTS.md](.agents/AGENTS.md).
+- `.rust-skills/` — vendored Rust methodology skills (git submodule).
+- `.github/` — templates, workflows, labels.
+
+## Collaboration protocol
+
+- Work starts at the issue tracker: find or file the issue before writing
+  any code, then cut the branch from it.
+- Work happens in issues; plans are posted as issue comments before
+  implementation for anything non-trivial.
+- Acceptance criteria in the issue define "done"; PRs state how each is met.
+- Reviews judge conformance to this file as much as code quality.
+- Bots and agents follow the same rules as humans: same CI, same trailer
+  policy, same issue protocol.
+
+## Versioning and releases
+
+- Conventional Commits, enforced on PR titles (squash merge).
+- Single-crate semver; version bumps land as `chore: bump version` commits.
+
+---
+
 # Project Constraints
 
 ## Analysis and Reasoning Style

@@ -1,0 +1,26 @@
+# Issue label taxonomy, modeled on the Kubernetes kind/area convention.
+# Synced to GitHub by .github/workflows/labels.yml whenever this file
+# changes. Do not create labels by hand in the GitHub UI.
+
+# kind: what type of work
+- { name: "kind/bug", color: "d73a4a", description: "Something is broken" }
+- { name: "kind/feature", color: "a2eeef", description: "New capability" }
+- { name: "kind/task", color: "1d76db", description: "Unit of work: refactor, research, docs, infra" }
+- { name: "kind/design", color: "7057ff", description: "Design work; outcome lands in docs/ and .agents/decisions/" }
+- { name: "kind/spike", color: "fb8500", description: "Time-boxed research or experiment" }
+- { name: "kind/cleanup", color: "c5c5c5", description: "Maintenance and hygiene" }
+- { name: "kind/docs", color: "0e8a16", description: "Documentation only" }
+
+# area: which module
+- { name: "area/relay", color: "0052cc", description: "Relay hub, mux, node relay client" }
+- { name: "area/transport", color: "0052cc", description: "Node-to-node transport stability" }
+- { name: "area/remote-node", color: "0052cc", description: "Remote node connection, authority, publication" }
+- { name: "area/workspace", color: "0052cc", description: "Workspace lifecycle and tmux integration" }
+- { name: "area/ratatui-ui", color: "0052cc", description: "Ratatui console UI" }
+- { name: "area/host-ssh", color: "0052cc", description: "SSH remote host bootstrap and connect" }
+- { name: "area/cloud-auth", color: "0052cc", description: "Cloud host auth and outbound dial" }
+- { name: "area/local-runtime", color: "5319e7", description: "Event-driven local runtime" }
+- { name: "area/infra", color: "5319e7", description: "src/infra shared infrastructure" }
+- { name: "area/ci", color: "5319e7", description: "CI gates and repo tooling" }
+- { name: "area/docs", color: "5319e7", description: "Documentation" }
+- { name: "area/agents-control", color: "5319e7", description: ".agents/ contents: decisions, tools, archive" }

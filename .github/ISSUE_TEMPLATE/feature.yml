@@ -1,0 +1,48 @@
+name: Feature
+description: New capability.
+title: "feat: "
+labels: ["kind/feature"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which module this belongs to.
+      options:
+        - relay
+        - transport
+        - remote-node
+        - workspace
+        - ratatui-ui
+        - host-ssh
+        - cloud-auth
+        - local-runtime
+        - infra
+        - ci
+        - docs
+        - agents-control
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user need this serves.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The capability and its shape.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Verifiable statements defining "done".
+      value: "- [ ] "
+    validations:
+      required: true
