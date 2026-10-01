@@ -14,11 +14,13 @@
 //! is held across an `.await`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+
+use crate::infra::relay_mux::frame::Frame;
 
 /// Default eviction deadline: three missed 10s beats = 30s of silence.
 pub const DEFAULT_OFFLINE_AFTER: Duration = Duration::from_secs(30);
@@ -90,6 +92,18 @@ pub(crate) struct ConnectionEntry {
     pub(crate) connection_id: u64,
     pub(crate) retire_tx: watch::Sender<bool>,
     pub(crate) last_seen: Arc<Mutex<Instant>>,
+    /// The link's outbound frame queue (its writer task drains this).
+    pub(crate) outbound: mpsc::Sender<Frame>,
+    /// Allocator for relay-initiated (even) stream ids on this link.
+    pub(crate) next_relay_stream: Arc<AtomicU32>,
+}
+
+/// A resolved routing target: everything needed to open a routed stream
+/// toward a registered node.
+pub(crate) struct RoutingTarget {
+    pub(crate) connection_id: u64,
+    pub(crate) outbound: mpsc::Sender<Frame>,
+    pub(crate) next_relay_stream: Arc<AtomicU32>,
 }
 
 /// The registry. Every method takes short critical sections; the sweeper
@@ -108,13 +122,15 @@ impl RelayConnectionTable {
     /// Inserts (or replaces) the node. Returns the fresh entry's handle
     /// plus the previous entry when this was a replacement — the caller
     /// retires the stale link and emits `Replaced`.
-    pub(crate) fn register(&self, node_id: &str) -> RegisteredEntry {
+    pub(crate) fn register(&self, node_id: &str, outbound: mpsc::Sender<Frame>) -> RegisteredEntry {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::SeqCst);
         let (retire_tx, retire_rx) = watch::channel(false);
         let entry = ConnectionEntry {
             connection_id,
             retire_tx: retire_tx.clone(),
             last_seen: Arc::new(Mutex::new(Instant::now())),
+            outbound,
+            next_relay_stream: Arc::new(AtomicU32::new(2)),
         };
         let previous = self
             .entries
@@ -126,6 +142,19 @@ impl RelayConnectionTable {
             retire_rx,
             previous,
         }
+    }
+
+    /// Resolves a routing target by node id.
+    pub(crate) fn lookup(&self, node_id: &str) -> Option<RoutingTarget> {
+        self.entries
+            .lock()
+            .expect("relay connection table lock poisoned")
+            .get(node_id)
+            .map(|entry| RoutingTarget {
+                connection_id: entry.connection_id,
+                outbound: entry.outbound.clone(),
+                next_relay_stream: entry.next_relay_stream.clone(),
+            })
     }
 
     /// Records activity from a link, guarding against a replaced link
@@ -201,6 +230,11 @@ pub(crate) struct RegisteredEntry {
 mod tests {
     use super::*;
 
+    fn dummy_outbound() -> mpsc::Sender<Frame> {
+        let (tx, _rx) = mpsc::channel(8);
+        tx
+    }
+
     fn node_id(name: &str) -> String {
         name.to_string()
     }
@@ -209,16 +243,16 @@ mod tests {
     fn register_inserts_and_len_tracks_entries() {
         let table = RelayConnectionTable::default();
         assert_eq!(table.len(), 0);
-        table.register(&node_id("node-a"));
-        table.register(&node_id("node-b"));
+        table.register(&node_id("node-a"), dummy_outbound());
+        table.register(&node_id("node-b"), dummy_outbound());
         assert_eq!(table.len(), 2);
     }
 
     #[test]
     fn duplicate_register_reports_previous_entry() {
         let table = RelayConnectionTable::default();
-        let first = table.register(&node_id("node-a"));
-        let second = table.register(&node_id("node-a"));
+        let first = table.register(&node_id("node-a"), dummy_outbound());
+        let second = table.register(&node_id("node-a"), dummy_outbound());
         assert!(first.previous.is_none());
         let previous = second
             .previous
@@ -231,8 +265,8 @@ mod tests {
     #[test]
     fn touch_ignores_replaced_link() {
         let table = RelayConnectionTable::default();
-        let first = table.register(&node_id("node-a"));
-        let second = table.register(&node_id("node-a"));
+        let first = table.register(&node_id("node-a"), dummy_outbound());
+        let second = table.register(&node_id("node-a"), dummy_outbound());
         // Age the successor past the eviction deadline; a stale link's
         // touch must NOT refresh it (age stays past the deadline).
         std::thread::sleep(Duration::from_millis(20));
@@ -250,8 +284,8 @@ mod tests {
     #[test]
     fn remove_if_current_guards_against_stale_links() {
         let table = RelayConnectionTable::default();
-        let first = table.register(&node_id("node-a"));
-        let second = table.register(&node_id("node-a"));
+        let first = table.register(&node_id("node-a"), dummy_outbound());
+        let second = table.register(&node_id("node-a"), dummy_outbound());
         assert!(
             !table.remove_if_current(&node_id("node-a"), first.connection_id),
             "the replaced link must not remove its successor"
@@ -266,8 +300,8 @@ mod tests {
     #[test]
     fn evict_idle_only_takes_silent_entries() {
         let table = RelayConnectionTable::default();
-        let quiet = table.register(&node_id("quiet"));
-        let active = table.register(&node_id("active"));
+        let quiet = table.register(&node_id("quiet"), dummy_outbound());
+        let active = table.register(&node_id("active"), dummy_outbound());
         table.touch(&node_id("active"), active.connection_id);
         // Backdate only the quiet entry.
         if let Ok(mut last_seen) = table
@@ -288,5 +322,21 @@ mod tests {
             !table.remove_if_current(&node_id("active"), quiet.connection_id),
             "a different connection id must not remove the current entry"
         );
+    }
+
+    #[test]
+    fn lookup_resolves_routing_target_with_even_stream_allocator() {
+        let table = RelayConnectionTable::default();
+        let registered = table.register(&node_id("node-a"), dummy_outbound());
+        let target = table
+            .lookup(&node_id("node-a"))
+            .expect("registered node should resolve");
+        assert_eq!(target.connection_id, registered.connection_id);
+        assert_eq!(
+            target.next_relay_stream.fetch_add(2, Ordering::SeqCst),
+            2,
+            "relay-initiated stream ids start even"
+        );
+        assert!(table.lookup(&node_id("missing")).is_none());
     }
 }
