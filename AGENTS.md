@@ -42,6 +42,9 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
 - `make test-tools` — unit tests for `.agents/tools/`.
 - `make check-trailers` — validate commit-message trailers on `HEAD`.
   Humans add `--dco` to require `Signed-off-by` on their range.
+- One-time after clone: `git config core.hooksPath hooks` wires the
+  committed `hooks/pre-commit` (governance checks + fmt/clippy/build) into
+  every commit.
 
 ## Directory map
 
