@@ -23,6 +23,11 @@ the old local task board is frozen under `archive/`.
 - `project.yaml`, `constraints.yaml`, `repo-map.yaml`: slow-moving facts
   an agent needs before exploring the repo. Update when they change,
   never per-task.
+- **Freshness is a rule, not a hope**: the PR that changes an underlying
+  fact updates the corresponding context file in the same change. The
+  `session-bootstrap` skill verifies anchors (paths, issue numbers, phase
+  names) before trusting them; stale entries are reported, never silently
+  followed.
 
 ## `archive/` — frozen history
 

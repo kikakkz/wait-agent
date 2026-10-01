@@ -3,52 +3,83 @@ kind: context
 version: 1
 summary:
   layout: repository structure most relevant to planning and execution
+  freshness_note: >
+    last refreshed 2026-10 during the issue-driven migration (AD-0001);
+    the session-bootstrap skill verifies these anchors before trusting
+    them — stale entries are reported, never silently followed
 module_map:
-  implementation:
+  entrypoints:
+    - path: src/main.rs
+      responsibility: process entry, minimal wiring only
     - path: src/bootstrap.rs
-      responsibility: top-level CLI bootstrap into the accepted default local route
+      responsibility: top-level CLI bootstrap into the accepted default route
     - path: src/cli.rs
       responsibility: command-line parsing and public entrypoints
-    - path: src/command/dispatch.rs
-      responsibility: default command-side ownership boundary for workspace, attach, and hidden pane entrypoints
-    - path: src/runtime/workspace_command_runtime.rs
-      responsibility: accepted default local path for workspace bootstrap, attach, target activation, fullscreen, list, and detach
-    - path: src/runtime/workspace_entry_runtime.rs
-      responsibility: tmux-backed workspace bootstrap and initial fixed-chrome layout application
-    - path: src/runtime/workspace_layout_runtime.rs
-      responsibility: layout reconciliation, chrome refresh signaling, main-pane output bridging, and fullscreen-aware chrome ownership
-    - path: src/runtime/main_slot_runtime.rs
-      responsibility: fixed-chrome main-slot target activation inside one tmux backend
-    - path: src/runtime/event_driven_pane_runtime.rs
-      responsibility: hidden sidebar and footer pane processes on the accepted event-driven local path
-    - path: src/runtime/event_driven_tmux_pane_runtime.rs
-      responsibility: tmux-backed session snapshot and pane-state projection for chrome panes
-    - path: src/runtime/event_driven_ui_pane_runtime.rs
-      responsibility: pane-local render-state transitions and sidebar selection intent
-    - path: src/application/session_service.rs
-      responsibility: transport-aware session catalog lookup and attach or detach operations
-    - path: src/terminal.rs
-      responsibility: terminal raw mode and VT state handling
+    - path: src/bin/
+      responsibility: additional binaries
+  runtime_core:
+    - path: src/ratatui_node/
+      responsibility: >
+        ratatui-first workspace runtime core — local sessions, remote
+        sessions, state event loop, node runtime, reconnect and outbound
+        dial workers, clipboard pipeline, authority host/session IO, loom
+        model tests
     - path: src/event.rs
       responsibility: internal runtime event bus
-  design_docs:
-    - path: docs/wait-agent-prd.md
-      responsibility: product requirements
-    - path: docs/architecture.md
-      responsibility: system architecture
-    - path: docs/functional-design.md
-      responsibility: user-visible behavior
-    - path: docs/module-design.md
-      responsibility: internal boundaries
-    - path: docs/interaction-flows.md
-      responsibility: stepwise interaction rules
-    - path: docs/protocol.md
-      responsibility: network protocol design
-    - path: docs/mvp-plan.md
-      responsibility: staged delivery order
-    - path: docs/execution-status-board.md
-      responsibility: human task board and phase status
-    - path: docs/local-acceptance-checklist.md
-      responsibility: local acceptance gate
-    - path: docs/agents-control-plane.md
-      responsibility: human-facing explanation of the assistant control plane
+    - path: src/lifecycle.rs
+      responsibility: runtime lifecycle ownership
+    - path: src/terminal.rs
+      responsibility: terminal raw mode and VT state handling
+    - path: src/ui/
+      responsibility: ratatui UI surfaces
+  networking:
+    - path: src/infra/remote_grpc_transport.rs
+      responsibility: node-to-node transport session establishment (TCP dial path)
+    - path: src/infra/node_credentials.rs
+      responsibility: node device identity — self-signed cert + SPKI fingerprint
+    - path: src/infra/operator_auth.rs
+      responsibility: authorized_operators whitelist pattern (relay authorized_nodes/ follows it)
+    - path: src/infra/remote_node_paths.rs
+      responsibility: owner-control socket paths for local runtime ingress
+    - path: src/host/ssh/
+      responsibility: SSH remote host bootstrap, connect runtime, secret store
+    - path: src/remote/
+      responsibility: remote-session support modules outside the node runtime
+  structure:
+    - path: src/command/
+      responsibility: command dispatch layer (relay subcommands land here)
+    - path: src/application/
+      responsibility: application services (transport-agnostic session catalog)
+    - path: src/domain/
+      responsibility: domain models (workspace, target catalog)
+    - path: src/ports/
+      responsibility: port traits and boundary interfaces
+    - path: src/platform/
+      responsibility: platform IPC and process abstractions (local_ipc, remote_ipc, wake_pipe)
+    - path: src/process/
+      responsibility: process spawning and ownership
+    - path: src/process_monitor/
+      responsibility: process supervision
+design_docs:
+  - path: docs/architecture.md
+    responsibility: system architecture
+  - path: docs/module-design.md
+    responsibility: internal boundaries
+  - path: docs/protocol.md
+    responsibility: network protocol design
+  - path: docs/relay-design.md
+    responsibility: governing design for the current relay phase 1 milestone
+  - path: docs/remote-node-connection-architecture.md
+    responsibility: node connection and authority model
+  - path: docs/reconnection-plan.md
+    responsibility: reconnect policy for outbound-dial and inbound connect
+  - path: docs/cloud-host-auth-design.md
+    responsibility: cloud host control-plane authentication
+  - path: docs/local-acceptance-checklist.md
+    responsibility: local acceptance gate
+archived:
+  - path: docs/archive/
+    responsibility: >
+      historical boards and plans (execution-status-board, agents-control-plane,
+      wait-agent-prd, functional-design, interaction-flows, ratatui-replace-tmux-plan);
+      archaeology only, never a source of current truth
