@@ -22,17 +22,19 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-mux-codec
-  stage_title: mux frame codec over the PeerConnection seam (issue #51)
+  stage_id: relay-1-daemon
+  stage_title: relay daemon slices (issues #52-#55, TLS+mTLS listener first)
 current_focus:
-  default_task_id: "#51"
+  default_task_id: "#52"
   focus_statement: >
-    build the mux frame layer (stream open / close / data / window) that
-    turns one relay link into ordered reliable streams behind the
-    PeerConnection seam introduced in #29; the next slice of the relay
-    phase 1 milestone
+    build the relay daemon slices on top of the landed transport
+    foundation (#29 PeerConnection seam, #51 mux frame codec): TLS
+    listener with mTLS client-certificate whitelist auth (#52), connection
+    table with register/heartbeat (#53), open/close stream routing (#54),
+    local admin socket (#55)
 upcoming_focus:
-  - relay daemon slices #52-#55
+  - node relay client slice (long-lived link, on-demand streams,
+    re-register on reconnect, presence events)
 source_of_truth:
   - AGENTS.md
   - docs/relay-design.md
