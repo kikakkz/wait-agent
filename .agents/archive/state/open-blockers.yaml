@@ -1,0 +1,9 @@
+kind: state
+version: 1
+blockers: []
+notes: >
+  Previous blockers from 2026-07 (engine-mode flicker, orphaned pipe-pane,
+  engine-mode reconnect, authority-host lifecycle) were all marked fixed and have
+  been archived to .agents/state/task-history-archive.yaml. As of the
+  cloud/outbound-dial task sync, no active blockers are recorded; any new
+  blockers discovered during cloud-host validation should be added here.

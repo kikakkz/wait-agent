@@ -1,0 +1,39 @@
+id: task.t6-01b
+kind: task
+version: 1
+title: capture real submit and manual-switch signals through the unified server-console interaction seam
+status: done
+priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - section 5.5 requires console-owned submit and manual-attention event capture
+    - section 6.3 requires normalized console events rather than snapshot-only inference
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t6-01a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the server-console runtime observes real `submit` and `manual switch` events through the unified interaction seam
+  - event ownership is console-local and does not depend on passive catalog refresh alone
+  - focus remains manual-only
+verification:
+  - cargo test
+  - targeted review of submit-event ownership and manual-switch signaling boundaries
+touched_paths:
+  - src/runtime
+  - src/application
+  - .agents/tasks/queued/task.t6-01b.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/server-console-scheduling-design.md
+  - docs/execution-status-board.md
+notes:
+  - This slice is signal-first. It should not define queue ordering, and it must preserve manual-only focus policy.
+  - 2026-04-29 close: remote server-console interaction now emits real `ConsoleInputStarted`, `ConsoleSubmit`, and `ManualReturnToPicker` signals through the unified seam, and server-console runtime state records submit plus manual-switch ownership locally instead of depending only on passive catalog refresh.

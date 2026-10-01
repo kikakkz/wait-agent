@@ -1,0 +1,34 @@
+id: task.tmux-6
+kind: task
+version: 1
+title: remove the obsolete custom fullscreen and live-surface path and validate shell plus Codex behavior
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: historical
+depends_on:
+  - task.tmux-5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the old `native fullscreen`, `live surface`, and related resize or replay helpers are removed from the default local workspace route
+  - shell and Codex validation confirms the tmux-first route solves the blank sidebar region, incomplete fullscreen history, and mixed-focus regressions that drove the architecture change
+  - task and doc state record the old custom fullscreen path as retired history rather than the active baseline
+verification:
+  - cargo test
+  - manual: shell validation in a real terminal
+  - manual: Codex validation in a real terminal
+  - targeted review of retired code-path removal
+touched_paths:
+  - src/app.rs
+  - src/lifecycle.rs
+  - src/tmux.rs
+  - docs/execution-status-board.md
+  - .agents/tasks/queued/task.tmux-6.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice is superseded as part of the rewrite queue reset; the cleanup target remains valid but moves to the end of the new queue after the new runtime stack is genuinely in place.

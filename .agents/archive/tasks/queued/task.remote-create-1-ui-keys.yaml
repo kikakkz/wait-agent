@@ -1,0 +1,38 @@
+id: task.remote-create-1-ui-keys
+kind: task
+version: 1
+title: keep local new-session semantics and add explicit remote creation keys
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  []
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Ctrl-N remains local-only; Prefix-c remains bound but absent from primary UI copy; Ctrl-W and Ctrl-S command entrypoints are parsed and bound without remote behavior yet.
+verification:
+  - cargo fmt --check
+  - cargo test cli -- --test-threads=1
+  - cargo test control_service -- --test-threads=1
+  - cargo test footer -- --test-threads=1
+  - cargo test workspace_layout_runtime -- --test-threads=1
+  - cargo build
+
+touched_paths:
+  - src/application/control_service.rs
+  - src/runtime/workspace/workspace_layout_runtime.rs
+  - src/runtime/workspace/footer_menu_runtime.rs
+  - src/cli.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

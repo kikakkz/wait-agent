@@ -1,0 +1,41 @@
+id: task.t5-08c3
+kind: task
+version: 1
+title: route remote control-plane traffic by session and demote attachment to observer scope
+status: done
+priority: high
+design_ref:
+  doc: docs/protocol.md
+  why:
+    - the accepted protocol must fix the routing roles of `node_id`, `session_id`, and `attachment_id` before authority and observer traffic spreads further
+    - this slice ensures both directions route by session while attachment remains only the observer-scoped handle under that session
+target_task_reference: task.t5-08c
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - protocol and runtime docs explicitly fix `node_id` as transport identity, `session_id` as product routing identity, and `attachment_id` as session-local observer handle
+  - client-to-server and server-to-client authority or observer traffic route by session rather than depending on publication-centric target ownership
+  - attachment open, input, resize, and close semantics remain scoped under one remote session instead of being mistaken for session identity
+verification:
+  - cargo test
+  - targeted review of remote control-plane routing identifiers and authority or observer delivery
+touched_paths:
+  - proto
+  - src/runtime
+  - src/application
+  - src/infra
+  - docs/protocol.md
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.t5-08c3.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice should not revive per-target sockets or publication-first routing.

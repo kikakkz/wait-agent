@@ -1,0 +1,37 @@
+id: task.t5-08c4
+kind: task
+version: 1
+title: original remote sidebar plus validation umbrella superseded by backend-scoped runtime-owner slices
+status: superseded
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - the earlier umbrella hid a real architecture bug because remote sidebar state was still partially sourced from file-backed runtime caches
+    - the remaining work is now explicitly split so runtime ownership is fixed before more sidebar or validation work lands
+target_task_reference: task.t5-08c4
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c3.done
+linked_primitives:
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - the umbrella task is replaced by bounded owner-runtime, catalog-migration, and validation slices
+verification:
+  - targeted review of task split and design alignment
+touched_paths:
+  - docs/remote-runtime-owner-architecture.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4.yaml
+  - .agents/tasks/queued/task.t5-08c4a.yaml
+  - .agents/tasks/queued/task.t5-08c4b.yaml
+  - .agents/tasks/queued/task.t5-08c4c.yaml
+  - .agents/tasks/queued/task.t5-08c4d.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - Do not implement against this umbrella directly anymore.

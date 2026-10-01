@@ -1,0 +1,37 @@
+id: task.t5-08c4d3i
+kind: task
+version: 1
+title: reduce remote attach bootstrap capture cost
+status: superseded
+priority: medium
+design_ref:
+  doc: docs/raw-pty-tunnel-design.md
+  why:
+    - remote attach still captures screen, cursor position, and terminal flags before live raw output takes over
+    - SSH parity requires faster placeholder-to-live-shell transition and less tmux capture work on activation
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d3h.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - attach sends the smallest required bootstrap before live raw output starts
+  - tmux screen, cursor, and terminal-flag queries are batched or removed from the active interactive attach path
+  - placeholder-to-bash transition does not redraw through stale local terminal state after raw output is available
+  - cross-host validation records attach latency and first-keystroke latency against ssh on the same machines
+verification:
+  - cargo test remote_authority_target_host_runtime
+  - cargo test remote_main_slot_pane_runtime
+  - manual: cross-host attach latency comparison against ssh
+touched_paths:
+  - src/runtime/remote_authority_target_host_runtime.rs
+  - src/runtime/remote_main_slot_pane_runtime.rs
+  - src/infra/tmux_backend.rs
+  - docs/raw-pty-tunnel-design.md
+  - .agents/tasks/backlog.yaml
+notes:
+  - Bootstrap cleanup must not regress fullscreen TUIs or cursor restoration.

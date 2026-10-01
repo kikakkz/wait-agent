@@ -1,0 +1,41 @@
+id: task.t5-06
+kind: task
+version: 1
+title: implement the aggregate transport-agnostic target registry
+status: superseded
+priority: medium
+target_task_reference: task.t5-06
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r4.done
+linked_primitives:
+  - primitive.network-registry-scope
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the aggregate server tracks local and remote targets in one authoritative transport-agnostic registry instead of relying on one-off publication paths
+  - registry state matches the shared target catalog and main-slot activation model used by the local tmux-first path, so later remote input, resize, and server-side console work can consume it without another schema rewrite
+  - the registry does not assume local tmux inspection, superseded daemon attach identity, or server-owned remote PTYs as the universal session model
+  - local fixed-chrome workspace behavior remains intact while aggregate registration is introduced
+  - task board and verification state are refreshed together with the implementation slice
+verification:
+  - cargo test
+  - targeted review of registry ownership and update paths across the server, transport, and session layers
+touched_paths:
+  - src/server.rs
+  - src/session.rs
+  - src/transport.rs
+  - .agents/tasks/queued/task.t5-06.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/execution-status-board.md
+  - docs/tmux-first-workspace-plan.md
+notes:
+  - This umbrella task was deferred behind the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4`.
+  - This work remains the first resumed network queue only after the fixed-chrome main-slot model became the accepted default local path.
+  - Do not fork a separate remote-only registry shape; local and remote targets must converge on one shared catalog.
+  - 2026-04-27 resumed: `task.event-r4` is now closed after user-reported shell and Codex visible-behavior acceptance, so active work moves to the shared transport-agnostic registry baseline.
+  - 2026-04-27 refinement: this umbrella is now split into `task.t5-06a -> task.t5-06b -> task.t5-06c` so documentation, model, and registry-boundary work can land as separate audited slices.

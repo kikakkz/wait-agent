@@ -1,0 +1,35 @@
+id: task.bug-remote-main-slot-snapshot-clobber
+kind: task
+version: 1
+title: fix stale-geometry observer snapshot painting over live raw output on presence flaps
+status: ready
+priority: medium
+design_ref:
+  doc: investigation
+  why:
+    - TargetPresenceChanged handler calls draw_remote_snapshot whenever !activated, without the binding.is_none() guard the Resize handler explicitly added (its comment warns a snapshot draw would clobber the terminal with stale content)
+    - the observer TerminalEngine is sized once in RemoteObserverRuntime::new and never resized, so any snapshot drawn after a local or remote geometry change uses stale geometry
+    - a presence flap during live interaction can therefore overlay an outdated, wrong-sized full-screen snapshot on top of the live raw PTY stream
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - snapshot draws from presence changes are guarded the same way as the Resize path (no draw while a live binding exists)
+  - observer TerminalEngine geometry is kept in sync with resize events, or snapshot drawing is skipped when geometry is known-stale
+  - a presence flap during live output no longer leaves stale content painted on the main pane
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test remote_main_slot passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test remote_main_slot -- --test-threads=1
+  - manual: attach to a remote target, force authority presence flaps while output is streaming, verify no stale overlay remains
+touched_paths:
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
+  - src/runtime/remote_observer_runtime.rs
+notes:
+  - unguarded draw: src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs:1052-1064
+  - Resize handler guard with warning comment: same file, lines ~509-514
+  - TerminalEngine sized once, no .resize() call sites under src/runtime

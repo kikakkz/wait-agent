@@ -1,0 +1,33 @@
+id: task.bug-local-session-freeze-after-connect
+kind: task
+version: 1
+title: fix local session switching freeze after connecting to remote server
+status: ready
+priority: high
+design_ref:
+  doc: docs/interaction-flows.md
+  why:
+    - local session switching must remain functional after a remote connection is established
+    - a network interruption during remote connect may leave the session switch path in a broken state
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - local session switching works normally after connecting to a remote server
+  - if network interruption is the root cause, the switch path recovers gracefully or fails fast without blocking
+  - no deadlock or indefinite hang in session switching after remote connect
+verification:
+  - cargo test
+  - manual: connect to remote server, then switch local sessions, verify it works
+  - manual: simulate network interruption during remote connect, verify local switching still works
+touched_paths:
+  - TBD (requires investigation)
+notes:
+  - Reported 2026-05-11: after connecting to server, local session switching becomes completely unresponsive.
+  - Suspected cause: network interruption during connect may leave a lock or state machine in a blocked state.
+  - Need to investigate whether remote connection setup holds any shared lock that local switching also needs.
+  - This bug is independent of the refactor queue and can be investigated in parallel.

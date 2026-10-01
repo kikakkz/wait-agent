@@ -1,0 +1,38 @@
+id: task.bug-remote-main-slot-reconnect-seq-fatal
+kind: task
+version: 1
+title: fix direct raw output seq tracker never reset on reconnect, gap recovery re-delivers old seqs and kills the pane process
+status: ready
+priority: high
+design_ref:
+  doc: investigation
+  why:
+    - direct_raw_output_last_seq in remote_main_slot_pane_runtime.rs is never reset across authority reconnects or target re-activation
+    - collect_direct_raw_pty_output_payload/_envelope hard-error when output_seq <= last, and the error propagates out of the event loop, killing the main-slot pane process
+    - gap recovery in remote_authority_connection_runtime.rs re-delivers SyncResponse frames as RawPtyOutput with their original (old) seqs, so recovery itself trips the fatal check by design
+    - two independent seq trackers (mailbox reader last_output_seq vs direct_raw_output_last_seq) share one authority-side counter that interleaves TargetOutput and RawPtyOutput
+    - result: after a network flap + seq gap, the remote session pane dies instead of recovering; likely related to task.bug-remote-session-lost-after-idle (wontfix)
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - seq tracker state is reset (or namespaced per attachment) on reconnect and on activate_surface_target_with_mode, matching what the mailbox-reader and observer seqs already do
+  - SyncResponse replay cannot trip the out-of-order fatal check; replayed frames are either re-sequenced or routed past the strict check
+  - reconnect after a real seq gap keeps the main-slot pane alive and resumes output
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test remote_main_slot passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test remote_main_slot -- --test-threads=1
+  - manual: attach to a remote target, drop and re-establish the authority transport under output load, verify pane survives and output resumes
+touched_paths:
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
+  - src/runtime/remote_authority/remote_authority_connection_runtime.rs
+notes:
+  - direct_raw_output_last_seq: src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs:294
+  - strict seq check: slot_pane_helpers.rs collect_direct_raw_pty_output_payload / _envelope (lines ~180-230)
+  - reconnect path begin_authority_reconnect (line ~1275) and activate_surface_target_with_mode (slot_pane_helpers.rs:92-129) reset observer/mailbox seqs but not the direct raw one
+  - gap recovery re-delivery: src/runtime/remote_authority/remote_authority_connection_runtime.rs:324-404

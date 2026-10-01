@@ -1,0 +1,31 @@
+id: task.bug-multi-remote-switch-lag
+kind: task
+version: 1
+title: fix severe lag switching to second remote session after the first
+status: done
+priority: high
+design_ref:
+  doc: investigation
+  why:
+    - pattern is deterministic: local → first remote (smooth) → second remote (long lag) → third remote (smooth)
+    - cycling back to local then to remote reproduces same pattern
+    - suggests a cold-start cost or cache-miss for the second authority transport that does not affect subsequent remotes
+    - user experience is severely degraded when 3+ remote sessions are in use
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - switching between any two remote sessions is consistently responsive, no asymmetrical lag
+  - the lag appears on first connect to each authority, not on the second
+verification:
+  - cargo test
+  - manual: connect to 3+ remote session owners, cycle local→r1→r2→r3→r2→r1—no single slow switch
+touched_paths:
+  - src/runtime/remote_main_slot/
+  - src/runtime/remote_authority/
+  - src/runtime/remote_node/
+  - src/application/remote_control_plane_service.rs
+notes:
+  - Likely the second authority transport has a cold initialization path that the first one warms incidentally.
+  - Compare transport setup traces between first, second, and subsequent remote switches.
+  - Check whether authority bridge discovery or publication sender registration has a deferred initialization.

@@ -1,0 +1,37 @@
+id: task.event-r2a1
+kind: task
+version: 1
+title: localize ctrl-n and same-socket activation hot paths to the current workspace socket
+status: done
+priority: critical
+source_of_truth:
+  file: .agents/state/last-verified.yaml
+  reference: event-r2a1
+depends_on:
+  - task.event-r2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - current workspace resolution and same-socket target resolution stop using global `list_sessions()` enumeration across unrelated waitagent sockets
+  - `__new-target`, same-socket target activation, and same-socket exit recovery use direct or socket-scoped lookup only
+  - terminal profiling shows tmux session creation is close to the end-to-end ctrl-n command time and removes the current extra delay caused by repeated global catalog scans
+  - the hot-path refactor preserves fixed-chrome main-slot rebinding, session-identity sidebar semantics, and future transport-agnostic target activation
+verification:
+  - cargo test --quiet main_slot_runtime session_service tmux_backend
+  - manual: profile `__new-target` against current-socket tmux session visibility and confirm the command no longer spends an extra second or more after the target session already exists
+touched_paths:
+  - src/runtime/main_slot_runtime.rs
+  - src/application/session_service.rs
+  - src/infra/tmux_backend.rs
+  - src/infra/tmux_types.rs
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.event-r2a1.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This is the first execution slice under `task.event-r2a`.
+  - The primary target is to remove repeated global catalog work from the ctrl-n command path without changing the fixed workspace chrome model.
+  - 2026-04-25 completed: same-socket resolution now stays on the current socket, and terminal profiling showed steady-state `__new-target` command completion at about 181ms with new tmux sessions visible in about 29ms.

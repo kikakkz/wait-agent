@@ -1,0 +1,40 @@
+id: task.t5-08c4c
+kind: task
+version: 1
+title: route shared-catalog and sidebar remote state through the live owner snapshot and retire file-backed remote sidebar sources
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - once the owner-runtime boundary exists, the target catalog and sidebar must stop reading file-backed remote state and consume the live owner snapshot instead
+    - this slice retires the architecture bug rather than leaving the old stores merged into the visible catalog
+target_task_reference: task.t5-08c4
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - `TargetRegistryService` and sidebar-visible remote catalog reads come from the live owner snapshot
+  - `DiscoveredRemoteSessionStore` no longer feeds user-visible remote session rows
+  - any remaining file-backed published-target compatibility path no longer acts as a remote sidebar source of truth
+verification:
+  - cargo test
+  - targeted review of catalog composition and sidebar-visible remote state
+touched_paths:
+  - src/application
+  - src/runtime
+  - src/ui
+  - src/infra
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4c.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice is where stale remote rows must disappear on cold start with no live owner.

@@ -1,0 +1,31 @@
+id: task.bug-sidebar-switch-lag
+kind: task
+version: 1
+title: fix severe lag on first sidebar switch while main pane is running
+status: ready
+priority: high
+design_ref:
+  doc: docs/interaction-flows.md
+  why:
+    - sidebar switching should be responsive regardless of main pane activity
+    - first-switch lag suggests lazy initialization or blocking I/O in the sidebar activation path
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - first sidebar switch while main pane is running completes without noticeable lag
+  - root cause is identified and fixed (likely lazy init, blocking snapshot, or synchronous tmux query)
+  - subsequent sidebar switches remain responsive (no regression)
+verification:
+  - cargo test
+  - manual: open a long-running process in main pane, switch to sidebar, verify responsiveness
+touched_paths:
+  - TBD (requires investigation)
+notes:
+  - Reported 2026-05-11: switching to sidebar while main pane has a running process is severely laggy on first switch only.
+  - Possible causes: synchronous tmux snapshot on first sidebar focus, lazy pane creation, or blocking session catalog query.
+  - This bug is independent of the refactor queue and can be investigated in parallel.

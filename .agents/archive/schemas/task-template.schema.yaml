@@ -1,0 +1,12 @@
+kind: schema
+version: 1
+required_fields:
+  - id
+  - kind
+  - version
+  - title
+  - use_when
+  - scaffold
+optional_fields:
+  - default_primitives
+  - default_verification

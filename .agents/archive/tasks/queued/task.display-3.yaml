@@ -1,0 +1,38 @@
+id: task.display-3
+kind: task
+version: 1
+title: remove the obsolete dashboard-scroll experiment and converge restore and resize behavior
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.display-1.done
+  - task.display-2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - dashboard rendering no longer includes the obsolete gutter scrollbar, dashboard scroll offsets, or mouse-drag session-history control path that was introduced for `task.scroll-1`
+  - restore, resize, and redraw behavior after exiting native fullscreen follow one named primary path rather than a mixed set of dashboard-scroll and fullscreen-specific fallbacks
+  - any retained pane-history support is justified by fullscreen restore needs or session persistence, not by dashboard-local mouse scrolling
+  - assistants can identify the primary restore strategy and the reason the scrollbar experiment was retired from machine docs without reverse-engineering `src/app.rs`
+verification:
+  - cargo test
+  - manual: enter and exit native fullscreen repeatedly across shell and Codex-like sessions and confirm the dashboard restores cleanly without scroll-specific artifacts
+  - targeted review of redraw, replay, snapshot restore, and removed scrollbar control flow
+touched_paths:
+  - src/app.rs
+  - src/renderer.rs
+  - src/console.rs
+  - src/session.rs
+  - src/lifecycle.rs
+  - src/terminal.rs
+  - .agents/tasks/queued/task.display-3.yaml
+notes:
+  - The rejected scrollbar experiment and attach-side mouse capture have already been removed from the baseline.
+  - This task is now only about restore-path convergence after fullscreen handoff exists, not about preserving partial compatibility of the retired scrollbar design.
+  - This task is superseded because tmux-first cutover removes the need to converge the old custom fullscreen restore path.

@@ -1,0 +1,50 @@
+id: task.t5-08
+kind: task
+version: 1
+title: design the remote node connection architecture for efficient multi-connection ingress and ownership
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-network-completion-plan.md
+  why:
+    - section 4 identifies that live node ownership is still split across multiple runtimes and helper boundaries
+    - section 5 and section 6 require a cleaner production architecture before the cross-host ingress and render slices can land elegantly
+target_task_reference: task.t5-08
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-07.done
+  - task.t6-01e.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted design document defines the remote node connection architecture for real cross-host ingress, connection reuse, attachment fanout, and reconnect ownership
+  - the design explicitly chooses the production ownership model for multi-connection handling rather than leaving it implied across runtime notes
+  - the remaining cross-host implementation queue is updated so `task.t5-08a -> task.t5-08c` follow the accepted architecture
+  - status board and control-plane state point to this design task as the current gate
+verification:
+  - targeted review of remote ingress, multiplexing, owner-runtime, and reconnect model consistency
+touched_paths:
+  - Cargo.toml
+  - docs/remote-network-completion-plan.md
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - docs/agents-control-plane.md
+  - .agents/index.yaml
+  - .agents/context/project.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08.yaml
+  - .agents/tasks/queued/task.t5-08a.yaml
+  - .agents/tasks/queued/task.t5-08b.yaml
+  - .agents/tasks/queued/task.t5-08c.yaml
+notes:
+  - This task is design-first and should not drift into transport implementation before the ownership model is explicit.
+  - The target outcome is an elegant node-scoped connection architecture, not more per-target helper sockets on the default production path.
+  - 2026-04-30 close: the accepted architecture now chooses a tonic-based node-scoped long-connection model with protobuf messages, rustls-backed transport, bounded backpressure, and centralized reconnect ownership before the implementation slices resume.

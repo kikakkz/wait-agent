@@ -1,0 +1,48 @@
+id: task.t5-08c
+kind: task
+version: 1
+title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
+status: superseded
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - this historical umbrella remains useful context, but the accepted execution path is now the bounded session-centric split `task.t5-08c2 -> task.t5-08c4`
+    - active implementation should no longer continue under one publication-centric catch-all slice
+target_task_reference: task.t5-08c
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - a public remote listener and outbound dial product entry exists on accepted CLI arguments rather than environment variables, with default listener bind `0.0.0.0` and default port `7474`
+  - inbound remote target publication reaches the shared catalog through node-scoped discovery rather than depending on pre-existing local publication bindings
+  - delivered remote output reaches the visible local workspace and server-console target presentations through the accepted observer or render runtime boundaries
+  - real cross-host open, input, output, and resize behavior is validated end to end on the accepted phase-2 path
+  - loopback-only transport assumptions are either removed from the production path or explicitly retired as historical fallback
+verification:
+  - cargo test
+  - manual: real cross-host remote interaction validation
+  - targeted review of remote render-path ownership and end-to-end transport boundaries
+touched_paths:
+  - Cargo.toml
+  - src/runtime
+  - src/application
+  - src/ui
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This umbrella is retained only as historical context after the session-centric redesign.
+  - Active work now runs through `task.t5-08c2 -> task.t5-08c4`.

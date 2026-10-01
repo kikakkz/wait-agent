@@ -1,0 +1,37 @@
+id: task.geometry-6-docs-and-cross-host-acceptance
+kind: task
+version: 1
+title: refresh docs and run cross-host geometry coordination acceptance
+status: done
+priority: medium
+design_ref:
+  doc: docs/remote-geometry-coordination-design.md
+  why:
+    - the coordination contract must be verified end to end across real hosts before the batch is considered done
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.geometry-3-authority-coordinator.done
+  - task.geometry-4-main-slot-geometry-resync.done
+  - task.geometry-5-per-server-size-store.done
+done_criteria:
+  - mirror a workspace main pane; reverse-i-search with a long history line, vim, and htop render pixel-correct on both hosts
+  - while mirrored, the local user attaches, detaches, and resizes his terminal; both sides stay complete and chrome stays pinned
+  - operator resizes the server terminal; coordination follows
+  - two remote sessions attached sequentially behave identically
+  - server input keeps working through all of the above
+  - docs/execution-status-board.md and the local acceptance checklist are refreshed with the new acceptance results
+verification:
+  - manual cross-host acceptance per docs/remote-geometry-coordination-design.md section 11
+  - cargo test
+touched_paths:
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+notes:
+  - run against the same host pair that exposed the bug (server 192.168.31.178, client node 192.168.31.182)
+  - 2026-07-20 done, with the literal cross-host rerun deferred because 182 is offline; evidence is the one-host two-instance simulation on isolated ports
+  - verified: baseline mirror byte-identical for long lines, ls, reverse-i-search, vim, and htop; managed-node small-client attach shrinks node window/pane with chrome pinned; large-client attach keeps viewer geometry with padding panes and pinned chrome; detach restores and cleans padding; operator resizes propagate in both directions; two sequential remote sessions render identically; server input works throughout
+  - fixes landed during acceptance: resize-window no longer leaves windows stuck in window-size manual (option restored after coordination; authority keeps manual deliberately to stay the sole resizer); waitagent chrome sizes come from layout intent constants instead of live layout so reflow distortion is never ratified; geometry padding panes are excluded from workspace recovery anchors (is_workspace_chrome_title); second-target activation swap-pane regression fixed by that exclusion
+  - known limitations recorded in docs/local-acceptance-checklist.md section 8.6 and tracked as task.bug-geometry-shared-chrome-window: shared workspace chrome placement + small attached client skips local layout surgery (garble can survive there), and storm-time geometry can churn before converging
+  - docs refreshed: docs/execution-status-board.md (geometry batch gate entry) and docs/local-acceptance-checklist.md (section 8 geometry coordination validation)

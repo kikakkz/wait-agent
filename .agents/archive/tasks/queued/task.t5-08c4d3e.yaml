@@ -1,0 +1,36 @@
+id: task.t5-08c4d3e
+kind: task
+version: 1
+title: decouple local raw PTY input from synchronous transport writes
+status: superseded
+priority: high
+design_ref:
+  doc: docs/raw-pty-tunnel-design.md
+  why:
+    - cross-host review found that local stdin now bypasses the UI loop but can still block on authority transport writes
+    - SSH parity requires the terminal input reader to avoid direct network or socket backpressure
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d3d.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - local stdin raw-mode reads enqueue bytes without synchronously writing to the authority transport
+  - a dedicated raw-input writer owns authority transport writes and preserves byte ordering
+  - burst coalescing does not add a fixed sleep before first-byte delivery
+  - backpressure is observable and does not silently stall the terminal input reader
+verification:
+  - cargo test remote_main_slot_pane_runtime
+  - manual: compare first-keystroke latency against ssh on the same remote host
+touched_paths:
+  - src/runtime/remote_main_slot_pane_runtime.rs
+  - src/runtime/remote_authority_connection_runtime.rs
+  - docs/raw-pty-tunnel-design.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+notes:
+  - Do not reintroduce tmux send-keys or a raw PTY environment flag.

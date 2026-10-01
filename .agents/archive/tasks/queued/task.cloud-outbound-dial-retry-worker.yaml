@@ -1,0 +1,38 @@
+id: task.cloud-outbound-dial-retry-worker
+kind: task
+version: 1
+title: add outbound-dial retry worker that re-queues InitiateOutboundConnection on RemoteNodeOffline
+status: done
+priority: high
+design_ref:
+  doc: docs/reconnection-plan.md
+  section: 2
+  why:
+    - In OutboundDial mode the control host must be responsible for reconnecting; the remote peer is listening but will not dial back.
+    - Retry must run outside StateEventLoop so network I/O does not block the single writer.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-outbound-dial-snapshot-reconnect.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - OutboundDialRetryWorker exists and is started when the last session to an outbound-dial peer closes or RemoteNodeOffline is received.
+  - Worker repeatedly sends InternalEvent::InitiateOutboundConnection with exponential backoff.
+  - Worker is cancelled on RemoteNodeOnline or when the node is permanently removed.
+  - InboundConnect peers do not start this worker; they rely on the remote peer's own session-sync redial.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test outbound_dial_retry_worker -- --test-threads=1
+  - manual: disconnect and reconnect network on an outbound-dial peer; verify reconnection within ~30s
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/ratatui_node/outbound_dial_retry_worker.rs
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/runtime.rs
+  - src/ratatui_node/state_event.rs
+notes:
+  - Shipped in v0.1.27 and hardened in v0.1.28.
+  - MAX_RETRY_ATTEMPTS = 30, MAX_RETRY_DELAY = 30s.

@@ -1,0 +1,36 @@
+id: task.tmux-r8a
+kind: task
+version: 1
+title: restore the legacy waitagent chrome contract on tmux-owned panes and menus
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r7a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - tmux status line and waitagent footer pane are both present in normal workspace mode
+  - sidebar focus lands in the item list rather than a bottom pseudo-cursor location, and sidebar selection uses explicit up/down item navigation rather than only mirroring the active session
+  - sidebar item styling, active-session highlighting, icons, and status badges match the reviewed legacy waitagent contract while staying within tmux-owned pane boundaries
+  - sidebar detail area is reduced to a single right-aligned summary line shaped like `bash@local | INPUT`
+  - waitagent session menus keep tmux-native `display-menu` ownership but restore the old waitagent blue menu style and full historical item inventory
+verification:
+  - cargo test
+  - manual: sidebar focus, up/down selection, and enter-to-switch in a real terminal
+  - manual: normal mode shows both the tmux status line and the waitagent footer pane
+  - manual: waitagent menus visually match the old blue menu contract and expose the full expected item list
+touched_paths:
+  - src/application
+  - src/runtime
+  - src/ui
+  - src/infra/tmux.rs
+  - .agents/tasks/queued/task.tmux-r8a.yaml
+notes:
+  - This slice is now historical only.
+  - Superseded on 2026-04-23 after the local runtime plan was redirected to an event-driven rewrite queue.

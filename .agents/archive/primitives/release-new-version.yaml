@@ -1,0 +1,36 @@
+id: primitive.release-new-version
+kind: primitive
+version: 2
+purpose: Release a new waitagent version by tagging the current version and bumping main to the next patch version.
+use_when:
+  - user says "发布新版本" or asks to release a new version
+inputs:
+  - Cargo.toml
+  - Cargo.lock
+preconditions:
+  - The version in Cargo.toml is the version to release, not the next development version.
+  - Git working directory is clean.
+  - The tag `v<current>` does not already exist locally or on origin.
+required_path:
+  - Always run `./scripts/release.sh` for every release. Do not perform manual `git tag`, `cargo bump`, or `git push` steps outside the script.
+manual_steps:
+  - Read the current version from Cargo.toml (e.g., 0.0.171).
+  - Ensure Cargo.lock has the same version for the `waitagent` package; if not, run `cargo update -p waitagent` or edit Cargo.lock to match.
+  - Run `cargo check` to validate the tree and refresh Cargo.lock if necessary.
+  - Create an annotated git tag `v<current>` (e.g., `v0.0.171`) on the current HEAD.
+  - Push the tag to origin.
+  - Bump the version in Cargo.toml to the next patch version (e.g., `0.0.172`).
+  - Run `cargo update -p waitagent` so Cargo.lock reflects the new version.
+  - Run `cargo check` again to confirm the tree is clean.
+  - "Commit with message `chore: bump version to <next>` (e.g., `chore: bump version to 0.0.172`)."
+  - Push the commit to origin main.
+verification:
+  - The release tag exists on origin.
+  - Cargo.toml and Cargo.lock both show the next version on main.
+  - "`cargo check` passes."
+failure_modes:
+  - Tag already exists locally or remotely.
+  - Cargo.lock version drifts from Cargo.toml.
+  - Push rejected because main has moved forward.
+  - Working directory is dirty when the script is run.
+  - Cargo.toml version is not exactly one patch above the latest released `v0.0.*` tag (prevents skipped versions like v0.0.190).

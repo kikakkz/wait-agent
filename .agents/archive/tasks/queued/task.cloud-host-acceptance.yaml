@@ -1,0 +1,48 @@
+id: task.cloud-host-acceptance
+kind: task
+version: 1
+title: validate outbound-dial connection to a real cloud/public host
+status: backlog
+priority: high
+design_ref:
+  doc: docs/reconnection-plan.md
+  section: 1, 2, 3
+  why:
+    - Outbound-dial / cloud-host code has shipped through v0.1.32; validation on a real public host is needed.
+    - Validation will confirm TLS pin handshake, operator-key auth, snapshot reconnect, and Ctrl-W first-connect behavior outside the LAN.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-outbound-dial-operator-auth.done
+  - task.cloud-lan-host-kind.done
+  - task.cloud-outbound-dial-snapshot-reconnect.done
+  - task.cloud-outbound-dial-retry-worker.done
+  - task.cloud-outbound-dial-ingress-catalog-publish.done
+  - task.cloud-async-remote-connect-dedup.done
+  - task.cloud-async-create-remote-session.done
+  - task.cloud-create-session-ingress-routing.done
+  - task.cloud-auth-cert-pinning-design.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Connect to at least one cloud/public host via Ctrl+W using key authentication.
+  - First connect activates the remote waitagent's default published session without creating an extra session.
+  - Sidebar shows the remote session and no duplicate bash@local entries.
+  - Disconnect network or restart control-plane and verify reconnect via snapshot + retry worker.
+  - Ctrl+S on the connected cloud host creates a new remote session successfully.
+  - Document any cloud-specific issues or blockers discovered during validation.
+verification:
+  - manual end-to-end on a real cloud/public host
+  - cargo test --release ratatui session_sync
+  - cargo clippy -- -D warnings
+touched_paths:
+  - docs/reconnection-plan.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/state/current-focus.yaml
+notes:
+  - Deferred until task.cloud-auth-cert-pinning-design is accepted.
+  - After validation, next task is task.cloud-unified-reconnect-scheme.
+  - If validation exposes functional bugs, create new bug tasks and link them here.

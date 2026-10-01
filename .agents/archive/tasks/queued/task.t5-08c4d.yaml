@@ -1,0 +1,46 @@
+id: task.t5-08c4d
+kind: task
+version: 1
+title: close detach or reattach continuity, owner restart semantics, and cross-host validation on the runtime-only path
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - once runtime ownership and catalog migration are complete, the product still needs explicit proof that remote state survives detach correctly and disappears correctly when the backend or node is gone
+    - this slice closes the user-facing acceptance loop on the accepted runtime-only model
+target_task_reference: task.t5-08c4
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4c.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - one `--connect` establishes one node connection and publishes only the current backend's local publishable session set
+  - local helper sessions such as workspace chrome and remote-projected sessions are excluded from outbound publication
+  - each exported local session appears exactly once as one remote row and remains routable by `session_id`
+  - detach and later reattach show the same live remote sessions while the backend-scoped owner remains alive
+  - owner absence or backend shutdown clears remote rows instead of replaying stale cache state
+  - explicit cross-host manual validation passes on the accepted `--port` plus `--connect` path
+verification:
+  - cargo test
+  - manual: detach or reattach lifecycle validation
+  - manual: real cross-host remote interaction validation
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This slice closes the user-facing proof. It should not resurrect cache-backed sidebar recovery.
+  - The accepted business model is `node connection -> backend-owned local sessions -> observer attachments`, not raw tmux enumeration.

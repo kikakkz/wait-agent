@@ -1,0 +1,38 @@
+id: task.cloud-outbound-dial-snapshot-reconnect
+kind: task
+version: 1
+title: persist outbound-dial connections and reconnect from snapshot on control-plane restart
+status: done
+priority: high
+design_ref:
+  doc: docs/reconnection-plan.md
+  section: 1, 2
+  why:
+    - When the control-plane restarts, it must know which outbound-dial remote peers it was previously connected to so it can re-establish those sessions.
+    - Inbound --connect peers are not stored in the snapshot; they reconnect on their own.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-outbound-dial-operator-auth.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - OutboundConnectionSnapshotStore persists profile_name and authority_node_id for every successful outbound-dial connection.
+  - Snapshot is updated on connect and removed when the node is permanently offline.
+  - On startup / network-online event, ReconnectSnapshotHosts reads the snapshot and re-initiates outbound connections.
+  - Inbound --connect peers are excluded from the snapshot.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test outbound_connection_snapshot_store -- --test-threads=1
+  - manual: restart waitagent server and verify previously connected outbound-dial peers reconnect automatically
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/host/ssh/outbound_connection_snapshot_store.rs
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/runtime.rs
+  - src/ratatui_node/state_event.rs
+notes:
+  - Shipped in v0.1.28.
+  - Snapshot path is ~/.waitagent/outbound-connections.toml.

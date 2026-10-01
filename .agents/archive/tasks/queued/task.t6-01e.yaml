@@ -1,0 +1,39 @@
+id: task.t6-01e
+kind: task
+version: 1
+title: retire server-side auto-switch planning and lock server-console on manual-only attention cues
+status: done
+priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - the accepted server-console design must match the explicit product decision that focus stays manual-only
+    - the active scheduling model should surface waiting state in chrome without automatic focus jumps
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t6-01c.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - active task state and status docs no longer describe server-side auto-switch as planned work
+  - server-console design and product docs explicitly state that waiting state only raises attention cues and never moves focus automatically
+  - future T6 work, if any, is framed as manual-only attention visibility polish rather than automation
+verification:
+  - targeted review of planning alignment across `.agents/` and active docs
+touched_paths:
+  - .agents
+  - docs
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t6-01d.yaml
+  - .agents/tasks/queued/task.t6-01e.yaml
+  - docs/server-console-scheduling-design.md
+  - docs/execution-status-board.md
+notes:
+  - 2026-04-29 policy lock: auto-switch is cancelled because automatic focus jumps are considered a poor user experience.
+  - Waiting state should only attract user attention through sidebar, picker, badges, counts, or similar chrome cues.

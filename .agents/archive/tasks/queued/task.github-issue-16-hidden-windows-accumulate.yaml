@@ -1,0 +1,34 @@
+id: task.github-issue-16-hidden-windows-accumulate
+kind: task
+version: 1
+title: fix wa-hidden windows accumulating after remote abnormal disconnect/reconnect
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-network-completion-plan.md
+  issue: https://github.com/kikakkz/wait-agent/issues/16
+  why:
+    - issue #16 reports that the main tmux session accumulates many wa-hidden-* windows after remote abnormal disconnect/reconnect cycles
+    - dead remote content panes remain because remain-on-exit is on and abnormal exit paths do not consistently clean them up
+source_of_truth:
+  file: .agents/tasks/current.yaml
+  reference: current
+depends_on:
+  - task.github-issue-15-remote-output-routing.done
+done_criteria:
+  - root cause of wa-hidden-* accumulation is documented
+  - abnormal remote-main-slot exit paths consistently clean up dead hidden panes/windows
+  - normal RemoteTargetExited cleanup behavior remains intact
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test main_slot_runtime passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test main_slot_runtime -- --test-threads=1
+  - cargo test remote_main_slot_pane_runtime -- --test-threads=1
+touched_paths:
+  - src/runtime/workspace/main_slot_runtime.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+notes:
+  - Current root cause: remote panes created with remain-on-exit=on leave dead panes on abnormal exits. Reuse lookup skips dead panes but does not kill them. Clean RemoteTargetExited paths call cleanup_exited_remote_session_pane, but protocol error / pane-died / recovery paths do not.

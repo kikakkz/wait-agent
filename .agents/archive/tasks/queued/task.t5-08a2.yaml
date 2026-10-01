@@ -1,0 +1,39 @@
+id: task.t5-08a2
+kind: task
+version: 1
+title: design node trust, dialing policy, and canonical connection ownership
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - section 8.3 only states that mTLS is preferred, but the actual trust bootstrap and ownership policy are still undefined
+    - the node-scoped connection manager cannot be implemented cleanly until dial, accept, duplicate-session, and reconnect authority rules are fixed
+target_task_reference: task.t5-08a2
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08a1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted design defines mTLS trust bootstrap, node identity binding, certificate lifecycle expectations, and admission policy
+  - one accepted design defines who dials whom, whether both inbound and outbound are allowed, and how duplicate simultaneous connections collapse into one canonical node session
+  - reconnect authority and split-brain resolution rules are explicit
+verification:
+  - targeted review of trust bootstrap, connection ownership, duplicate-resolution, and reconnect policy
+touched_paths:
+  - docs/remote-node-connection-architecture.md
+  - docs/remote-network-completion-plan.md
+  - docs/execution-status-board.md
+  - .agents/state/task-history.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08a2.yaml
+  - .agents/tasks/queued/task.t5-08a.yaml
+notes:
+  - This is design-only. Do not bake trust assumptions into code before this slice closes.

@@ -1,0 +1,54 @@
+id: task.ratatui-agent-sessions-hotkey-phase5-protocol
+kind: task
+version: 1
+title: implement ListAgentSessions protocol for remote peer sessions
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-agent-sessions-hotkey-design.md
+  section: 5.5
+  why:
+    - Remote peer sessions run agent processes on the remote node, so their session files live there.
+    - The TUI client cannot read the remote node's filesystem directly; a request/response protocol over the existing NodeSessionService is required.
+    - This protocol must be in place before the UI popup can support remote sessions.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-agent-sessions-hotkey-phase5-protocol.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-agent-sessions-hotkey-phase4-claude.done
+done_criteria:
+  - `ClientCommand::ListAgentSessions { target_id, agent }` exists in `src/ratatui_node/state_event.rs`.
+  - `proto/waitagent/remote/v1/node_session.proto` adds `ListAgentSessionsRequest`, `ListAgentSessionsResponse`, `ListAgentSessionsRejected`, and `AgentSessionEntry` messages.
+  - `src/infra/remote_protocol.rs` adds matching `ControlPlanePayload` variants and payload structs.
+  - `src/infra/remote_transport_codec.rs` maps the new proto messages to/from `ControlPlanePayload`.
+  - Local `StateEventLoop` handles `ListAgentSessions` for local targets by calling `AgentSessionRegistry`.
+  - Local `StateEventLoop` forwards `ListAgentSessions` for remote-peer targets through the active `RatatuiRemoteSession`.
+  - Remote peer node handles `ListAgentSessionsRequest` by calling its own `AgentSessionRegistry` and returns `ListAgentSessionsResponse`.
+  - Remote peer node returns `ListAgentSessionsRejected` when the agent is unknown or reading fails.
+  - `cargo fmt --check` and `cargo clippy -- -D warnings` pass.
+  - `cargo test --release ratatui session_sync` passes.
+verification:
+  - cargo fmt --check
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - unit tests for control-plane payload codec round-trip
+  - manual: two-node setup where remote peer has agent sessions and local viewer can list them
+touched_paths:
+  - proto/waitagent/remote/v1/node_session.proto
+  - src/infra/remote_protocol.rs
+  - src/infra/remote_transport_codec.rs
+  - src/remote/authority/remote_authority_transport_runtime.rs
+  - src/remote/node/remote_node_ingress_server_runtime.rs
+  - src/remote/node/remote_node_session_runtime.rs
+  - src/remote/node/remote_node_session_sync_runtime.rs
+  - src/remote/node/remote_node_session_sync_runtime/local_session_sync_backends.rs
+  - src/remote/node/remote_node_session_sync_runtime/sync_helpers.rs
+  - src/ratatui_node/state_event.rs
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/remote_session.rs
+  - src/ratatui_node/runtime.rs
+  - build.rs
+notes:
+  - Keep the protocol symmetric: both local server and remote peer use the same `AgentSessionProvider` trait; only the caller side differs.
+  - Reuse existing NodeSessionService authority transport; do not create a separate channel.
+  - The request must include the agent name so the remote peer knows which provider to use.

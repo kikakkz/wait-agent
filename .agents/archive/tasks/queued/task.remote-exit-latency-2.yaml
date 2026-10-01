@@ -1,0 +1,44 @@
+id: task.remote-exit-latency-2
+kind: task
+version: 1
+title: wire WaitAgent-managed target lifecycle exits to session sync notify
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-session-exit-latency-design.md
+  why:
+    - task.remote-exit-latency-1 adds the event-loop wake boundary
+    - this task connects the actual WaitAgent-managed lifecycle paths to that boundary
+    - normal remote session exit must not wait for SESSION_SYNC_POLL_INTERVAL
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-exit-latency-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - WaitAgent-managed local target exit sends acknowledged LocalCatalogChanged notify
+  - notify failure starts or ensures the session sync owner and retries once
+  - startup and transport SessionOpened still reconcile current local sessions
+  - normal target exit no longer depends on a 500ms periodic session sync poll
+  - failure to notify is logged without direct UI/sidebar mutation
+verification:
+  - cargo test
+  - cargo check
+  - manual: start local WaitAgent, connect localhost remote host, create remote session, type exit, verify TargetExited is sent immediately after lifecycle exit
+touched_paths:
+  - src/runtime/workspace/local_target_host_runtime.rs
+  - src/runtime/workspace/target_host_runtime.rs
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime/sync_helpers.rs
+  - docs/remote-session-exit-latency-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.remote-exit-latency-2.yaml
+notes:
+  - Do not replace lifecycle ownership with sidebar-side deletion.
+  - Keep reconnect and startup reconciliation as the non-durable recovery points.
+  - External tmux operations outside WaitAgent remain out of scope.

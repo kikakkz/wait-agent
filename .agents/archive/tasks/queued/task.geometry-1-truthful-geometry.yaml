@@ -1,0 +1,40 @@
+id: task.geometry-1-truthful-geometry
+kind: task
+version: 1
+title: report actual applied pane geometry in resize and attach acknowledgements
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-geometry-coordination-design.md
+  why:
+    - ResizeApplied and the attach acknowledgement currently echo the requested geometry, so a skipped or clamped resize is invisible to every downstream gate
+    - truthful read-back geometry is the prerequisite for every other coordination slice
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - authority reads back #{pane_width}/#{pane_height} after every resize attempt and reports the applied values in ResizeApplied
+  - the attach acknowledgement carries the target pane's current actual geometry
+  - viewer-side geometry comparisons (resize-ack input gate) use actual reported values, not requested ones
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test remote_authority passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test remote_authority -- --test-threads=1
+  - cargo test remote_main_slot -- --test-threads=1
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/infra/tmux_backend/remote.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+  - src/infra/remote_protocol.rs
+notes:
+  - fake echo site: remote_authority_target_host_runtime.rs:753-760 (and the sibling send_resize_applied sites near 833/927/1093)
+  - resize skip branch: src/infra/tmux_backend/remote.rs:235-240 (kept for now; truthful reporting makes it observable until geometry-3 replaces it)
+  - input gate comparing requested values: remote_main_slot_pane_runtime.rs:1327-1332
+  - 2026-07-19 done: all four authority send_resize_applied sites now read back actual pane geometry via the new RemoteTargetPtyGateway::pane_geometry before reporting; open-time ResizeApplied covers the attach-ack requirement without protocol changes; viewer mismatch is logged ([diag] resize ack geometry mismatch); a [diag-timing] send_resize_applied line logs reported values on the wire
+  - verified: cargo fmt --check, cargo check, cargo test remote_authority (37), remote_main_slot (68), tmux_backend (82); new test authority_host_runtime_reports_applied_geometry_when_resize_is_clamped
+  - verified e2e on one host (two isolated instances on ports 17474/17475, production 7474 untouched): multi-pane chrome window target stays 47x22, wire now reports cols=47 rows=22 instead of the requested size
+  - observation for geometry-4: the raw fast-path input route (spawn_input_thread -> RawPtyInputRoute) bypasses the resize-ack gate entirely; the gate only covers the event-loop fallback path
+  - observation for geometry-4: open-time ResizeApplied can arrive before the local binding exists (or with a console_id the slot has not bound yet) and is then dropped silently by the slot handler checks at remote_main_slot_pane_runtime.rs:810-816

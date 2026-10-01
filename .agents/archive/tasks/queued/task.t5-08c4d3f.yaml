@@ -1,0 +1,36 @@
+id: task.t5-08c4d3f
+kind: task
+version: 1
+title: replace FIFO and output-pump bridging with direct remote PTY ownership
+status: superseded
+priority: high
+design_ref:
+  doc: docs/raw-pty-tunnel-design.md
+  why:
+    - cross-host review found that the authority host still sends input through a FIFO and output-pump process instead of owning a direct PTY byte path
+    - SSH parity requires removing avoidable process, filesystem, framing, and flush boundaries from the interactive data plane
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d3e.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - authority target host owns a direct read/write PTY path or equivalent tmux primitive without a FIFO input hop
+  - raw input bytes are written directly from authority-host runtime to the remote PTY path
+  - raw output bytes are read without a separate output-pump process where practical
+  - temporary FIFO/socket compatibility fallback is not the normal interactive data plane
+verification:
+  - cargo test remote_authority_target_host_runtime
+  - manual: cross-host shell input/output parity against ssh
+touched_paths:
+  - src/runtime/remote_authority_target_host_runtime.rs
+  - src/infra/tmux_backend/remote.rs
+  - src/infra/tmux_backend/layout.rs
+  - docs/raw-pty-tunnel-design.md
+  - .agents/tasks/backlog.yaml
+notes:
+  - Do not solve this by returning to tmux send-keys.

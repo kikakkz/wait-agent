@@ -1,0 +1,47 @@
+id: task.remote-exit-latency-4
+kind: task
+version: 1
+title: validate remote session exit latency end to end and clean temporary diagnostics
+status: done
+priority: medium
+design_ref:
+  doc: docs/remote-session-exit-latency-design.md
+  why:
+    - the optimization must be proven with the same E2E workflow that exposed the lag
+    - timing needs to cover visible sidebar item disappearance, not only internal function completion
+    - temporary diagnostic logs should not remain after the root cause is verified and fixed
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-exit-latency-2.done
+  - task.remote-exit-latency-3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - E2E test workflow records exit enter, TargetExited send/apply, workspace refresh, and sidebar item gone timing
+  - normal-path sync no longer shows 0-500ms poll wait
+  - publication workspace resolution no longer shows 500ms+ tmux socket scan
+  - remote session item disappearance is measured against the pre-fix baseline
+  - temporary diagnostics added only for this investigation are removed or gated behind accepted debug logging
+verification:
+  - cargo test
+  - cargo check
+  - cargo build --release
+  - manual E2E: local WaitAgent, localhost remote host, Ctrl-S create three remote sessions, type exit in each, verify item disappearance timing
+touched_paths:
+  - src/runtime/event_driven/event_driven_tmux_pane_runtime.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
+  - src/runtime/remote_node/remote_node_ingress_server_runtime.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime/sync_helpers.rs
+  - src/runtime/remote_publication/remote_target_publication_runtime.rs
+  - src/runtime/workspace/main_slot_runtime.rs
+  - docs/remote-session-exit-latency-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.remote-exit-latency-4.yaml
+notes:
+  - E2E timing must include visual disappearance from the sidebar.
+  - Do not remove diagnostics that are already accepted permanent observability.

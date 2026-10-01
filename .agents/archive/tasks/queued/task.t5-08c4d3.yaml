@@ -1,0 +1,41 @@
+id: task.t5-08c4d3
+kind: task
+version: 1
+title: run end-to-end cross-host validation and acceptance closeout on the corrected runtime-only path
+status: superseded
+priority: high
+design_ref:
+  doc: docs/remote-live-mirror-design.md
+  why:
+    - this umbrella is no longer the active execution unit because the latest review exposed a missing live-mirror lifecycle design rather than one validation-only gap
+    - it remains only as the superseded parent for `task.t5-08c4d3a -> task.t5-08c4d3d`
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - explicit cross-host manual validation passes on the accepted `--port` plus `--connect` path
+  - remote open, input, output, resize, disconnect, and reconnect behavior are verified on the corrected session-centric model
+  - acceptance docs, status board, and verification state reflect the validated product path
+verification:
+  - cargo test
+  - manual: real cross-host remote interaction validation
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d3.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - Superseded by `task.t5-08c4d3a -> task.t5-08c4d3d`.

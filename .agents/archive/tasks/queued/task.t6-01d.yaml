@@ -1,0 +1,35 @@
+id: task.t6-01d
+kind: task
+version: 1
+title: cancelled auto-switch slice superseded by manual-only attention policy
+status: superseded
+priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - this historical slice is retained only so task history records why auto-switch work was cancelled
+    - the accepted server-console design is now manual-only and rejects automatic focus jumps
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t6-01c.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - historical record only
+verification:
+  - targeted review confirming this slice is no longer planned work
+touched_paths:
+  - src/runtime
+  - src/application
+  - .agents/tasks/queued/task.t6-01d.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/server-console-scheduling-design.md
+  - docs/execution-status-board.md
+notes:
+  - 2026-04-29 superseded: auto-switch was explicitly cancelled because automatic focus jumps degrade user experience; future server-console work must stay manual-only and use attention cues instead.

@@ -1,0 +1,47 @@
+id: task.geometry-3-authority-coordinator
+kind: task
+version: 1
+title: implement authority-side geometry coordinator with chrome-preserving resize and padding panes
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-geometry-coordination-design.md
+  why:
+    - the multi-pane skip branch in resize_pane_on_socket is the verified root cause of the garbled mirror; the coordinator replaces it with negotiated resize execution
+    - chrome panes must stay pinned (fixed sidebar width at the right edge, fixed footer height at the bottom) while the target pane takes the negotiated T
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.geometry-1-truthful-geometry.done
+  - task.geometry-2-protocol-geometry-push.done
+done_criteria:
+  - T is computed per dimension as min over viewer capacities; local user capacity is unbounded while no client is attached and the min over attached clients otherwise
+  - local user not attached: window resized to T + live-queried chrome overhead, then target pane resized to exactly T
+  - local user attached: window left at the user's terminal size; target pane resized to T; silent padding panes (split-window -d) absorb slack beside/below the target pane; final layout applied atomically with one select-layout computed from #{window_layout}
+  - chrome panes are identified by pane title/command (waitagent-sidebar/waitagent-footer) and keep fixed size and position; sizes are queried live, never hardcoded
+  - every resize round ends with read-back verification and reports the applied geometry via the geometry push
+  - geometry-change events are ingested from tmux hooks (client-attached/client-detached/client-resized/window-layout-changed) or %layout-change, and debounced (150-300 ms quiet period)
+  - server disconnect leaves the window at T; no shrink-back
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test remote_authority passes
+  - cargo test tmux_backend passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test remote_authority -- --test-threads=1
+  - cargo test tmux_backend -- --test-threads=1
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/infra/tmux_backend/remote.rs
+  - src/infra/tmux_backend.rs
+notes:
+  - replaces the skip branch at src/infra/tmux_backend/remote.rs:235-240
+  - keep the existing resize-before-pipe-pane ordering (see comment at remote_authority_target_host_runtime.rs:1920)
+  - clamp computed sizes to tmux layout minimums; on clamp failure report read-back actuals instead of assuming success
+  - layout minimums and select-layout strings: derive from #{window_layout}; unit-test the layout-string rewrite against representative layouts (chrome present/hidden, extra splits)
+  - 2026-07-20 done: new geometry_coordinator module (tmux layout-string parser/dumper with vendored checksum, pure plan_coordination planner, 9 unit tests); coordinate_geometry_on_socket executor; RemoteTargetPtyGateway::coordinate_geometry replaces resize_pty on all mirror paths; geometry hooks (client-attached/detached/resized, window-layout-changed, appended via set-hook -a) feed __remote-authority-geometry-event through the existing pane-event socket with a 200ms debounce; hook-driven rounds report via send_target_geometry_changed
+  - empirical corrections folded in: hooks must target the pane's real tmux session (the published target session name is a logical id); control-mode clients report empty client_height (80x24 fallback); waitagent windows run window-size=manual, so the attached case explicitly resizes the window to the smallest attached client instead of relying on tmux snap (design doc amended)
+  - verified e2e on one host (isolated ports 17474/17475, production untouched): detached resize to 200x49 with main 167x47; real-client attach at 80x24 shrinks window and reports 47x22; attach at 237x60 keeps main 167x47 with 167x10 vpad + 36x58 hpad, sidebar pinned at x=205, footer at bottom; detach restores 200x49 and kills padding panes
+  - verified: cargo fmt --check, cargo check, geometry unit tests (9), suites remote_authority (46), tmux_backend (82), remote_main_slot (68), remote_node (96)

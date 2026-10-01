@@ -1,0 +1,33 @@
+id: task.feature-agent-status-recognition
+kind: task
+version: 1
+title: improve session state recognition accuracy in catalog and sidebar with agent plugin
+status: deferred
+priority: medium
+design_ref:
+  doc: deferred until after fullscreen history UX, before workspace snapshot
+  why:
+    - already has AgentDetector trait foundation (refactor-3); needs integration work
+    - deferred because plugin wiring depends on the agent plugin system, not yet designed
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - task_state accurately reflects the real tmux pane state (running, input, confirm, waiting, exit)
+  - availability (online/offline) correctly tracks reachable vs unreachable sessions
+  - state transitions are reported promptly, not delayed or missed
+  - sidebar badges match actual session behavior
+verification:
+  - cargo test
+  - manual: observe sidebar badges across local and remote session state transitions
+  - manual: verify exit, input-waiting, and running states are correct
+touched_paths:
+  - src/domain/session_catalog.rs
+  - src/domain/workspace.rs
+  - src/infra/published_target_store.rs
+  - src/runtime/remote_node/
+  - src/ui/sidebar.rs
+notes:
+  - Converted from bug to feature; status recognition requires agent plugin integration.
+  - AgentDetector trait already extracted (refactor-3); just needs to be wired into session catalog.
+  - Priority: after fullscreen page-up fix, before workspace snapshot.

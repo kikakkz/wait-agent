@@ -1,0 +1,37 @@
+id: task.cloud-async-remote-connect-dedup
+kind: task
+version: 1
+title: async remote-host connect and deduplicate local bash@local entries in sidebar
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  section: 16.2
+  why:
+    - Remote-host SSH bootstrap can block for seconds; it must not run on the single-writer StateEventLoop.
+    - The local ratatui node server also creates a local bash session, which was appearing as a duplicate bash@local entry alongside the server's own local session.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-outbound-dial-ingress-catalog-publish.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - ConnectRemoteHost runs on a background thread and reports success/failure via StateEvent::RemoteHostConnectedOutcome.
+  - StateEventLoop remains responsive during connection.
+  - Sidebar shows exactly one local bash session per ratatui node server; duplicate entries are removed.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test ratatui_node -- --test-threads=1
+  - manual: Ctrl+W to a remote host, verify UI remains responsive and sidebar has no duplicate bash@local
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/state_event.rs
+  - src/ratatui_node/runtime.rs
+  - src/ratatui_node/local_session.rs
+notes:
+  - Shipped in v0.1.30.
+  - The dedup fix also addressed the duplicate sidebar item problem reported during review.

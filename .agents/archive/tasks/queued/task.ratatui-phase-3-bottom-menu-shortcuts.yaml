@@ -1,0 +1,48 @@
+id: task.ratatui-phase-3-bottom-menu-shortcuts
+kind: task
+version: 1
+title: implement ratatui footer shortcuts (Ctrl-G sidebar, Ctrl-O history, Ctrl-E logs, Ctrl-S remote create)
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 2.2
+  why:
+    - The ratatui migration plan lists footer/sidebar/popup as the TUI chrome surface.
+    - Footer shortcuts are the user-facing command surface for the new single-process TUI.
+    - They must match the existing tmux-style command semantics (hide/show sidebar, history scrollback, error logs, remote session creation) without spawning sub-processes.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-phase-3-bottom-menu-shortcuts.yaml
+  reference: current
+depends_on:
+  - task.ratatui-phase-3-main-pane.done
+  - task.ratatui-phase-3-remote-main-pane.done
+done_criteria:
+  - Ctrl-G toggles sidebar visibility and updates the footer hint.
+  - Ctrl-O opens a scrollable history overlay for the active session (local and remote).
+  - Ctrl-E opens a bordered error-log popup that reads ERROR_LOG.entries().
+  - Ctrl-S creates a new remote session on the authority of the selected sidebar item.
+  - All overlays render as embedded popups over the dimmed main layout, not as sub-process windows.
+  - cargo check --release passes.
+  - cargo test --release -- ratatui passes.
+  - Manual socket-level verification of GET_HISTORY and CREATE_REMOTE_SESSION commands passes.
+verification:
+  - cargo check --release
+  - cargo test --release -- ratatui
+  - socket-level exercise of LIST_SESSIONS, GET_HISTORY, and CREATE_LOCAL_SESSION on a local server
+touched_paths:
+  - src/runtime/ratatui_node/mod.rs
+  - src/runtime/ratatui_node/snapshot.rs
+  - src/runtime/ratatui_node/state_event.rs
+  - src/runtime/ratatui_node/client.rs
+  - src/runtime/ratatui_node/local_session.rs
+  - src/runtime/ratatui_node/remote_session.rs
+  - src/runtime/ratatui_node/runtime.rs
+  - src/runtime/ratatui_node/state_loop.rs
+  - src/runtime/ratatui_client_runtime.rs
+  - src/runtime/ratatui_workspace_runtime.rs
+  - src/runtime/remote_host/connect_remote_host_pane_runtime.rs
+notes:
+  - History snapshot uses alacritty_terminal grid scrollback for local sessions and RemoteObserverRuntime scrollback for remote sessions.
+  - The error-log popup is client-side only and does not require a server command.
+  - CREATE_REMOTE_SESSION reuses the existing GrpcRemoteSessionCreationTransport and catalog convergence path.

@@ -1,0 +1,44 @@
+id: task.t5-06b
+kind: task
+version: 1
+title: generalize target identity and catalog records into a transport-agnostic model
+status: done
+priority: medium
+target_task_reference: task.t5-06b
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-06a.done
+linked_primitives:
+  - primitive.network-registry-scope
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the domain model can represent local and remote targets in one catalog shape without assuming tmux socket plus session strings as the only internal identity
+  - local selectors remain compatible where needed, but internal target identity, authority identity, and transport discrimination are explicit
+  - the model is ready for later registry and remote-routing slices without yet implementing transport I/O
+verification:
+  - cargo test
+  - targeted review of target identity, transport discrimination, and compatibility boundaries
+touched_paths:
+  - src/domain/session_catalog.rs
+  - src/domain
+  - .agents/tasks/queued/task.t5-06b.yaml
+  - docs/remote-session-foundation.md
+  - docs/protocol.md
+  - docs/agents-control-plane.md
+  - docs/execution-status-board.md
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+  - .agents/context/project.yaml
+  - .agents/index.yaml
+notes:
+  - This slice is model-only. It should not start transport routing, remote stream rendering, or server-console runtime work.
+  - The accepted first step is to make local tmux only one producer of a unified target model rather than the universal identity source.
+  - Protocol identifiers and attachment semantics may be clarified in docs as long as this slice does not start transport implementation.
+  - 2026-04-27 close: the shared target model, protocol identity contract, and compatibility selectors are now explicit enough for the registry-boundary slice to start without another schema rewrite.

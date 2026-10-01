@@ -1,0 +1,39 @@
+id: task.t5-08c4d3g
+kind: task
+version: 1
+title: introduce a lightweight raw PTY authority frame path
+status: superseded
+priority: high
+design_ref:
+  doc: docs/raw-pty-tunnel-design.md
+  why:
+    - raw PTY chunks still carry repeated control-plane identity and metadata on the hot path
+    - SSH parity requires minimizing allocation, cloning, framing, and flush overhead for each interactive byte burst
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d3f.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - mirror open negotiates stable route identity so raw PTY frames do not repeat full metadata unnecessarily
+  - raw input and output use compact binary frames on the authority transport
+  - hot-path string cloning and per-frame allocations are reduced or eliminated
+  - flush behavior preserves interactive first-byte latency without forcing a full metadata frame per character
+verification:
+  - cargo test remote_transport_codec
+  - cargo test remote_authority_transport_runtime
+  - manual: typing burst latency comparison against the previous raw PTY path
+touched_paths:
+  - src/infra/remote_transport_codec.rs
+  - src/runtime/remote_authority_transport_runtime.rs
+  - src/runtime/remote_authority_connection_runtime.rs
+  - src/runtime/remote_node_session_runtime.rs
+  - docs/protocol.md
+  - docs/raw-pty-tunnel-design.md
+  - .agents/tasks/backlog.yaml
+notes:
+  - Keep typed control-plane messages for open, close, resize, publication, and liveness.

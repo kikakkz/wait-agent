@@ -1,0 +1,43 @@
+id: task.t5-06c
+kind: task
+version: 1
+title: extract the target-registry service boundary and route chrome consumers through unified target records
+status: done
+priority: medium
+target_task_reference: task.t5-06c
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-06b.done
+linked_primitives:
+  - primitive.network-registry-scope
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one application-level target-registry service boundary exists and local tmux becomes its first producer rather than the only hard-coded catalog source
+  - current chrome and main-slot consumers can read unified target records without assuming every target is a tmux-local session
+  - main-slot activation keeps the local tmux path intact while making remote-target dispatch an explicit future branch rather than an implicit tmux fallback
+verification:
+  - cargo test
+  - targeted review of registry service ownership and current consumer boundaries
+touched_paths:
+  - src/application
+  - src/runtime
+  - src/ui
+  - .agents/tasks/queued/task.t5-06c.yaml
+  - docs/execution-status-board.md
+  - docs/agents-control-plane.md
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+  - .agents/context/project.yaml
+  - .agents/index.yaml
+notes:
+  - This slice still stops short of remote transport routing.
+  - It exists to make `task.t5-07` add remote input and resize routing on top of an already unified target-registry boundary.
+  - The first acceptable boundary is a dedicated target-registry service that exposes unified target records while keeping tmux attach or detach mechanics separate.
+  - 2026-04-27 close: the target-registry service boundary is now explicit, current chrome and main-slot consumers read unified target records through it, and remote activation is an explicit future branch rather than an implicit tmux fallback.

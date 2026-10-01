@@ -1,0 +1,21 @@
+id: primitive.blocker-record
+kind: primitive
+version: 1
+purpose: Record blockers in a way that keeps task routing and human status aligned.
+use_when:
+  - execution is blocked by missing validation, broken behavior, or external dependency
+  - a previously recorded blocker is resolved or downgraded
+inputs:
+  - .agents/tasks/current.yaml
+  - .agents/state/open-blockers.yaml
+  - docs/execution-status-board.md
+steps:
+  - capture a stable blocker id and concise summary
+  - record which task ids are affected
+  - add a mitigation or next observation step
+  - remove or update stale blockers when conditions change
+verification:
+  - blocker state in .agents is enough to explain why work stopped or was rerouted
+failure_modes:
+  - blockers live only in chat and never enter state
+  - stale blockers remain after the task is unblocked

@@ -1,0 +1,39 @@
+id: task.ratatui-phase-1-footer
+kind: task
+version: 1
+title: render real footer status bar with ratatui widget
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 2
+  why:
+    - footer is the first chrome surface where placeholder data can be replaced with real session state
+    - establishes the snapshot protocol extension that sidebar and main pane will reuse
+    - proves node server can maintain state and stream it to the TUI client
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-phase-1-footer.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-phase-0-skeleton.done
+done_criteria:
+  - node server maintains a minimal session catalog (current session plus sibling sessions)
+  - snapshot protocol carries structured footer state (active session, session list, connection status)
+  - ratatui client renders footer with real state using Spans/Tabs instead of placeholder text
+  - footer shows current session highlighted, other sessions, and listen/connect/remote indicators
+  - footer updates when sessions are created, attached, detached, or stopped
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo build --bin waitagent succeeds
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo build --bin waitagent
+  - manual test: create multiple sessions and verify footer reflects active session and session list
+touched_paths:
+  - src/runtime/ratatui_node_runtime.rs
+  - src/runtime/ratatui_client_runtime.rs
+  - src/runtime/ratatui_workspace_runtime.rs
+notes:
+  - Keep the session catalog minimal for Phase 1; full target lifecycle and state recognition follow in Phase 2/3.
+  - The existing tmux path footer/menu is a menu popup; the ratatui footer is a persistent status bar at the bottom of the TUI.

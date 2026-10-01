@@ -1,0 +1,43 @@
+id: task.refactor-5
+kind: task
+version: 1
+title: split oversized source files to stay at or below 1000 lines each
+status: done
+priority: high
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - constraint requires every .rs file to stay at or below 1000 lines
+    - 6 files exceed 1000 lines even after excluding test code
+    - must land after clustering (refactor-4) so split files go into correct sub-directories
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.refactor-4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - all .rs files are at or below 1000 lines (including test code)
+  - files with large #[cfg(test)] modules have tests moved to companion _test.rs or tests/ files
+  - remote_target_publication_runtime.rs (2040 production lines) is split by responsibility: publication server, publication agent, publication sender, publication owner, command codec, store management
+  - tmux_backend.rs process inspection code (read_process_stat, read_process_children, foreground_process_id_for_shell) is extracted to a dedicated module
+  - terminal.rs is split if needed (currently 1404 production lines)
+  - cli.rs is split if needed (currently 1240 production lines)
+  - cargo build and cargo test pass with zero regressions
+  - no behavioral change
+verification:
+  - cargo build --release
+  - cargo test
+  - wc -l src/**/*.rs src/runtime/**/*.rs | sort -rn | head -20 (verify all under 1000)
+touched_paths:
+  - src/runtime/remote_target_publication_runtime.rs (split into multiple files)
+  - src/infra/tmux_backend.rs (extract proc inspection)
+  - src/terminal.rs (if split needed)
+  - src/cli.rs (if split needed)
+  - all files with large test modules
+notes:
+  - Split by responsibility, not arbitrarily. Each resulting file should have a single clear purpose.
+  - Test modules can go to companion files (e.g., remote_target_publication_runtime_test.rs) or integration tests.
+  - Preserve all existing public API. Only internal reorganization.

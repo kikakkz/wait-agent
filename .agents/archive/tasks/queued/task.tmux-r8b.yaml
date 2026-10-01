@@ -1,0 +1,36 @@
+id: task.tmux-r8b
+kind: task
+version: 1
+title: align local session creation and attach semantics with tmux-style multi-client behavior
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r8a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the meaning of local `create session`, `attach`, `detach`, and client exit is explicit and consistent with tmux-style multi-client semantics
+  - client detach or terminal exit only removes the current client; it does not implicitly destroy other clients or the target backend
+  - attaching to an existing backend is treated as tmux-style attach rather than ownership transfer
+  - the implementation and task or doc state no longer rely on the temporary `detach-client -E waitagent` behavior as an implicit product definition without naming its semantics
+verification:
+  - cargo test
+  - manual: multi-client attach and detach behavior in a real terminal
+  - manual: create-session and attach flows match the documented tmux-style semantics
+touched_paths:
+  - src/application
+  - src/runtime
+  - src/domain
+  - docs/tmux-first-workspace-plan.md
+  - docs/architecture.md
+  - .agents/tasks/queued/task.tmux-r8b.yaml
+notes:
+  - This slice is about local session semantics only. Remote-session transport and server interact flows remain future work.
+  - The user explicitly chose tmux-style client semantics: client exit or detach removes only the current client, not all clients attached to the same backend.
+  - Superseded on 2026-04-23 after the local runtime plan was redirected to an event-driven rewrite queue.

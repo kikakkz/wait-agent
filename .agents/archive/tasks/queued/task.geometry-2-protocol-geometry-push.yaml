@@ -1,0 +1,37 @@
+id: task.geometry-2-protocol-geometry-push
+kind: task
+version: 1
+title: add authority-to-server target geometry change push to the control plane
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-geometry-coordination-design.md
+  why:
+    - the server must learn unsolicited target-pane geometry changes (local user attach/detach/resize, layout changes) to keep both panes at the negotiated T
+    - the message shape must land before the authority coordinator and the main-slot resync can consume it
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.geometry-1-truthful-geometry.done
+done_criteria:
+  - proto/waitagent/remote/v1 carries a backward-compatible target geometry message (cols, rows, and the identity fields used by existing control-plane payloads)
+  - src/infra/remote_protocol.rs mirrors the message type and codec coverage exists for both envelope forms used by the authority transport
+  - geometry push frames route to the owning remote-main-slot session, following the same target_id/session_id validation as RawPtyOutput
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test remote_protocol passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test remote_protocol -- --test-threads=1
+  - cargo test remote_authority -- --test-threads=1
+touched_paths:
+  - proto/waitagent/remote/v1/node_session.proto
+  - src/infra/remote_protocol.rs
+  - src/infra/remote_transport_codec.rs
+  - src/runtime/remote_authority/remote_authority_connection_runtime.rs
+notes:
+  - follow the routing-validation lesson from issues #15/#17: validate session_id/target_id before accepting a geometry frame
+  - 2026-07-19 done: new TargetGeometryChanged message end to end — proto oneof 62, ControlPlanePayload variant with message_type target_geometry_changed, authority transport codec tag 21, send_target_geometry_changed helper with wire diag logging, owner_helpers forwarding arms, map_outbound_grpc_envelope arm, ingress server bridge arm, and remote_node_ingress_runtime bridge arm; pane runtime validates sender/session/target like RawPtyOutput and records remote_reported_geometry (consumed by geometry-4)
+  - verified: cargo fmt --check, cargo check, codec round-trip test control_plane_envelope_round_trips_target_geometry_changed, full gRPC loopback leg in grpc_session_runtime_bridges_authority_and_publication_through_ingress_boundary (send_payload TargetGeometryChanged -> proto -> ingress bridge -> authority envelope), suites: remote_transport_codec (13), remote_node (96), remote_authority (37), remote_main_slot (68)

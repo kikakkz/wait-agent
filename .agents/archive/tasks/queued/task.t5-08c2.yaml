@@ -1,0 +1,49 @@
+id: task.t5-08c2
+kind: task
+version: 1
+title: synchronize connected remote node sessions into the shared catalog
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - the accepted architecture is now explicitly session-centric: a connected node owns many sessions and the shared catalog must project those sessions directly
+    - later routing and visible-render work depend on this correction because sidebar and activation semantics must stop treating publication as the product model
+target_task_reference: task.t5-08c
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - a connected remote node contributes synchronized remote session records into the shared catalog immediately, including its default session before any manual open occurs
+  - remote session create, update, and exit deltas update that shared catalog by `node_id + session_id` rather than by publication-centric discovered-target ownership
+  - disconnect projects synchronized remote sessions offline instead of silently removing them from session-driven surfaces
+  - `waitagent ls` keeps local-backend semantics and does not become a remote-node or remote-session listing command
+verification:
+  - cargo test
+  - targeted review of node-owned remote session synchronization and shared-catalog projection
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/infra
+  - docs/remote-node-connection-architecture.md
+  - docs/protocol.md
+  - docs/remote-session-foundation.md
+  - docs/remote-network-completion-plan.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c2.yaml
+  - .agents/tasks/queued/task.t5-08c3.yaml
+  - .agents/tasks/queued/task.t5-08c4.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice corrects the product model before later routing work lands.
+  - Publication messages may remain as transport-level compatibility events for now, but they are no longer the primary product abstraction.

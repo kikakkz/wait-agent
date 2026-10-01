@@ -1,0 +1,38 @@
+id: task.ratatui-agent-sessions-hotkey-phase4-claude
+kind: task
+version: 1
+title: implement Claude session provider
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-agent-sessions-hotkey-design.md
+  section: 4.3, 7.4
+  why:
+    - Claude has no official list CLI, so parsing local `history.jsonl` and `projects/<project>/chat_<uuid>.jsonl` is the only viable local approach.
+    - The community JSON Schema for Claude Code v2.1.1 gives a stable target for the metadata fields we need.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-agent-sessions-hotkey-phase4-claude.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-agent-sessions-hotkey-phase3-codex.done
+done_criteria:
+  - `ClaudeSessionProvider` exists in `src/domain/agent_session_claude.rs`.
+  - Resolves `~/.claude` (Linux/macOS) and `%USERPROFILE%\.claude` (Windows).
+  - Parses `~/.claude/history.jsonl` with fields `display`, `timestamp` (milliseconds), `project`, `sessionId`.
+  - Falls back to scanning `~/.claude/projects/<project>/chat_<uuid>.jsonl` and reading the first `UserMessage` for `sessionId`, `cwd`, `slug`, `timestamp`.
+  - `resume_command` returns `claude -r <sessionId>`.
+  - Unit tests with temporary fixture directories pass.
+  - `cargo fmt --check` and `cargo clippy -- -D warnings` pass.
+  - `cargo test --release ratatui session_sync` passes.
+verification:
+  - cargo fmt --check
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - unit tests for Claude provider fixture parsing
+touched_paths:
+  - src/domain/agent_session_claude.rs
+  - src/domain/agent_session.rs
+notes:
+  - Do not parse Claude Desktop IndexedDB or encrypted app internals; rely only on the documented local JSONL files.
+  - `timestamp` is in milliseconds, unlike Codex seconds; normalize to `DateTime<Utc>` consistently.
+  - `display` may be truncated; use it as title fallback only.

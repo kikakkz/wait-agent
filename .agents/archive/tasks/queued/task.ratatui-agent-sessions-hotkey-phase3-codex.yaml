@@ -1,0 +1,38 @@
+id: task.ratatui-agent-sessions-hotkey-phase3-codex
+kind: task
+version: 1
+title: implement Codex session provider
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-agent-sessions-hotkey-design.md
+  section: 4.2, 7.3
+  why:
+    - Codex exposes an official `HistoryEntry` schema in its Rust source, so the provider can be implemented against a known format.
+    - Codex history may contain multiple rows for the same session_id after resumes; the provider must deduplicate and pick the latest timestamp.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-agent-sessions-hotkey-phase3-codex.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-agent-sessions-hotkey-phase2-kimi.done
+done_criteria:
+  - `CodexSessionProvider` exists in `src/domain/agent_session_codex.rs`.
+  - Resolves `CODEX_HOME` -> `~/.codex`.
+  - Parses `~/.codex/history.jsonl` with fields `session_id`, `ts` (u64 seconds), `text`.
+  - Dedupes rows by `session_id` and keeps the latest `ts`.
+  - Falls back to scanning `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` if `history.jsonl` is missing.
+  - `resume_command` returns `codex resume <session_id>`.
+  - Unit tests with temporary fixture directories pass.
+  - `cargo fmt --check` and `cargo clippy -- -D warnings` pass.
+  - `cargo test --release ratatui session_sync` passes.
+verification:
+  - cargo fmt --check
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - unit tests for Codex provider fixture parsing
+touched_paths:
+  - src/domain/agent_session_codex.rs
+  - src/domain/agent_session.rs
+notes:
+  - Do not parse Codex `state_5.sqlite` or Desktop-only `orbit.db`; stay with the documented JSONL surface.
+  - Keep defensive parsing for timestamp and text fields even though the current schema is known.

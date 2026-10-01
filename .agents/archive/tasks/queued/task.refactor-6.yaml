@@ -1,0 +1,39 @@
+id: task.refactor-6
+kind: task
+version: 1
+title: refine fullscreen history UX so users can browse scrollback naturally
+status: ready
+priority: medium
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - current fullscreen enters tmux copy-mode at the bottom of scrollback, users must manually PgUp
+    - exiting fullscreen cancels copy-mode, losing scroll position
+    - the feature works but the UX does not surface history browsing as a natural workflow
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.refactor-5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - fullscreen entry positions the viewport so recent history is visible (not just the current bottom line)
+  - exiting fullscreen preserves scroll position or provides a clear re-entry path
+  - the footer keybinding hints are updated to reflect the actual workflow
+  - scrollback buffer (100000 lines) remains intact and accessible
+  - no regression in non-fullscreen behavior
+verification:
+  - cargo test
+  - manual: enter fullscreen, verify history is browsable with PgUp/PgDn
+  - manual: exit fullscreen, verify return to normal mode is clean
+  - manual: verify non-fullscreen sidebar/footer behavior is unchanged
+touched_paths:
+  - src/runtime/native_pane_fullscreen_runtime.rs
+  - src/ui/footer.rs
+  - src/application/control_service.rs
+notes:
+  - The tmux zoom (resize-pane -Z) preserves scrollback. The issue is UX, not tmux capability.
+  - Consider auto-entering copy-mode with a scroll-up offset, or providing a dedicated history keybinding.
+  - Do not reintroduce custom fullscreen rendering. Stay on tmux-native zoom + copy-mode.

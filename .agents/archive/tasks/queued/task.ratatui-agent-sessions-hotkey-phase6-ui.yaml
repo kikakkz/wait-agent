@@ -1,0 +1,46 @@
+id: task.ratatui-agent-sessions-hotkey-phase6-ui
+kind: task
+version: 1
+title: implement hotkey popup for local and remote peer agent sessions
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-agent-sessions-hotkey-design.md
+  section: 8
+  why:
+    - The provider layer (phases 2-4) and remote protocol (phase 5) need a user-facing surface: a hotkey-driven popup in the ratatui TUI.
+    - Must integrate with the existing focus/overlay model and support both local and remote peer session sources.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-agent-sessions-hotkey-phase6-ui.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-agent-sessions-hotkey-phase5-protocol.done
+done_criteria:
+  - A default hotkey (e.g., `Ctrl+H`) opens the session list popup when `Focus::Main` is active and no other overlay is open.
+  - The popup obtains the current `target_id` and agent name from the active session.
+  - For local targets, the popup queries the local `AgentSessionRegistry` directly.
+  - For remote peer targets, the popup sends `ClientCommand::ListAgentSessions { target_id }` and awaits the response.
+  - The popup renders session title, working directory, and relative update time.
+  - Remote session rows are visually marked (e.g., `[remote]` prefix) so the user knows the list source.
+  - `↑/↓` navigates, `Enter` selects, `Esc` closes.
+  - On selection, the provider's `resume_command` is injected into the active pane's input and submitted.
+  - Non-agent sessions (e.g., plain bash) show a clear "no sessions available" message.
+  - Read errors are shown in the popup without crashing the TUI.
+  - `cargo fmt --check` and `cargo clippy -- -D warnings` pass.
+  - `cargo test --release ratatui session_sync` passes.
+verification:
+  - cargo fmt --check
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - manual: trigger popup in local bash/kimi/codex/claude sessions
+  - manual: trigger popup in remote peer kimi/codex/claude sessions (two-node setup)
+touched_paths:
+  - src/ratatui_node/client_runtime.rs
+  - src/ratatui_node/client.rs
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/state_event.rs
+  - src/ratatui_node/ui/
+notes:
+  - Reuse existing popup/overlay styling for consistency with error-log and history overlays.
+  - The command injection should go through the same path as keyboard input, not open a new session.
+  - Consider whether to append a newline automatically or let the user press Enter; document the chosen behavior.

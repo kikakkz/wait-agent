@@ -1,0 +1,40 @@
+id: task.cloud-outbound-dial-operator-auth
+kind: task
+version: 1
+title: implement outbound-dial remote host connection with operator public key auth and TLS pin
+status: done
+priority: high
+design_ref:
+  doc: docs/reconnection-plan.md
+  section: 1, 3
+  why:
+    - Outbound-dial mode requires the control host to authenticate the remote daemon via TLS pin and the remote daemon to authenticate the control host via an operator public key challenge.
+    - Reusing a compatible daemon must not regenerate credentials, otherwise the stored TLS pin becomes stale.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Control host can SSH-bootstrap a remote waitagent in outbound-dial mode.
+  - Remote daemon generates a node certificate; control host stores the SPKI-derived TLS pin in the saved profile.
+  - Operator public key is installed on the remote host under ~/.waitagent/authorized_operators/.
+  - Reconnect uses the stored TLS pin and operator private key path without re-running credential generation.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test ssh_remote_host_bootstrapper -- --test-threads=1
+  - cargo test remote_host_connect_runtime -- --test-threads=1
+  - manual: connect to a LAN host via outbound dial, verify profile stores tls_pin_sha256
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/host/ssh/ssh_remote_host_bootstrapper.rs
+  - src/host/ssh/remote_host_connect_runtime.rs
+  - src/host/ssh/remote_host_history_store.rs
+  - src/infra/operator_auth.rs
+  - Cargo.toml
+  - Cargo.lock
+notes:
+  - Shipped in v0.1.26.
+  - The TLS pin is derived from the remote daemon's certificate SPKI, so it is stable as long as the daemon keeps the same cert.

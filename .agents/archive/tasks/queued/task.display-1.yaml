@@ -1,0 +1,35 @@
+id: task.display-1
+kind: task
+version: 1
+title: establish an explicit dashboard vs native-fullscreen display boundary
+status: superseded
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - WaitAgent names two primary interactive display states with clear ownership boundaries: `dashboard` for framed multi-session chrome and `native fullscreen` for direct terminal passthrough of the focused session
+  - entering native fullscreen no longer depends on terminal mouse reporting, gutter-only drag logic, or dashboard viewport scrolling semantics
+  - the attach path no longer unconditionally forces mouse mode on the real user terminal, so remote terminals such as Xshell and PuTTY are not globally pushed into application-owned mouse capture just to make dashboard scrolling work
+  - focused-session display control flow chooses one of two explicit paths at a time: framed dashboard rendering or native fullscreen passthrough, not a hybrid path that mixes the two ownership models
+  - the mode boundary, ownership rules, and why dashboard scrolling was retired are documented in task notes or succinct code comments where the control flow would otherwise remain ambiguous
+verification:
+  - cargo test
+  - manual: in a desktop terminal, attach or resume into the workspace and confirm the dashboard remains usable without forcing terminal-wide mouse capture
+  - manual: in a remote terminal client such as Xshell or PuTTY, attach or resume into the workspace and confirm WaitAgent does not globally steal normal selection behavior merely to render the dashboard
+  - targeted review of `src/app.rs`, `src/lifecycle.rs`, and `src/terminal.rs` to confirm the new display boundary is explicit
+touched_paths:
+  - src/app.rs
+  - src/lifecycle.rs
+  - src/terminal.rs
+  - .agents/tasks/queued/task.display-1.yaml
+notes:
+  - This slice supersedes the previous scrollbar-first direction as the architectural entry point for the new fullscreen product model.
+  - Success is defined by explicit ownership and attach-path correctness first, not by ad hoc escape-sequence filtering or by preserving the gutter-scroll prototype.
+  - Code baseline cleanup is complete: the dashboard scrollbar path, mouse parsing, and attach-side forced mouse mode have been removed.
+  - This task is now historical only because the entire custom dashboard versus native-fullscreen direction has been replaced by the tmux-first workspace plan.

@@ -1,0 +1,38 @@
+id: task.relay-5-stream-backpressure-fair-scheduling
+kind: task
+version: 1
+title: add per-stream window backpressure and fair scheduling to the relay mux
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/relay-design.md
+  section: 协议分层, 容量评估与准入控制
+  why:
+    - Phase 1 task split item 5 every stream needs independent backpressure
+      and fair scheduling so one busy stream cannot starve the rest of a
+      shared connection.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.relay-1-mux-frame-layer-and-peer-connection-seam.done
+  - task.relay-4-node-relay-client.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Window/ack frames give every stream independent backpressure; senders
+    honor per-stream windows.
+  - Relay schedules fairly across streams on a shared connection; a single
+    busy stream cannot starve others.
+  - Head-of-line behavior verified under concurrent multi-session load.
+verification:
+  - cargo test --release ratatui session_sync
+  - cargo clippy -- -D warnings
+  - loom model test if any lock-free path is touched
+  - docker e2e concurrent sessions through one relay connection
+touched_paths:
+  - src/infra
+notes:
+  - Lock order must be documented before adding locks (AGENTS.md); never hold
+    a lock while broadcasting or doing I/O.

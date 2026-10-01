@@ -1,0 +1,30 @@
+id: task.tmux-4
+kind: task
+version: 1
+title: implement tmux-native fullscreen zoom and fullscreen-only scroll handling
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: historical
+depends_on:
+  - task.tmux-3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - `Ctrl-O` or the equivalent workspace command toggles tmux pane zoom for the main pane instead of entering the retired custom fullscreen path
+  - fullscreen scrollback works through tmux-native pane history or copy-mode behavior
+  - entering and leaving fullscreen does not repaint fake sidebar blanks or rely on replaying a previously narrow viewport
+verification:
+  - cargo test
+  - manual: use fullscreen on shell and Codex sessions, scroll history, and return to normal layout without redraw artifacts
+touched_paths:
+  - src/tmux.rs
+  - src/lifecycle.rs
+  - src/app.rs
+  - .agents/tasks/queued/task.tmux-4.yaml
+notes:
+  - This slice is superseded as part of the original queue reshuffle; the accepted fullscreen direction still stands and is now represented in the rewrite queue.

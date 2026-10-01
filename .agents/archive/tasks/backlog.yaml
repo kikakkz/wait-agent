@@ -1,0 +1,923 @@
+kind: task_backlog
+version: 1
+active:
+  - id: task.tmux-0
+    title: establish the new modular runtime architecture, unified entry model, and migration skeleton
+    status: done
+  - id: task.tmux-1
+    title: build the tmux backend primitives and workspace-instance model
+    status: superseded
+  - id: task.tmux-r1
+    title: re-baseline the tmux-first migration around a clean rewrite boundary
+    status: done
+  - id: task.tmux-r2
+    title: implement the real vendored tmux control adapter behind the new runtime interfaces
+    status: done
+  - id: task.tmux-r3
+    title: build a new workspace lifecycle stack outside the legacy lifecycle module
+    status: done
+  - id: task.tmux-style-1
+    title: analyze the legacy sidebar and menu style contract before tmux-pane restyling
+    status: done
+  - id: task.ratatui-replace-tmux
+    title: replace tmux with ratatui as the local workspace UI substrate
+    status: done
+  - id: task.ratatui-phase-0-skeleton
+    title: add --ratatui flag and tmux-style multi-session server/client skeleton with attach/detach/ls/stop
+    status: done
+next:
+  - id: task.event-r2a
+    title: replace cross-session attach switching with fixed-chrome main-slot target activation
+    status: done
+  - id: task.event-r3
+    title: move attach, resize, and scheduler control onto explicit runtime events
+    status: done
+  - id: task.event-r4
+    title: route the default local path through the new event-driven stack and isolate polling history
+    status: done
+  - id: task.tmux-r4
+    title: cut workspace-facing commands over to tmux-native targets and bootstrap aliases
+    status: done
+  - id: task.tmux-r5
+    title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
+    status: done
+  - id: task.tmux-r6
+    title: align fullscreen, scrollback, copy-mode, and detach controls with tmux-native behavior
+    status: done
+  - id: task.tmux-r7
+    title: layer waitagent session management and menus on top of tmux-native switching
+    status: done
+  - id: task.tmux-r7a
+    title: keep the waitagent menu visible while the main session is zoomed fullscreen
+    status: done
+  - id: task.tmux-r8
+    title: remove transitional daemon and composed-display paths and complete shell-plus-codex acceptance
+    status: superseded
+  - id: task.tmux-r8a
+    title: restore the legacy waitagent chrome contract on tmux-owned panes and menus
+    status: superseded
+  - id: task.tmux-r8b
+    title: align local session creation and attach semantics with tmux-style multi-client behavior
+    status: superseded
+  - id: task.tmux-r8c
+    title: remove transitional daemon and composed-display paths and complete final tmux-first acceptance
+    status: superseded
+  - id: task.event-r1
+    title: establish the new event-driven local runtime architecture and event contract
+    status: done
+  - id: task.event-r2
+    title: implement event-driven tmux chrome, session catalog, and pane update flows
+    status: done
+  - id: task.tmux-2
+    title: route workspace entry and attach lifecycle through tmux-backed instances
+    status: superseded
+  - id: task.tmux-3
+    title: implement persistent sidebar and footer panes as tmux-native UI panes
+    status: superseded
+  - id: task.tmux-4
+    title: implement tmux-native fullscreen zoom and fullscreen-only scroll handling
+    status: superseded
+  - id: task.tmux-5
+    title: move session switching and left-right focus semantics to tmux-native control
+    status: superseded
+  - id: task.tmux-6
+    title: remove the obsolete custom fullscreen and live-surface path and validate shell plus Codex behavior
+    status: superseded
+  - id: task.display-2a
+    title: establish a replayable normal-screen transcript model for native fullscreen history
+    status: superseded
+  - id: task.display-2b
+    title: switch native fullscreen history seeding and resize redraw to transcript replay
+    status: superseded
+  - id: task.display-2
+    title: implement user-facing entry into native fullscreen and a reliable return shortcut
+    status: superseded
+  - id: task.display-2c
+    title: validate native fullscreen history handoff across shell and Codex-style sessions
+    status: superseded
+  - id: task.lifecycle-1
+    title: wrap the current workspace runtime in a daemon-owned PTY envelope
+    status: superseded
+  - id: task.lifecycle-2
+    title: add workspace-local daemon discovery and single-client attach
+    status: superseded
+  - id: task.lifecycle-3
+    title: implement detach, reattach, and resize forwarding for the daemon envelope
+    status: superseded
+  - id: task.lifecycle-4
+    title: validate tmux-style persistence without changing interaction or rendering behavior
+    status: superseded
+  - id: task.lifecycle-5
+    title: support tmux-style attach workflows with multi-client attach and daemon listing
+    status: superseded
+  - id: task.sidebar-1
+    title: finalize the v1 right-side session sidebar contract and split the rollout into implementation slices
+    status: done
+  - id: task.sidebar-2
+    title: implement sidebar focus mode with unified left-right navigation
+    status: superseded
+  - id: task.sidebar-3
+    title: render one-line sidebar session rows with agent labels and wait-state badges
+    status: superseded
+  - id: task.sidebar-4
+    title: polish the default-visible sidebar detail area and enter-to-switch behavior
+    status: superseded
+  - id: task.t5-06
+    title: implement the aggregate transport-agnostic target registry
+    status: superseded
+  - id: task.t5-06a
+    title: lock the remote-session foundation docs and split the registry implementation queue
+    status: done
+  - id: task.t5-06b
+    title: generalize target identity and catalog records into a transport-agnostic model
+    status: done
+  - id: task.t5-06c
+    title: extract the target-registry service boundary and route chrome consumers through unified target records
+    status: done
+  - id: task.scroll-1
+    title: implement tmux-style pane history with mouse-draggable gutter scrolling
+    status: superseded
+  - id: task.t5-07
+    title: implement remote target input routing and clean remote resize boundaries through the server control plane
+    status: done
+  - id: task.t6-01
+    title: implement the server-side workspace console as a target-activation surface
+    status: superseded
+  - id: task.t6-01a
+    title: extract a unified server-console interaction seam for local and remote targets
+    status: done
+  - id: task.t6-01b
+    title: capture real submit and manual-switch signals through the unified server-console interaction seam
+    status: done
+  - id: task.t6-01c
+    title: track waiting transitions and build an honest server-console FIFO waiting queue
+    status: done
+  - id: task.t6-01d
+    title: cancelled auto-switch slice superseded by manual-only attention policy
+    status: superseded
+  - id: task.t6-01e
+    title: retire server-side auto-switch planning and lock server-console on manual-only attention cues
+    status: done
+  - id: task.t5-08
+    title: design the remote node connection architecture for efficient multi-connection ingress and ownership
+    status: done
+  - id: task.t5-08a1
+    title: design the gRPC proto and RPC contract for remote node sessions
+    status: done
+  - id: task.t5-08a2
+    title: design node trust, dialing policy, and canonical connection ownership
+    status: done
+  - id: task.t5-08a3
+    title: design remote render bootstrap, replay, and late-subscriber recovery
+    status: done
+  - id: task.t5-08a
+    title: introduce a real cross-host authority ingress source on the accepted connection boundary
+    status: done
+  - id: task.t5-08b
+    title: centralize live node-session ownership and remote registration lifecycle
+    status: done
+  - id: task.t5-08c
+    title: original remote phase-completion umbrella superseded by bounded session-centric slices
+    status: superseded
+  - id: task.t5-08c1
+    title: landed node-level remote target discovery slice later superseded by session-centric catalog synchronization
+    status: superseded
+  - id: task.t5-08c2
+    title: synchronize connected remote node sessions into the shared catalog
+    status: done
+  - id: task.t5-08c3
+    title: route remote control-plane traffic by session and demote attachment to observer scope
+    status: done
+  - id: task.t5-08c4
+    title: original remote sidebar plus validation umbrella superseded by backend-scoped runtime-owner slices
+    status: superseded
+  - id: task.t5-08c4a
+    title: lock the backend-scoped remote runtime-owner design and realign the execution queue
+    status: done
+  - id: task.t5-08c4b
+    title: introduce the backend-scoped remote owner sidecar and local IPC snapshot boundary
+    status: superseded
+  - id: task.t5-08c4c
+    title: route shared-catalog and sidebar remote state through the live owner snapshot and retire file-backed remote sidebar sources
+    status: superseded
+  - id: task.t5-08c4d
+    title: original runtime-only validation umbrella superseded by bounded export-boundary and validation slices
+    status: superseded
+  - id: task.t5-08c4d1
+    title: correct backend-scoped local session export semantics on the runtime-only remote path
+    status: done
+  - id: task.t5-08c4d2
+    title: close detach or reattach continuity and owner restart semantics on the corrected runtime-only path
+    status: done
+  - id: task.t5-08c4d3
+    title: original cross-host validation umbrella superseded by bounded remote live-mirror slices
+    status: superseded
+  - id: task.t5-08c4d3a
+    title: freeze the session-scoped remote live-mirror design and split the remaining phase-2 slice
+    status: done
+  - id: task.t5-08c4d3b
+    title: implement explicit remote mirror open or close protocol messages and server-side session-route ownership
+    status: done
+  - id: task.t5-08c4d3c
+    title: implement PTY-owner session mirror lifecycle and reuse on the connected client node
+    status: done
+  - id: task.t5-08c4d3d
+    title: bind bootstrap replay and live remote output into visible parity and close cross-host acceptance
+    status: done
+  - id: task.remote-exit-latency-1
+    title: add acknowledged local catalog notify to the remote session sync event loop
+    status: done
+  - id: task.remote-exit-latency-2
+    title: wire WaitAgent-managed target lifecycle exits to session sync notify
+    status: done
+  - id: task.remote-exit-latency-3
+    title: replace TargetExited hot-path tmux socket scan with live workspace socket registry
+    status: done
+  - id: task.remote-exit-latency-4
+    title: validate remote session exit latency end to end and clean temporary diagnostics
+    status: done
+  - id: task.t5-08c4d3e
+    title: decouple local raw PTY input from synchronous transport writes
+    status: superseded
+  - id: task.t5-08c4d3f
+    title: replace FIFO and output-pump bridging with direct remote PTY ownership
+    status: superseded
+  - id: task.t5-08c4d3g
+    title: introduce a lightweight raw PTY authority frame path
+    status: superseded
+  - id: task.t5-08c4d3h
+    title: make authority bridge discovery event-driven
+    status: done
+  - id: task.t5-08c4d3i
+    title: reduce remote attach bootstrap capture cost
+    status: superseded
+  - id: task.t3-07
+    title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
+    status: cancelled
+  - id: task.architecture-1
+    title: refactor the runtime and module architecture for clearer boundaries and cleaner code
+    status: superseded
+  - id: task.display-3
+    title: remove the obsolete dashboard-scroll experiment and converge restore and resize behavior
+    status: superseded
+  - id: task.runtime-1
+    title: extract a shared console runtime loop for workspace and server surfaces
+    status: superseded
+  - id: task.terminal-1
+    title: decide and document the terminal-engine coverage strategy for reliable TUI switching
+    status: superseded
+  - id: task.ux-1
+    title: sync sidebar item status with main pane output so sidebar reflects real pane state
+    status: superseded
+  - id: task.ux-2
+    title: show last user input line at top of main pane area like VS Code
+    status: cancelled
+  - id: task.feature-agent-status-recognition
+    title: improve session state recognition accuracy in catalog and sidebar with agent plugin
+    status: deferred
+  - id: task.ux-3
+    title: implement workspace snapshot persistence and auto-load on startup
+    status: deferred
+  - id: task.ux-4
+    title: embed web UI bundle inside waitagent binary
+    status: cancelled
+  - id: task.refactor-1
+    title: replace custom base64 implementation with the mature base64 crate
+    status: done
+  - id: task.refactor-2
+    title: clean up dead code annotations and unused API surface
+    status: done
+  - id: task.refactor-3
+    title: extract semantic agent detection into a plugin-based AgentDetector trait
+    status: done
+  - id: task.refactor-4
+    title: cluster runtime modules into sub-directories by concept
+    status: done
+  - id: task.refactor-5
+    title: split oversized source files to stay at or below 1000 lines each
+    status: done
+  - id: task.refactor-6
+    title: refine fullscreen history UX so users can browse scrollback naturally
+    status: done
+  - id: task.refactor-7
+    title: decouple remote publication and session sync from direct tmux backend coupling
+    status: done
+  - id: task.bug-sidebar-switch-lag
+    title: fix severe lag on first sidebar switch while main pane is running
+    status: done
+  - id: task.bug-local-session-freeze-after-connect
+    title: fix local session switching freeze after connecting to remote server
+    status: done
+  - id: task.bug-multi-remote-switch-lag
+    title: fix severe lag switching to second remote session after the first
+    status: done
+  - id: task.bug-remote-session-lost-after-idle
+    title: fix remote session content not showing in main pane and sidebar becoming unswitchable after idling
+    status: wontfix
+  - id: task.bug-fullscreen-scrollback-truncated
+    title: >
+      全屏后 scrollback 可看到历史，但未全屏时被换行的行全屏后依然保持折行，
+      需要修复全屏后的行重排
+    status: cancelled
+  - id: task.bug-sidebar-lag-4-remote-sessions
+    title: >
+      连接 4 个 remote session（每个都在跑 claude/codex）时，sidebar item 切换卡顿。
+      可能原因：多路并发输出导致 PaneActivityWatcher + capture-pane 刷新过载。
+    status: wontfix
+  - id: task.bug-display-corruption-multi-remote
+    title: >
+      多 remote session 下屏幕显示异常：主 pane 出现方块字符，codex/claude 菜单错乱，
+      claude 输出内容错乱，codex 稍好，sidebar 偶尔也乱（切到 sidebar 再切回可恢复）。
+      可能原因：escape sequence 被 capture-pane 截断，或多路 PTY 输出交错导致终端状态机不同步。
+    status: wontfix
+  - id: task.feature-remote-session-creation-from-sidebar
+    title: >
+      original umbrella for remote session creation from sidebar, superseded by
+      explicit local/remote/connect workflow slices
+    status: superseded
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      status: accepted
+      reason: >
+        The accepted design splits this umbrella into bounded Ctrl-N, Ctrl-W,
+        and Ctrl-S implementation slices with explicit runtime and protocol
+        ownership.
+  - id: task.remote-create-1-ui-keys
+    title: keep local new-session semantics and add explicit remote creation keys
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3, 5, 6, 14
+      status: accepted
+      reason: >
+        First implementation slice locks Ctrl-N local-only behavior, hides
+        Prefix-c from primary UI copy, and adds explicit Ctrl-W/Ctrl-S command
+        entrypoints without changing remote behavior yet.
+  - id: task.remote-create-2-sidebar-selection-state
+    title: persist sidebar selected target in workspace-scoped tmux state
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 6.2
+      status: accepted
+      reason: >
+        Ctrl-S needs a stable selected-target pointer that follows the existing
+        tmux-owned chrome model without introducing sidebar IPC.
+  - id: task.remote-create-3-protocol
+    title: add create-session messages to the node-session protocol and transport mapping
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 9
+      status: accepted
+      reason: >
+        Remote session creation must be a first-class node-session message and
+        must not reuse mirror-open semantics.
+  - id: task.remote-create-4-remote-node-handler
+    title: handle remote create-session requests on the PTY-owning node
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 9.3, 11
+      status: accepted
+      reason: >
+        The remote node owns the resulting PTY and must create a normal local
+        target-host session before existing session sync publishes it.
+  - id: task.remote-create-5-server-service
+    title: implement server-side remote session creation service and catalog convergence wait
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 9.4, 10
+      status: accepted
+      reason: >
+        The server must send create-session requests through the remote owner,
+        wait for acceptance and session-sync catalog publication, then activate
+        the synced target without fabricating catalog rows.
+  - id: task.remote-create-6-ctrl-s
+    title: wire Ctrl-S to create a session on the selected connected remote endpoint
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 5.2, 10.2, 12
+      status: accepted
+      reason: >
+        Ctrl-S is the explicit command for selected remote endpoint creation and
+        must fail clearly for local, missing, offline, or exited selections.
+  - id: task.remote-create-7-history
+    title: add user-level remote host connection history with secure-store credential persistence
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 7
+      status: accepted
+      reason: >
+        Ctrl-W needs reusable host profiles and Xshell-style remembered credentials,
+        with SSH and sudo password values stored only in a dedicated secure store.
+  - id: task.remote-create-8-ctrl-w-bootstrap
+    title: original Ctrl-W bootstrap implementation slice with v1.1 first-connect semantics
+    status: superseded
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 16
+      status: superseded
+      reason: >
+        This slice implemented useful SSH bootstrap, history, install, and startup
+        pieces, but v1.1 incorrectly specified creating an extra remote session
+        after first connect. Design v1.2 supersedes that behavior: first connect
+        activates the default session published by remote waitagent --connect,
+        while only existing endpoints create a new session.
+  - id: task.remote-create-9a-design-lock
+    title: lock corrected Ctrl-W first-connect design and split correction work
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3.4, 5.3, 8.4, 8.5, 16, 17
+      status: accepted
+      reason: >
+        The corrected v1.2 design records that Ctrl-W first connect must match
+        manual waitagent --connect by activating the default published session,
+        and it explicitly forbids server-side direct dialing to remote host:port
+        for create-session.
+  - id: task.remote-create-9b-remove-direct-dial
+    title: remove direct remote create-session dialing and introduce local owner transport boundary
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3.3, 4, 10.1, 16.1, 16.4
+      status: accepted
+      reason: >
+        RemoteSessionCreationService must route through local owner/control
+        facade and must not derive http://host:port from authority_node_id.
+  - id: task.remote-create-9c-owner-create-session-routing
+    title: route remote create-session through the active node session owner event loop
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 4, 9, 10, 16.4
+      status: accepted
+      reason: >
+        Create-session requests must use the existing node session handle owned
+        by the remote owner/ingress runtime, with request/reply correlation in
+        the unified event loop.
+  - id: task.remote-create-9d-ctrl-w-first-connect
+    title: make Ctrl-W first connect activate the default published remote session
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3.4, 5.3, 8.5, 16.2
+      status: accepted
+      reason: >
+        Newly bootstrapped remote endpoints must not call remote create-session;
+        they wait for the default session published by waitagent --connect and
+        activate it.
+  - id: task.remote-create-9e-daemon-parity
+    title: verify and fix __remote-daemon parity with manual waitagent --connect default session publication
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 8.4, 16.3
+      status: accepted
+      reason: >
+        __remote-daemon is only a no-TTY startup mode; it must publish the same
+        default session as manual waitagent --connect while skipping TUI attach.
+  - id: task.remote-create-9f-acceptance
+    title: validate corrected Ctrl-W and Ctrl-S behavior across localhost and 10.1.29.130
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 17
+      status: accepted
+      reason: >
+        The correction must be proven by manual and automated checks covering
+        manual connect, first Ctrl-W, repeated Ctrl-W, Ctrl-S, and absence of
+        direct server-to-remote create-session dialing.
+  - id: task.transport-stability-l4
+    title: shorten authority transport read timeout and add ping/pong liveness
+    status: done
+  - id: task.transport-stability-l1
+    title: replace output channel try_send with blocking send and larger buffer
+    status: done
+  - id: task.transport-stability-l2
+    title: replace O_NONBLOCK input FIFO with large blocking ring buffer
+    status: done
+  - id: task.transport-stability-l5
+    title: extend shared authority reconnect backoff for indefinite retry
+    status: done
+  - id: task.transport-stability-l3
+    title: add output sequence numbering and SyncRequest gap recovery
+    status: done
+  - id: task.geometry-1-truthful-geometry
+    title: report actual applied pane geometry in resize and attach acknowledgements
+    status: done
+  - id: task.geometry-2-protocol-geometry-push
+    title: add authority-to-server target geometry change push to the control plane
+    status: done
+  - id: task.geometry-3-authority-coordinator
+    title: implement authority-side geometry coordinator with chrome-preserving resize and padding panes
+    status: done
+  - id: task.geometry-4-main-slot-geometry-resync
+    title: implement server main-slot geometry negotiation and controlled re-sync on geometry change
+    status: done
+  - id: task.geometry-5-per-server-size-store
+    title: persist last negotiated geometry per server on managed nodes
+    status: done
+  - id: task.geometry-6-docs-and-cross-host-acceptance
+    title: refresh docs and run cross-host geometry coordination acceptance
+    status: done
+  - id: task.bug-geometry-shared-chrome-window
+    title: fix geometry re-sync when the remote view shares the server's workspace chrome window, and stop storm-time geometry churn
+    status: superseded
+  - id: task.bug-remote-main-slot-reconnect-seq-fatal
+    title: fix direct raw output seq tracker never reset on reconnect, gap recovery re-delivers old seqs and kills the pane process
+    status: superseded
+  - id: task.bug-remote-main-slot-snapshot-clobber
+    title: fix stale-geometry observer snapshot painting over live raw output on presence flaps
+    status: superseded
+  - id: task.ratatui-phase-1-footer
+    title: render real footer status bar with ratatui widget
+    status: done
+  - id: task.ratatui-phase-2-sidebar
+    title: build sidebar UI skeleton with navigation (no real session data yet)
+    status: done
+  - id: task.ratatui-phase-2-5-session-backend
+    title: migrate local and remote session creation onto the ratatui node server
+    status: done
+  - id: task.ratatui-phase-3-main-pane
+    title: implement main pane PTY with alacritty_terminal
+    status: done
+  - id: task.ratatui-phase-3-remote-main-pane
+    title: render remote sessions in the ratatui main pane
+    status: done
+  - id: task.ratatui-phase-3-remote-reconnect
+    title: implement automatic reconnect for ratatui remote sessions
+    status: done
+  - id: task.ratatui-phase-3-bottom-menu-shortcuts
+    title: implement ratatui footer shortcuts (Ctrl-G sidebar, Ctrl-O history, Ctrl-E logs, Ctrl-S remote create)
+    status: done
+  - id: task.ratatui-phase-4-remove-tmux
+    title: remove tmux backend once ratatui path is stable
+    status: done
+  - id: task.ratatui-clipboard-paste-to-main-pane
+    title: '[epic] paste clipboard text, images, and files into the main pane'
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: >
+        Defines the PASTE_TEXT/PASTE_FILE client→server protocol, the
+        FilePasteRequest/FilePasteResponse gRPC extension, clipboard content
+        classification, and the per-session cache semantics required to land
+        this slice.
+  - id: task.ratatui-clipboard-paste-phase1-text
+    title: Phase 1 - text paste via bracketed paste and system clipboard fallback
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 5 (client clipboard handling) and Section 6/7 (PASTE_TEXT protocol).
+  - id: task.ratatui-clipboard-paste-phase2-file-path
+    title: Phase 2 - clipboard classification and local session file path paste
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 4 paste semantics table (local session path row) and Section 5.2 clipboard content classification.
+  - id: task.ratatui-clipboard-paste-phase3-local-file-cache
+    title: Phase 3 - binary file/image paste with local /tmp/waitagent cache
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 6.2 PASTE_FILE command and Section 9 cache directory/filename conventions.
+  - id: task.ratatui-clipboard-paste-phase4-remote-file-transfer
+    title: Phase 4 - remote peer file paste transport via gRPC/authority transport
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 8 gRPC protocol extension and Section 4 remote session file semantics.
+  - id: task.ratatui-agent-sessions-hotkey
+    title: '[epic] add a hotkey to list all sessions of the current agent tool (codex, claude, kimi) on the host'
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      status: accepted
+      authorizes: >
+        Defines the AgentSessionProvider plugin trait, AgentSessionRegistry,
+        per-agent session source paths (Kimi, Codex, Claude), JSONL parsing
+        strategy, path resolution with environment-variable overrides,
+        remote peer session read path via NodeSessionService protocol, and the
+        TUI hotkey popup behavior for listing and resuming agent sessions.
+  - id: task.ratatui-agent-sessions-hotkey-phase2-kimi
+    title: Phase 2 - implement AgentSessionProvider trait, registry, and Kimi session provider
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 5 (trait/registry), Section 6 (Kimi path resolution), and Section 7.2 (Kimi JSONL parsing).
+  - id: task.ratatui-agent-sessions-hotkey-phase3-codex
+    title: Phase 3 - implement Codex session provider
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 4.2 (Codex session source) and Section 7.3 (Codex history.jsonl parsing).
+  - id: task.ratatui-agent-sessions-hotkey-phase4-claude
+    title: Phase 4 - implement Claude session provider
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 4.3 (Claude session source) and Section 7.4 (Claude history.jsonl and project scan parsing).
+  - id: task.ratatui-agent-sessions-hotkey-phase5-protocol
+    title: Phase 5 - implement ListAgentSessions protocol for remote peer sessions
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 5.5 (remote peer session read path and NodeSessionService protocol extension).
+  - id: task.ratatui-agent-sessions-hotkey-phase6-ui
+    title: Phase 6 - implement hotkey popup for local and remote peer agent sessions
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 8 (UI behavior, hotkey, popup, local/remote path selection, command injection).
+  - id: task.ratatui-agent-sessions-hotkey-phase7-acceptance
+    title: Phase 7 - end-to-end acceptance and documentation for agent sessions hotkey
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 9 (error handling), Section 10 (testing), and Section 11 (limitations).
+  - id: task.cloud-outbound-dial-operator-auth
+    title: implement outbound-dial remote host connection with operator public key auth and TLS pin
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 1 (store connection metadata) and Section 3 (reuse an existing daemon)
+        govern the TLS pin derived from the remote daemon certificate and the
+        operator public key installed on the remote host.
+  - id: task.cloud-lan-host-kind
+    title: add Cloud/LAN host kind to remote host profiles and enforce key auth for cloud hosts
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Background and Section 3: Cloud hosts are reachable directly and must use
+        key authentication; LAN hosts may use password or key.
+  - id: task.cloud-outbound-dial-snapshot-reconnect
+    title: persist outbound-dial connections and reconnect from snapshot on control-plane restart
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 1 (store connection metadata) and Section 2 (mode-aware reconnect)
+        authorize the outbound connection snapshot store and ReconnectSnapshotHosts
+        event.
+  - id: task.cloud-outbound-dial-retry-worker
+    title: add outbound-dial retry worker that re-queues InitiateOutboundConnection on RemoteNodeOffline
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 2 mode-aware reconnect table: OutboundDial reconnect is driven by
+        the control host with exponential backoff.
+  - id: task.cloud-outbound-dial-ingress-catalog-publish
+    title: publish default local session catalog from ingress server for outbound-dial peers
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 3 reuse path requires the remote daemon to expose a default
+        published session so first connect can activate it without creating a new one.
+  - id: task.cloud-async-remote-connect-dedup
+    title: async remote-host connect and deduplicate local bash@local entries in sidebar
+    status: done
+    design_ref:
+      document: docs/remote-host-connect-and-session-creation-design.md
+      authorizes: >
+        Section 16.2 (first connect activates the default published session) and
+        the ratatui-node single-writer event model.
+  - id: task.cloud-async-create-remote-session
+    title: asyncify CreateRemoteSession to avoid blocking StateEventLoop on Ctrl+S
+    status: done
+    design_ref:
+      document: docs/remote-host-connect-and-session-creation-design.md
+      authorizes: >
+        Section 10.2 / 12 (Ctrl-S creates a remote session) and the event-driven
+        single-writer StateEventLoop architecture.
+  - id: task.cloud-create-session-ingress-routing
+    title: route CreateSessionRequest to ingress SessionSyncAuthorityManager for outbound-dial peers
+    status: done
+    design_ref:
+      document: docs/remote-host-connect-and-session-creation-design.md
+      authorizes: >
+        Section 9.3 / 11 (remote node owns the resulting PTY) and Section 4
+        (local owner transport boundary).
+  - id: task.cloud-auth-cert-pinning-design
+    title: design certificate pinning or mini-CA scheme for cloud host control-plane authentication
+    status: done
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6 documents the accepted architecture: keep TLS pin + operator
+        challenge, unify all secrets in OS keyring with no fallback, add
+        operator-key rotation, remote daemon certificate rotation, and startup
+        snapshot reconnect expiry fallback. Section 10 records confirmed defaults.
+  - id: task.cloud-auth-impl-keyring-secret-store
+    title: implement unified OS keyring secret store and migrate existing file secrets
+    status: in_progress
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.3 specifies unified secret storage in OS keyring for operator
+        private key, SSH password, and sudo password, with no file fallback and
+        migration from the existing FileRemoteHostSecretStore.
+  - id: task.cloud-auth-impl-cert-rotation
+    title: implement remote daemon certificate expiry and rotation during bootstrap
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.5 specifies a 90-day certificate lifetime with 30-day renewal
+        window, checked by the bootstrapper over SSH during connect.
+  - id: task.cloud-auth-impl-startup-reconnect-expiry
+    title: implement startup snapshot reconnect fallback for expired remote daemon certificates
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.5 specifies that if snapshot gRPC dial fails due to an expired
+        certificate, the bootstrapper should regenerate the certificate over SSH.
+  - id: task.cloud-auth-impl-operator-key-rotation
+    title: implement operator key rotation command
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.6 specifies the `waitagent rotate-operator-key` command that
+        generates a new keypair, stores it in the keyring, and pushes the new
+        public key to managed hosts.
+  - id: task.cloud-auth-impl-acceptance
+    title: validate keyring storage, certificate rotation, and operator key rotation on LAN host
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 9 lists the migration and acceptance steps; LAN host validation
+        must pass before cloud-host validation resumes.
+  - id: task.cloud-unified-reconnect-scheme
+    title: document and lock the dual-mode reconnect policy for outbound-dial and inbound --connect
+    status: backlog
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 2 mode-aware reconnect and Section 4 (connection direction is fixed
+        per daemon) already keep the two modes separate. This task documents the
+        policy: OutboundDial is recovered by control-host snapshot + retry worker;
+        InboundConnect is recovered by the remote peer dialing back; both modes
+        may coexist on the same host; mode switching restarts the daemon.
+  - id: task.cloud-host-acceptance
+    title: validate outbound-dial connection to a real cloud/public host
+    status: backlog
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        End-to-end validation of the outbound-dial / cloud-host path outside the
+        LAN.
+  - id: task.ratatui-phase-5-cloud
+    title: activate distributed control topologies on the server/client foundation
+    status: in_progress
+  - id: task.relay-1-mux-frame-layer-and-peer-connection-seam
+    title: introduce relay mux frame layer and the PeerConnection transport seam
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 1 the node-to-node TCP dial becomes a
+        pluggable PeerConnection byte stream so relay streams are a second
+        transport; direct TCP folds behind the seam unchanged.
+  - id: task.relay-2-relay-daemon-core-routing
+    title: implement relay daemon with connection table, routing, heartbeat, and whitelist auth
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 2 relay serve runs the hub with connection
+        table, open/close routing, 10s/3-miss heartbeat, whitelist auth via
+        authorized_nodes/, and the local admin socket.
+  - id: task.relay-3-invite-join-enrollment
+    title: implement relay invite/join enrollment with automatic mutual fingerprint pinning
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 3 invite/join binds node and relay in one
+        flow without manual fingerprint transcription; relay remove revokes.
+  - id: task.relay-4-node-relay-client
+    title: implement node relay client with persistent connection, on-demand streams, and re-registration
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 4 nodes keep one persistent outbound
+        connection, open streams on demand, re-register after drops, and
+        receive presence events for the console.
+  - id: task.relay-5-stream-backpressure-fair-scheduling
+    title: add per-stream window backpressure and fair scheduling to the relay mux
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 5 window/ack frames give every stream
+        independent backpressure and fair scheduling on a shared connection.
+  - id: task.relay-6-single-node-capacity-model
+    title: implement single-relay capacity model with usage metering and admission control
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 6 max_nodes/max_streams/throughput admission
+        with usage metering on the connection tables is the future cluster
+        scheduler input.
+  - id: task.relay-7-config-surface
+    title: land relay config surface with relay.toml, remote-hosts via selector, and connect-path integration
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 7 relay.toml on both sides plus an explicit
+        remote-hosts via = relay|direct selector wired into the Ctrl-W
+        connect path; no implicit fallback.
+  - id: task.relay-8-structured-error-semantics
+    title: define structured relay error semantics from relay through node to console
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 8 relay failures surface as error codes plus
+        human-readable messages on sidebar and status line, never raw strings.
+  - id: task.relay-9-e2e-and-regression-tests
+    title: build relay e2e suite with docker-isolated topology, reconnect, concurrency, and direct regression
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 9 docker network-isolated two-node-plus-relay
+        e2e, disconnect/reconnect, concurrent sessions, Windows CI, and a
+        green direct-dial regression.
+  - id: task.relay-10-webui
+    title: implement WebUI as special-node web service with browser terminal and management plane
+    status: backlog
+    design_ref:
+      document: docs/relay-design.md
+      authorizes: >
+        Phase 1 task split item 10 the web service enrolls as a special node
+        (single-binary co-located deployment, loopback standard protocol) and
+        carries the browser terminal plus the management plane; CLI shrinks
+        to the bootstrap minimum.
+templates:
+  - id: task-template.local-acceptance-cycle
+    title: local acceptance rerun or bug-fix slice
+  - id: task-template.network-implementation-slice
+    title: bounded network implementation slice
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+notes:
+  - `.agents/tasks/*` is the unified task source; task status changes must update backlog, the current task pointer, queued task files, and task/state mirrors in the same change.
+  - Active implementation work must have an explicit top-down design source. Do not land patch-style behavior changes that only exist in chat or status notes without a governing design document.
+  - Every new in-progress or queued implementation task must declare a `design_ref` field that points to the governing top-down design document and explains why that document authorizes the slice. Tasks without `design_ref` are not ready for execution.
+  - Replacement work must clean up superseded code paths as it lands; old custom fullscreen and live-surface logic should not be left in place behind the tmux-first architecture unless a named compatibility reason is documented in the active task.
+  - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
+  - The lifecycle queue is complete enough to support the tmux-first migration; resumed network expansion is deferred until the local display baseline is rebuilt on tmux-native ownership boundaries.
+  - The tmux-first migration now includes an architecture-first slice because the old code structure is not an acceptable foundation for a large local-runtime rewrite.
+  - The accepted destination is a waitagent-branded tmux-like tool: `workspace` may remain as bootstrap UX, but core runtime identity and command semantics should converge on tmux-native targets and capabilities.
+  - The lifecycle daemon queue and old composed-sidebar implementation queue are now historical transitional work, not the accepted destination; they should not drive future architecture decisions.
+  - The refined execution order is: tmux-native command semantics first, tmux-owned sidebar and footer second, tmux-native fullscreen and control behavior third, waitagent management affordances fourth, and only then final transitional-path deletion.
+  - 2026-04-23 direction reset: new local-runtime work is now anchored on an event-driven rewrite queue. Fixed tick, sleep, and timeout polling loops are not an acceptable primary architecture for new implementation slices.
+  - 2026-04-24 refinement: fixed-chrome main-slot target activation is now a prerequisite for further attach-side event cleanup, because the current sidebar or footer switch path still detaches the client and launches `waitagent attach <target>`.
+  - 2026-04-24 execution lock: `task.event-r2a -> task.event-r3 -> task.event-r4` is the top-priority local batch and must complete before resuming remote, network, or optional polish work.
+  - Remaining network and remote tasks must build on the shared transport-agnostic target catalog and fixed-chrome main-slot activation model; do not resume them on top of superseded daemon, attach, or local-only session assumptions.
+  - 2026-04-27 refinement: the original umbrella `task.t5-06` is now split into `task.t5-06a -> task.t5-06b -> task.t5-06c` so the resumed remote queue lands docs, model, and registry-boundary work in separate bounded slices before transport routing begins.
+  - 2026-04-27 update: `task.t5-06a` is complete enough to close; active work now moves to `task.t5-06b`, which generalizes target identity and catalog records without starting transport routing.
+  - 2026-04-27 update: `task.t5-06b` is complete enough to close after the shared target model, protocol identity contract, and compatibility accessors landed; active work now moves to `task.t5-06c`, where local tmux becomes the first producer behind an explicit target-registry boundary.
+  - 2026-04-27 update: `task.t5-06c` is complete enough to close after current consumers were rerouted through a dedicated target-registry service, so active work now moves to `task.t5-07`, the first real remote transport-routing slice.
+  - 2026-04-29 refinement: the original `task.t6-01` umbrella was first split into bounded slices and later corrected again when the planned auto-switch slice was cancelled in favor of a manual-only attention policy lock.
+  - 2026-04-30 refinement: `task.t5-07`, `task.t6-01e`, and `task.t5-08a1` closed the current control-plane, server-console-planning, and protocol-contract gaps; implementation remains deliberately paused behind the remaining design slices `task.t5-08a2 -> task.t5-08a3` before `task.t5-08a -> task.t5-08c` resumes.
+  - 2026-04-30 correction: the previously landed `task.t5-08c1` discovered-target slice is no longer the accepted end state because the remote product model is `node -> sessions -> attachments`, so active work is now re-split into `task.t5-08c2 -> task.t5-08c4`.
+  - 2026-05-02 refinement: the old `task.t5-08c4d` validation umbrella is now split again into `task.t5-08c4d1 -> task.t5-08c4d3` because correcting the backend-scoped local session export boundary must land before detach or reattach and cross-host acceptance can be trusted.
+  - 2026-05-02 refinement: the old `task.t5-08c4d3` cross-host validation umbrella is now split again into `task.t5-08c4d3a -> task.t5-08c4d3d` because the latest review exposed a missing session-scoped live-mirror design and runtime lifecycle rather than a single validation-only gap.
+  - 2026-05-09 refinement: raw PTY is now the accepted remote interactive baseline, but the SSH-parity review split remaining latency work into `task.t5-08c4d3e -> task.t5-08c4d3i` covering local input write decoupling, direct PTY ownership, lightweight raw frames, event-driven bridge discovery, and faster attach bootstrap.
+  - The old gutter-scroll direction remains retired.
+  - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
+  - `task.architecture-1` is now superseded by the `task.refactor-1` through `task.refactor-7` queue which covers the same ground with finer granularity.
+  - 2026-05-11 refactor queue: `task.refactor-1 -> task.refactor-2 -> task.refactor-3 -> task.refactor-4 -> task.refactor-5 -> task.refactor-6 -> task.refactor-7` is the codebase cleanup and architecture refinement batch on branch `feat/refactor-codebase-cleanup`.
+  - Refactor constraint: every refactor slice must preserve all existing functionality and performance characteristics. No behavioral regressions are acceptable. Each task must pass cargo test and cargo build --release before closing.
+  - Refactor constraint: refactor-1 and refactor-2 are independent and can land in either order. refactor-3 depends on refactor-2. refactor-4 depends on refactor-3. refactor-5 depends on refactor-4. refactor-6 and refactor-7 depend on refactor-5 but are independent of each other.
+  - The refactor queue does not block the existing remote PTY latency queue (task.t5-08c4d3e through task.t5-08c4d3i). Both queues can proceed in parallel on their respective branches.
+  - The original `task.tmux-1` through `task.tmux-6` split is preserved as historical planning only and is superseded by the rewrite queue after review found that the bridge-heavy path would preserve too much of the legacy lifecycle structure.
+  - 2026-05-11 bugs: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` are reported UX bugs. They are independent of the refactor queue and can be investigated in parallel.
+  - 2026-05-12 refactor queue update: refactor-1 through refactor-4 are done and committed. refactor-5 and refactor-6 are in_progress. refactor-7 remains ready.
+  - 2026-05-12 bug update: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` fixed and committed. `task.bug-remote-session-lost-after-idle` marked wontfix (cannot reproduce). `task.bug-status-recognition-inaccurate` converted to feature and deferred to before workspace snapshot.
+  - 2026-05-12 new bug: `task.bug-fullscreen-scrollback-truncated` recorded. Zoom fullscreen 后 PgUp 只显示当前屏，看不到更早 scrollback。可能在 workspace 布局时 history-limit 设置不足。在 feature-agent-status-recognition 之后处理。
+  - 2026-05-18 transport stability batch: comprehensive 5-layer design documented in `docs/remote-transport-stability-design.md` after root-cause analysis of output freeze, input loss, and "authority host already stopped" errors. Implementation order: l4 (read timeout + ping/pong) → l1 (output blocking send) → l2 (input ring buffer) → l5 (reconnect backoff) → l3 (seq gap detection). Each layer has its own queued task file in `.agents/tasks/queued/`. Active task: `task.transport-stability-l4`.
+  - 2026-07-19 geometry coordination batch: root cause of garbled remote mirror (Ctrl+R/reverse-i-search) on shared workspace main panes confirmed by live cross-host A/B evidence (server 192.168.31.178, client node 192.168.31.182): the multi-pane resize skip in `resize_pane_on_socket` plus a requested-value `ResizeApplied` echo left panes at mismatched geometry while raw PTY replay requires identical sizes. Accepted design in `docs/remote-geometry-coordination-design.md`: network-wide smallest semantics with per-dimension min, chrome-preserving resize with padding panes, truthful geometry reporting, geometry-change push, per-server persisted sizes, and controlled re-sync. VT-model rendering and read-only degraded modes were evaluated and rejected. Implementation order: `task.geometry-1-truthful-geometry` → `task.geometry-2-protocol-geometry-push` → `task.geometry-3-authority-coordinator` → `task.geometry-4-main-slot-geometry-resync`; `task.geometry-5-per-server-size-store` after geometry-3; `task.geometry-6-docs-and-cross-host-acceptance` closes the batch. Related defects recorded separately: `task.bug-remote-main-slot-reconnect-seq-fatal`, `task.bug-remote-main-slot-snapshot-clobber`.
+  - 2026-07-19 geometry-1 done: `task.geometry-1-truthful-geometry` landed. Authority now reads back actual pane geometry before every ResizeApplied (new `RemoteTargetPtyGateway::pane_geometry`), viewer logs geometry mismatches, and a wire-level send_resize_applied diag line reports values. Verified by unit tests plus a one-host two-instance e2e (ports 17474/17475, production untouched): mismatched mirror now reports 47x22 instead of the requested size. Noted for geometry-4: raw fast-path input bypasses the resize-ack gate, and open-time ResizeApplied can be dropped by the slot handler before binding exists. Next: `task.geometry-2-protocol-geometry-push`.
+  - 2026-07-19 geometry-2 done: `task.geometry-2-protocol-geometry-push` landed. TargetGeometryChanged now rides the same rails as ResizeApplied end to end (proto oneof 62, codec tag 21, authority transport send helper, owner_helpers forwarding, grpc outbound mapping, both ingress bridge runtimes); the pane runtime validates sender/session/target the same way as RawPtyOutput and records remote_reported_geometry for geometry-4. Verified by codec round-trip plus a full gRPC loopback leg in the ingress-boundary bridge test. Next: `task.geometry-3-authority-coordinator`.
+  - 2026-07-20 geometry-3 done: `task.geometry-3-authority-coordinator` landed. Authority-side geometry coordinator: tmux layout-string parser/rewriter (vendored checksum algorithm), pure planner (per-dimension min, chrome pinned, padding panes for slack, atomic select-layout), and `coordinate_geometry` replacing resize_pty on all mirror paths — the multi-pane skip branch is now bypassed by negotiated resize. Geometry hooks (client-attached/detached/resized, window-layout-changed, `set-hook -a`) drive debounced rounds that report via TargetGeometryChanged. Empirical fixes: hooks target the pane's real tmux session; control clients report empty client_height (80x24 fallback); waitagent windows run window-size=manual so the attached case resizes the window to the smallest attached client explicitly (design doc amended). One-host e2e verified all four scenarios (detached resize, small-client shrink, big-client padding panes with pinned chrome, detach restore). Next: `task.geometry-4-main-slot-geometry-resync`.
+  - 2026-07-20 geometry-4 done: `task.geometry-4-main-slot-geometry-resync` landed. Server main slot re-syncs on geometry reports: debounced GeometryResyncDue resizes the slot's own pane/window through the shared geometry executor (with local padding panes when the remote view shares the server chrome window), then re-opens the mirror for a clean clear + bootstrap at the new size. Key correctness fixes found by e2e: re-activation must send viewer capacity (never the negotiated size) or the negotiation collapses; own-coordination resize events are suppressed until the pane settles; the resize-ack gate now compares acks against the current render size; stale padding panes must be killed before select-layout. Verified end to end on one host: Ctrl+R rendering is byte-identical to the remote user's own view, chrome pinned on both hosts, detach restores capacity. Next: `task.geometry-5-per-server-size-store`.
+  - 2026-07-20 geometry-5 done: `task.geometry-5-per-server-size-store` landed. Managed nodes persist the last negotiated geometry per server (JSON store keyed by the --connect endpoint, with node identity and timestamp) after every coordination round. Headless session creation now starts from the stored geometry plus chrome overhead instead of the tmux 80x24 default, and mirror open applies the stored geometry as the initial size before live negotiation. V1 limitation documented: inbound-only peers are not recorded yet. Verified end to end on one host: store written on negotiation, daemon restart recreates at negotiated size, mirror open replays the stored size first. Next: `task.geometry-6-docs-and-cross-host-acceptance`.
+  - 2026-07-20 geometry-6 done: `task.geometry-6-docs-and-cross-host-acceptance` closed the geometry coordination batch. Acceptance (one-host simulation; literal 178<->182 rerun deferred while 182 is offline) verifies byte-identical mirror rendering for reverse-i-search, vim, and htop, complete views with pinned chrome on both hosts through managed-node attach/detach/resize, operator-resize propagation, sequential remote sessions, and uninterrupted server input. Acceptance also landed hardening fixes: window-size option restored after coordinator resize-window (authority keeps manual deliberately), chrome sizes from layout intent, padding panes excluded from workspace recovery anchors. Remaining work is tracked as `task.bug-geometry-shared-chrome-window` (shared chrome placement limitation + storm churn). Docs refreshed: execution-status-board and local-acceptance-checklist section 8.
+  - 2026-09-12 relay batch: `docs/relay-design.md` accepted as the governing design (self-hosted positioning named relay, WebUI as the daily management plane with the web service as a special node, CLI reduced to bootstrap, 10s/3-miss heartbeat, relay remove revocation, single-node capacity model as the future cluster scheduler input, no session or traffic persistence). Phase 1 split into `task.relay-1 -> task.relay-10` in `.agents/tasks/queued/`: mux seam -> daemon -> enrollment -> node client -> backpressure -> capacity -> config -> errors -> e2e -> webui.

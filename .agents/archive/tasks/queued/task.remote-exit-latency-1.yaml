@@ -1,0 +1,44 @@
+id: task.remote-exit-latency-1
+kind: task
+version: 1
+title: add acknowledged local catalog notify to the remote session sync event loop
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-session-exit-latency-design.md
+  why:
+    - remote session exit currently waits for a periodic session-sync catalog diff with up to 500ms delay
+    - the accepted fix is an acknowledged local event that wakes the existing sync owner loop
+    - the event must trigger sync_local_sessions rather than directly mutating remote state
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - a local catalog changed command or IPC message exists for the session sync owner
+  - the notifier waits for acknowledgement that the sync owner accepted the event
+  - the sync owner event loop handles transport events, local catalog changed events, and stop events through one owner path
+  - LocalCatalogChanged triggers sync_local_sessions when a remote session handle is active
+  - SessionOpened triggers an immediate sync_local_sessions reconcile
+  - duplicate local catalog changed events are harmless
+verification:
+  - cargo test
+  - cargo check
+  - targeted unit test proving LocalCatalogChanged invokes sync_local_sessions without waiting for poll timeout
+touched_paths:
+  - src/cli.rs
+  - src/command/dispatch.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime/sync_helpers.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime/remote_node_session_sync_runtime_test.rs
+  - docs/remote-session-exit-latency-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.remote-exit-latency-1.yaml
+notes:
+  - Do not let the notify command publish TargetExited directly.
+  - The accepted state authority remains sync_local_sessions catalog diff.
+  - Do not introduce durable event persistence in this task.

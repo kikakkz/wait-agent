@@ -1,0 +1,45 @@
+id: task.remote-exit-latency-3
+kind: task
+version: 1
+title: replace TargetExited hot-path tmux socket scan with live workspace socket registry
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-session-exit-latency-design.md
+  why:
+    - TargetExited currently scans every WaitAgent tmux socket before refreshing workspace chrome
+    - diagnostics measured this scan around 565-613ms on a machine with many stale sockets
+    - publication apply should resolve affected live workspaces from runtime-owned state instead
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-exit-latency-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - a runtime-owned live workspace socket registry exists at network-port/socket granularity
+  - workspace startup registers its current socket in the registry
+  - workspace-owned shutdown unregisters its socket when that lifecycle path is available
+  - RemoteTargetPublicationRuntime resolves refresh sockets from registry/current context on TargetExited
+  - TargetExited hot path no longer calls discover_waitagent_sockets or list_sessions_on_socket for every known socket
+  - full tmux socket discovery remains only as startup/recovery fallback, not per-exit work
+verification:
+  - cargo test
+  - cargo check
+  - manual: reproduce remote session exit with many stale wa-* sockets and verify publication workspace resolution is no longer 500ms+
+touched_paths:
+  - src/runtime/remote_publication/remote_target_publication_runtime.rs
+  - src/runtime/remote_publication/remote_target_publication_runtime/publication_helpers.rs
+  - src/runtime/workspace/workspace_command_runtime.rs
+  - src/runtime/workspace/workspace_runtime.rs
+  - src/application/target_registry_service.rs
+  - docs/remote-session-exit-latency-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.remote-exit-latency-3.yaml
+notes:
+  - First implementation is socket-granular; target-granular refresh can be a later refinement.
+  - Do not move refresh responsibility into UI code.
+  - Registry misses should be logged clearly.
