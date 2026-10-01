@@ -22,16 +22,16 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-seam
-  stage_title: introduce the PeerConnection transport seam (issue #29)
+  stage_id: relay-1-mux-codec
+  stage_title: mux frame codec over the PeerConnection seam (issue #51)
 current_focus:
-  default_task_id: "#29"
+  default_task_id: "#51"
   focus_statement: >
-    fold the existing direct TCP dial behind a PeerConnection abstraction
-    with byte-identical behavior; the first implementation slice of the
-    relay phase 1 milestone
+    build the mux frame layer (stream open / close / data / window) that
+    turns one relay link into ordered reliable streams behind the
+    PeerConnection seam introduced in #29; the next slice of the relay
+    phase 1 milestone
 upcoming_focus:
-  - mux frame codec (#51) after #29 lands
   - relay daemon slices #52-#55
 source_of_truth:
   - AGENTS.md

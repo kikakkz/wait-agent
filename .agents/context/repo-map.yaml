@@ -35,6 +35,11 @@ module_map:
   networking:
     - path: src/infra/remote_grpc_transport.rs
       responsibility: node-to-node transport session establishment (TCP dial path)
+    - path: src/infra/peer_connection.rs
+      responsibility: >
+        PeerConnection transport seam — ordered, reliable, full-duplex
+        byte stream below the node-to-node inner TLS; direct TCP impl
+        now, relay mux stream impl next (issue #51)
     - path: src/infra/node_credentials.rs
       responsibility: node device identity — self-signed cert + SPKI fingerprint
     - path: src/infra/operator_auth.rs
