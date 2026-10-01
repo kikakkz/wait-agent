@@ -3,6 +3,7 @@ pub mod error_log;
 pub mod node_credentials;
 pub mod operator_auth;
 pub mod peer_connection;
+pub mod relay_connection_table;
 // relay_mux lands ahead of its first consumer (the node relay client in the
 // relay daemon slices); remove this allow once it is wired in.
 #[allow(dead_code)]

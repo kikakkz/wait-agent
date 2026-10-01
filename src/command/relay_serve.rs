@@ -58,11 +58,13 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
                 ))
             },
         )?;
-        let handle = relay_server::start(config).await.map_err(|error| {
+        let started = relay_server::start(config).await.map_err(|error| {
             AppError::Lifecycle(LifecycleError::Protocol(format!(
                 "relay listener: {error}"
             )))
         })?;
+        let handle = started.server;
+        drop(started.events);
         println!("relay listening on {}", handle.local_addr());
         println!("relay identity fingerprint: {fingerprint}");
         println!(
