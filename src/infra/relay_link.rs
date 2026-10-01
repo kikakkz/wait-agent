@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::node_credentials;
+use crate::infra::relay_capacity::{OpenAdmission, RelayCapacityConfig, SharedUsageMeter};
 use crate::infra::relay_connection_table::{
     RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
 };
@@ -45,6 +46,8 @@ pub(crate) async fn run_link(
     routing: Arc<RoutingTable>,
     events: mpsc::Sender<RelayLifecycleEvent>,
     lifecycle: RelayLifecycleConfig,
+    capacity: RelayCapacityConfig,
+    meter: SharedUsageMeter,
 ) {
     let peer_fingerprint = match peer_fingerprint(&tls, peer_addr) {
         Some(fingerprint) => fingerprint,
@@ -63,6 +66,7 @@ pub(crate) async fn run_link(
         &events,
         &outbound_tx,
         &lifecycle,
+        &capacity,
     )
     .await
     {
@@ -83,6 +87,8 @@ pub(crate) async fn run_link(
         &events,
         &registered,
         &outbound_tx,
+        &capacity,
+        &meter,
     )
     .await;
 
@@ -135,6 +141,7 @@ fn peer_fingerprint(tls: &ServerTls, peer_addr: SocketAddr) -> Option<String> {
 /// Registration phase: first frame must be `Register` within the deadline,
 /// and the node id must equal the mTLS fingerprint (self-proving identity,
 /// docs/relay-design.md node_id 策略).
+#[allow(clippy::too_many_arguments)]
 async fn register_link(
     reader: &mut ReadHalf<ServerTls>,
     peer_addr: SocketAddr,
@@ -143,6 +150,7 @@ async fn register_link(
     events: &mpsc::Sender<RelayLifecycleEvent>,
     outbound_tx: &mpsc::Sender<Frame>,
     lifecycle: &RelayLifecycleConfig,
+    capacity: &RelayCapacityConfig,
 ) -> Option<RegisteredLink> {
     let first = tokio::time::timeout(lifecycle.register_timeout, read_frame(reader)).await;
     let node_id = match first {
@@ -172,6 +180,22 @@ async fn register_link(
         return None;
     }
 
+    // Admission: a NEW node counts against max_nodes; replacing an existing
+    // entry never grows the table, so reconnects re-admit even at the cap.
+    if table.lookup(&node_id).is_none() && !capacity.admit_register(table.len()) {
+        ERROR_LOG.log_error(format!(
+            "[relay] {peer_addr} ({node_id}): register refused, max_nodes reached"
+        ));
+        send_stream_error(
+            outbound_tx,
+            0,
+            error_code::NODE_CAPACITY,
+            "relay is at max_nodes capacity",
+        )
+        .await;
+        return None;
+    }
+
     let registered = table.register(&node_id, outbound_tx.clone());
     match &registered.previous {
         Some(previous) => {
@@ -193,6 +217,7 @@ async fn register_link(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_loop(
     reader: &mut ReadHalf<ServerTls>,
     peer_addr: SocketAddr,
@@ -201,6 +226,8 @@ async fn dispatch_loop(
     events: &mpsc::Sender<RelayLifecycleEvent>,
     registered: &RegisteredLink,
     outbound_tx: &mpsc::Sender<Frame>,
+    capacity: &RelayCapacityConfig,
+    meter: &SharedUsageMeter,
 ) {
     let node_id = &registered.node_id;
     let connection_id = registered.connection_id;
@@ -226,18 +253,18 @@ async fn dispatch_loop(
                     Ok(Frame::OpenStream { stream_id, target_node_id }) => {
                         if !handle_open_stream(
                             stream_id, target_node_id, node_id, connection_id,
-                            table, routing, outbound_tx,
+                            table, routing, outbound_tx, capacity, meter,
                         ).await {
                             break;
                         }
                     }
                     Ok(Frame::Data { stream_id, payload }) => {
-                        forward_routed(routing, connection_id, stream_id, outbound_tx, |peer_stream_id| {
+                        forward_routed(routing, connection_id, stream_id, outbound_tx, meter, payload.len(), |peer_stream_id| {
                             Frame::Data { stream_id: peer_stream_id, payload }
                         }).await;
                     }
                     Ok(Frame::Window { stream_id, credit }) => {
-                        forward_routed(routing, connection_id, stream_id, outbound_tx, |peer_stream_id| {
+                        forward_routed(routing, connection_id, stream_id, outbound_tx, meter, 0, |peer_stream_id| {
                             Frame::Window { stream_id: peer_stream_id, credit }
                         }).await;
                     }
@@ -287,6 +314,7 @@ async fn dispatch_loop(
 
 /// Handles a node-initiated `OpenStream`. Returns false when the link must
 /// be torn down (violation); structured errors are sent inline otherwise.
+#[allow(clippy::too_many_arguments)]
 async fn handle_open_stream(
     stream_id: u32,
     target_node_id: String,
@@ -295,6 +323,8 @@ async fn handle_open_stream(
     table: &Arc<RelayConnectionTable>,
     routing: &Arc<RoutingTable>,
     outbound_tx: &mpsc::Sender<Frame>,
+    capacity: &RelayCapacityConfig,
+    meter: &SharedUsageMeter,
 ) -> bool {
     if stream_id % 2 == 0 {
         ERROR_LOG.log_error(format!(
@@ -312,6 +342,32 @@ async fn handle_open_stream(
         .await;
         return true;
     };
+    // Capacity admission (docs/relay-design.md 容量评估与准入控制): refuse
+    // new streams past max_streams or while the forwarded rate is over the
+    // threshold — structured rejection, no route state created.
+    match capacity.admit_open(routing.stream_count(), meter) {
+        OpenAdmission::Allow => {}
+        OpenAdmission::StreamsFull => {
+            send_stream_error(
+                outbound_tx,
+                stream_id,
+                error_code::STREAM_CAPACITY,
+                "relay is at max_streams capacity",
+            )
+            .await;
+            return true;
+        }
+        OpenAdmission::ThroughputExceeded => {
+            send_stream_error(
+                outbound_tx,
+                stream_id,
+                error_code::THROUGHPUT_EXCEEDED,
+                "relay forwarded-throughput threshold exceeded",
+            )
+            .await;
+            return true;
+        }
+    }
     let relay_stream_id = target.next_relay_stream.fetch_add(2, Ordering::SeqCst);
     let forward = routing.open(
         RouteKey {
@@ -350,11 +406,17 @@ async fn handle_open_stream(
 
 /// Forwards a `Data`/`Window` frame along its route. Unknown or closed
 /// streams get a structured error and the link stays up.
+/// Forwards a `Data`/`Window` frame along its route. Unknown or closed
+/// streams get a structured error and the link stays up. `forwarded_bytes`
+/// feeds the throughput meter after a successful enqueue (zero for
+/// non-Data frames).
 async fn forward_routed(
     routing: &Arc<RoutingTable>,
     connection_id: u64,
     stream_id: u32,
     outbound_tx: &mpsc::Sender<Frame>,
+    meter: &SharedUsageMeter,
+    forwarded_bytes: usize,
     build: impl FnOnce(u32) -> Frame,
 ) {
     match routing.lookup(RouteKey {
@@ -377,6 +439,8 @@ async fn forward_routed(
                     "peer link closed",
                 )
                 .await;
+            } else if forwarded_bytes > 0 {
+                meter.record(forwarded_bytes);
             }
         }
         Lookup::Closed => {

@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
-async fn admin_request(
+pub(super) async fn admin_request(
     addr: &crate::platform::remote_ipc::RemoteControlAddr,
     request: &str,
 ) -> String {
