@@ -114,7 +114,8 @@ When modifying code that uses threads, mutexes, channels, or event loops in this
 - **Prefer message passing over shared mutable state**. Use channels to communicate between loops; keep mutexes for data wholly internal to one thread/loop.
 - **Verify concurrency changes**. After touching concurrency code, run:
   - `cargo clippy -- -D warnings`
-  - `cargo test --release ratatui session_sync`
+  - `cargo test --release ratatui`
+  - `cargo test --release session_sync`
   - If the change affects lock-free paths, add or run a `loom` model test.
 
 Reference skill: [actionbook/rust-skills m07-concurrency](.rust-skills/skills/m07-concurrency/SKILL.md).
