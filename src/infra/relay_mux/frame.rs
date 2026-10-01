@@ -8,9 +8,13 @@
 //! ```text
 //! +0  type       u8    0x01 Open | 0x02 Close | 0x03 Data | 0x04 Window
 //!                    | 0x05 Register | 0x06 Unregister | 0x07 Heartbeat
+//!                    | 0x08 OpenStream | 0x09 Error | 0x0A CloseStream
 //! +1  flags      u8    reserved, must be zero
 //! +2  stream_id  u32   stream frames: odd = client-initiated, even =
-//!                    server-initiated; control frames: reserved, must be 0
+//!                    server-initiated; control frames on relay links:
+//!                    Register/Unregister/Heartbeat reserved 0; OpenStream:
+//!                    the routed stream id; Error/CloseStream: the stream
+//!                    the frame concerns (0 = none)
 //! +6  length     u32   payload length in bytes (<= MAX_FRAME_PAYLOAD)
 //! +10 payload    type-specific:
 //!                Open:       empty
@@ -25,6 +29,15 @@
 //!                            certificate fingerprint
 //!                Unregister: empty — graceful node shutdown
 //!                Heartbeat:  empty — liveness, one per heartbeat interval
+//!                OpenStream: UTF-8 target node id (<= MAX_NODE_ID_LEN) —
+//!                            node→relay: open a routed stream to the
+//!                            target; relay→node: a stream opened by the
+//!                            given peer (stream_id is relay-allocated,
+//!                            even)
+//!                Error:      u16 big-endian code + UTF-8 message
+//!                            (structured reason, see relay_routing)
+//!                CloseStream: empty — full teardown of the routed stream
+//!                            `stream_id`, both directions
 //! ```
 //!
 //! `Close` is the half-close: the sender will send no more `Data` on this
@@ -48,6 +61,9 @@ const TYPE_WINDOW: u8 = 0x04;
 const TYPE_REGISTER: u8 = 0x05;
 const TYPE_UNREGISTER: u8 = 0x06;
 const TYPE_HEARTBEAT: u8 = 0x07;
+const TYPE_OPEN_STREAM: u8 = 0x08;
+const TYPE_ERROR: u8 = 0x09;
+const TYPE_CLOSE_STREAM: u8 = 0x0A;
 
 /// Frame type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +75,9 @@ pub enum FrameType {
     Register,
     Unregister,
     Heartbeat,
+    OpenStream,
+    Error,
+    CloseStream,
 }
 
 impl FrameType {
@@ -71,6 +90,9 @@ impl FrameType {
             FrameType::Register => TYPE_REGISTER,
             FrameType::Unregister => TYPE_UNREGISTER,
             FrameType::Heartbeat => TYPE_HEARTBEAT,
+            FrameType::OpenStream => TYPE_OPEN_STREAM,
+            FrameType::Error => TYPE_ERROR,
+            FrameType::CloseStream => TYPE_CLOSE_STREAM,
         }
     }
 
@@ -83,6 +105,9 @@ impl FrameType {
             TYPE_REGISTER => Ok(FrameType::Register),
             TYPE_UNREGISTER => Ok(FrameType::Unregister),
             TYPE_HEARTBEAT => Ok(FrameType::Heartbeat),
+            TYPE_OPEN_STREAM => Ok(FrameType::OpenStream),
+            TYPE_ERROR => Ok(FrameType::Error),
+            TYPE_CLOSE_STREAM => Ok(FrameType::CloseStream),
             other => Err(MuxError::InvalidFrameType(other)),
         }
     }
@@ -107,16 +132,35 @@ pub enum Frame {
     Unregister,
     /// Relay control: liveness ping from a registered node.
     Heartbeat,
+    /// Relay control: open a routed stream toward `target_node_id`;
+    /// `stream_id` is the routed stream id (odd = node-initiated, even =
+    /// relay-initiated on relay links).
+    OpenStream {
+        stream_id: u32,
+        target_node_id: String,
+    },
+    /// Relay control: structured error concerning `stream_id` (0 = none).
+    Error {
+        stream_id: u32,
+        code: u16,
+        message: String,
+    },
+    /// Relay control: full teardown of the routed stream `stream_id`.
+    CloseStream { stream_id: u32 },
 }
 
 impl Frame {
-    /// Returns the stream id the frame belongs to (0 for control frames).
+    /// Returns the stream id the frame belongs to (0 for stream-less
+    /// control frames).
     pub fn stream_id(&self) -> u32 {
         match self {
             Frame::Open { stream_id }
             | Frame::Close { stream_id }
             | Frame::Data { stream_id, .. }
-            | Frame::Window { stream_id, .. } => *stream_id,
+            | Frame::Window { stream_id, .. }
+            | Frame::OpenStream { stream_id, .. }
+            | Frame::Error { stream_id, .. }
+            | Frame::CloseStream { stream_id } => *stream_id,
             Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat => 0,
         }
     }
@@ -130,6 +174,9 @@ impl Frame {
             Frame::Register { .. } => FrameType::Register,
             Frame::Unregister => FrameType::Unregister,
             Frame::Heartbeat => FrameType::Heartbeat,
+            Frame::OpenStream { .. } => FrameType::OpenStream,
+            Frame::Error { .. } => FrameType::Error,
+            Frame::CloseStream { .. } => FrameType::CloseStream,
         }
     }
 
@@ -138,8 +185,13 @@ impl Frame {
             Frame::Open { .. } | Frame::Close { .. } => 0,
             Frame::Data { payload, .. } => payload.len(),
             Frame::Window { .. } => 8,
-            Frame::Register { node_id } => node_id.len(),
-            Frame::Unregister | Frame::Heartbeat => 0,
+            Frame::Register { node_id }
+            | Frame::OpenStream {
+                target_node_id: node_id,
+                ..
+            } => node_id.len(),
+            Frame::Error { message, .. } => 2 + message.len(),
+            Frame::Unregister | Frame::Heartbeat | Frame::CloseStream { .. } => 0,
         }
     }
 
@@ -147,8 +199,20 @@ impl Frame {
         match self {
             Frame::Data { payload, .. } => out.extend_from_slice(payload),
             Frame::Window { credit, .. } => out.extend_from_slice(&credit.to_be_bytes()),
-            Frame::Register { node_id } => out.extend_from_slice(node_id.as_bytes()),
-            Frame::Open { .. } | Frame::Close { .. } | Frame::Unregister | Frame::Heartbeat => {}
+            Frame::Register { node_id }
+            | Frame::OpenStream {
+                target_node_id: node_id,
+                ..
+            } => out.extend_from_slice(node_id.as_bytes()),
+            Frame::Error { code, message, .. } => {
+                out.extend_from_slice(&code.to_be_bytes());
+                out.extend_from_slice(message.as_bytes());
+            }
+            Frame::Open { .. }
+            | Frame::Close { .. }
+            | Frame::Unregister
+            | Frame::Heartbeat
+            | Frame::CloseStream { .. } => {}
         }
     }
 
@@ -206,6 +270,31 @@ impl Frame {
                 Err(MuxError::InvalidStreamId(FrameType::Unregister, stream_id))
             }
             FrameType::Heartbeat => Err(MuxError::InvalidStreamId(FrameType::Heartbeat, stream_id)),
+            FrameType::OpenStream => {
+                if length > MAX_NODE_ID_LEN {
+                    return Err(MuxError::InvalidPayload(FrameType::OpenStream, length));
+                }
+                let target_node_id = String::from_utf8(payload.to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::OpenStream, length))?;
+                Ok(Frame::OpenStream {
+                    stream_id,
+                    target_node_id,
+                })
+            }
+            FrameType::Error => {
+                let code_bytes: [u8; 2] = payload[..payload.len().min(2)]
+                    .try_into()
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::Error, length))?;
+                let code = u16::from_be_bytes(code_bytes);
+                let message = String::from_utf8(payload[2.min(payload.len())..].to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::Error, length))?;
+                Ok(Frame::Error {
+                    stream_id,
+                    code,
+                    message,
+                })
+            }
+            FrameType::CloseStream if payload.is_empty() => Ok(Frame::CloseStream { stream_id }),
             other => Err(MuxError::InvalidPayload(other, length)),
         }
     }
@@ -340,9 +429,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_frame_type() {
-        let header = [0x09u8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
-        let error = Frame::decode(&header, &[]).expect_err("type 0x09 should be rejected");
-        assert!(matches!(error, MuxError::InvalidFrameType(0x09)));
+        // 0x0B is unallocated; 0x01..=0x0A are all assigned frame types.
+        let header = [0x0bu8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("type 0x0B should be rejected");
+        assert!(matches!(error, MuxError::InvalidFrameType(0x0b)));
     }
 
     #[test]
@@ -477,6 +567,84 @@ mod tests {
         assert!(matches!(
             error,
             MuxError::InvalidPayload(FrameType::Register, 1)
+        ));
+    }
+
+    #[test]
+    fn open_stream_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::OpenStream {
+            stream_id: 1,
+            target_node_id: "node-b".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, b'n', b'o', b'd', b'e',
+                b'-', b'b'
+            ]
+        );
+    }
+
+    #[test]
+    fn error_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::Error {
+            stream_id: 9,
+            code: 0x0002,
+            message: "nope".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x09, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x06, 0x00, 0x02, b'n', b'o',
+                b'p', b'e'
+            ]
+        );
+    }
+
+    #[test]
+    fn close_stream_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::CloseStream { stream_id: 4 });
+        assert_eq!(
+            bytes,
+            vec![0x0A, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn routing_control_frames_round_trip() {
+        let frames = vec![
+            Frame::OpenStream {
+                stream_id: 3,
+                target_node_id: "peer-node".to_string(),
+            },
+            Frame::Error {
+                stream_id: 3,
+                code: u16::MAX,
+                message: "structured reason".to_string(),
+            },
+            Frame::CloseStream { stream_id: 2 },
+        ];
+        for frame in frames {
+            let bytes = encoded(&frame);
+            let mut slice = bytes.as_slice();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let decoded = runtime
+                .block_on(read_frame(&mut slice))
+                .expect("frame should decode");
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_error_payload_shorter_than_code() {
+        let header = [0x09u8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01];
+        let error = Frame::decode(&header, &[0x00]).expect_err("error needs a 2-byte code");
+        assert!(matches!(
+            error,
+            MuxError::InvalidPayload(FrameType::Error, 1)
         ));
     }
 }

@@ -6,8 +6,10 @@ pub mod peer_connection;
 pub mod relay_connection_table;
 // relay_mux lands ahead of its first consumer (the node relay client in the
 // relay daemon slices); remove this allow once it is wired in.
+pub mod relay_link;
 #[allow(dead_code)]
 pub mod relay_mux;
+pub mod relay_routing;
 pub mod relay_server;
 pub mod remote_grpc_proto;
 pub mod remote_grpc_transport;
