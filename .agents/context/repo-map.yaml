@@ -66,6 +66,12 @@ module_map:
         stream with half-close bookkeeping, structured error codes
         (TARGET_UNKNOWN/STREAM_UNKNOWN/STREAM_CLOSED), teardown that
         notifies surviving peers with CloseStream
+    - path: src/infra/relay_admin.rs
+      responsibility: >
+        relay local admin socket (issue #55): owner-only channel per the
+        remote_ipc owner-control pattern; one-JSON-request protocol with
+        connection-table status and graceful shutdown today; invite/remove
+        land with the enrollment slice
     - path: src/infra/relay_connection_table.rs
       responsibility: >
         memory-only node_id -> connection registry (issue #53):
