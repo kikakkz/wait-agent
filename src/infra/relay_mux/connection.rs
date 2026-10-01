@@ -365,6 +365,17 @@ async fn reader_loop(
                     waker.wake();
                 }
             }
+            // Relay control frames (register / unregister / heartbeat) belong
+            // on the node-to-relay link, which the daemon reads directly —
+            // never on a node-to-node mux connection.
+            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat => {
+                fail_connection(
+                    &shared,
+                    &table,
+                    "relay control frame on a node-to-node mux connection",
+                );
+                return;
+            }
         }
     }
 }

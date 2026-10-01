@@ -87,6 +87,8 @@ pub enum MuxError {
     PayloadTooLong(u32),
     #[error("invalid {0:?} payload length {1}")]
     InvalidPayload(FrameType, u32),
+    #[error("invalid stream id {1} for control frame {0:?}")]
+    InvalidStreamId(FrameType, u32),
     #[error("truncated frame header or payload")]
     TruncatedFrame,
     #[error("frame for unknown or fully closed stream {0}")]
@@ -111,6 +113,7 @@ impl From<MuxError> for io::Error {
             | MuxError::InvalidFlags(_)
             | MuxError::PayloadTooLong(_)
             | MuxError::InvalidPayload(_, _)
+            | MuxError::InvalidStreamId(_, _)
             | MuxError::ProtocolViolation(_) => {
                 io::Error::new(ErrorKind::InvalidData, error.to_string())
             }

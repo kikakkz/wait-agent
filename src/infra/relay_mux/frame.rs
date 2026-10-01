@@ -1,19 +1,30 @@
-//! Mux frame codec: deterministic wire layout, pure encode/decode.
+//! Frame codec: deterministic wire layout, pure encode/decode.
 //!
 //! Every frame is a fixed 10-byte big-endian header followed by a
-//! type-specific payload:
+//! type-specific payload. Two frame families share the wire format on a
+//! relay link (docs/relay-design.md 协议分层): stream frames and relay
+//! control frames.
 //!
 //! ```text
 //! +0  type       u8    0x01 Open | 0x02 Close | 0x03 Data | 0x04 Window
+//!                    | 0x05 Register | 0x06 Unregister | 0x07 Heartbeat
 //! +1  flags      u8    reserved, must be zero
-//! +2  stream_id  u32   odd = client-initiated, even = server-initiated
+//! +2  stream_id  u32   stream frames: odd = client-initiated, even =
+//!                    server-initiated; control frames: reserved, must be 0
 //! +6  length     u32   payload length in bytes (<= MAX_FRAME_PAYLOAD)
 //! +10 payload    type-specific:
-//!                Open:   empty
-//!                Close:  empty — closes the sender's write leg (half-close);
-//!                        the stream ends when both legs are closed
-//!                Data:   application bytes
-//!                Window: u64 big-endian credit delta (bytes newly granted)
+//!                Open:       empty
+//!                Close:      empty — closes the sender's write leg
+//!                            (half-close); the stream ends when both legs
+//!                            are closed
+//!                Data:       application bytes
+//!                Window:     u64 big-endian credit delta (bytes newly
+//!                            granted)
+//!                Register:   UTF-8 node id (<= MAX_NODE_ID_LEN bytes); the
+//!                            relay requires it to equal the peer's mTLS
+//!                            certificate fingerprint
+//!                Unregister: empty — graceful node shutdown
+//!                Heartbeat:  empty — liveness, one per heartbeat interval
 //! ```
 //!
 //! `Close` is the half-close: the sender will send no more `Data` on this
@@ -27,18 +38,27 @@ use super::{MuxError, MAX_FRAME_PAYLOAD};
 /// Fixed header length in bytes.
 pub const HEADER_LEN: usize = 10;
 
+/// Maximum byte length of a Register node id payload.
+pub const MAX_NODE_ID_LEN: u32 = 256;
+
 const TYPE_OPEN: u8 = 0x01;
 const TYPE_CLOSE: u8 = 0x02;
 const TYPE_DATA: u8 = 0x03;
 const TYPE_WINDOW: u8 = 0x04;
+const TYPE_REGISTER: u8 = 0x05;
+const TYPE_UNREGISTER: u8 = 0x06;
+const TYPE_HEARTBEAT: u8 = 0x07;
 
-/// Mux frame type.
+/// Frame type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
     Open,
     Close,
     Data,
     Window,
+    Register,
+    Unregister,
+    Heartbeat,
 }
 
 impl FrameType {
@@ -48,6 +68,9 @@ impl FrameType {
             FrameType::Close => TYPE_CLOSE,
             FrameType::Data => TYPE_DATA,
             FrameType::Window => TYPE_WINDOW,
+            FrameType::Register => TYPE_REGISTER,
+            FrameType::Unregister => TYPE_UNREGISTER,
+            FrameType::Heartbeat => TYPE_HEARTBEAT,
         }
     }
 
@@ -57,12 +80,15 @@ impl FrameType {
             TYPE_CLOSE => Ok(FrameType::Close),
             TYPE_DATA => Ok(FrameType::Data),
             TYPE_WINDOW => Ok(FrameType::Window),
+            TYPE_REGISTER => Ok(FrameType::Register),
+            TYPE_UNREGISTER => Ok(FrameType::Unregister),
+            TYPE_HEARTBEAT => Ok(FrameType::Heartbeat),
             other => Err(MuxError::InvalidFrameType(other)),
         }
     }
 }
 
-/// A decoded mux frame.
+/// A decoded frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// Open a new stream; `stream_id` must use the initiator's parity.
@@ -74,16 +100,24 @@ pub enum Frame {
     /// Grant `credit` additional send bytes to the peer's write leg of
     /// `stream_id`.
     Window { stream_id: u32, credit: u64 },
+    /// Relay control: register this link as `node_id` (must equal the
+    /// peer's mTLS certificate fingerprint on the relay link).
+    Register { node_id: String },
+    /// Relay control: graceful node shutdown.
+    Unregister,
+    /// Relay control: liveness ping from a registered node.
+    Heartbeat,
 }
 
 impl Frame {
-    /// Returns the stream id the frame belongs to.
+    /// Returns the stream id the frame belongs to (0 for control frames).
     pub fn stream_id(&self) -> u32 {
         match self {
             Frame::Open { stream_id }
             | Frame::Close { stream_id }
             | Frame::Data { stream_id, .. }
             | Frame::Window { stream_id, .. } => *stream_id,
+            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat => 0,
         }
     }
 
@@ -93,6 +127,9 @@ impl Frame {
             Frame::Close { .. } => FrameType::Close,
             Frame::Data { .. } => FrameType::Data,
             Frame::Window { .. } => FrameType::Window,
+            Frame::Register { .. } => FrameType::Register,
+            Frame::Unregister => FrameType::Unregister,
+            Frame::Heartbeat => FrameType::Heartbeat,
         }
     }
 
@@ -101,6 +138,8 @@ impl Frame {
             Frame::Open { .. } | Frame::Close { .. } => 0,
             Frame::Data { payload, .. } => payload.len(),
             Frame::Window { .. } => 8,
+            Frame::Register { node_id } => node_id.len(),
+            Frame::Unregister | Frame::Heartbeat => 0,
         }
     }
 
@@ -108,7 +147,8 @@ impl Frame {
         match self {
             Frame::Data { payload, .. } => out.extend_from_slice(payload),
             Frame::Window { credit, .. } => out.extend_from_slice(&credit.to_be_bytes()),
-            Frame::Open { .. } | Frame::Close { .. } => {}
+            Frame::Register { node_id } => out.extend_from_slice(node_id.as_bytes()),
+            Frame::Open { .. } | Frame::Close { .. } | Frame::Unregister | Frame::Heartbeat => {}
         }
     }
 
@@ -149,6 +189,23 @@ impl Frame {
                     .map_err(|_| MuxError::InvalidPayload(FrameType::Window, length))?;
                 Ok(Frame::Window { stream_id, credit })
             }
+            FrameType::Register => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(FrameType::Register, stream_id));
+                }
+                if length > MAX_NODE_ID_LEN {
+                    return Err(MuxError::InvalidPayload(FrameType::Register, length));
+                }
+                let node_id = String::from_utf8(payload.to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::Register, length))?;
+                Ok(Frame::Register { node_id })
+            }
+            FrameType::Unregister if payload.is_empty() && stream_id == 0 => Ok(Frame::Unregister),
+            FrameType::Heartbeat if payload.is_empty() && stream_id == 0 => Ok(Frame::Heartbeat),
+            FrameType::Unregister => {
+                Err(MuxError::InvalidStreamId(FrameType::Unregister, stream_id))
+            }
+            FrameType::Heartbeat => Err(MuxError::InvalidStreamId(FrameType::Heartbeat, stream_id)),
             other => Err(MuxError::InvalidPayload(other, length)),
         }
     }
@@ -349,5 +406,77 @@ mod tests {
         write_frame(&mut left, &frame).await.expect("write");
         let decoded = read_frame(&mut right).await.expect("read");
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn register_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::Register {
+            node_id: "node-a".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, b'n', b'o', b'd', b'e',
+                b'-', b'a'
+            ]
+        );
+    }
+
+    #[test]
+    fn unregister_and_heartbeat_have_zero_stream_id_and_empty_payload() {
+        let unregister = encoded(&Frame::Unregister);
+        assert_eq!(
+            unregister,
+            vec![0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        let heartbeat = encoded(&Frame::Heartbeat);
+        assert_eq!(
+            heartbeat,
+            vec![0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn control_frames_round_trip() {
+        let frames = vec![
+            Frame::Register {
+                node_id: "7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4"
+                    .to_string(),
+            },
+            Frame::Unregister,
+            Frame::Heartbeat,
+        ];
+        for frame in frames {
+            let bytes = encoded(&frame);
+            let mut slice = bytes.as_slice();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let decoded = runtime
+                .block_on(read_frame(&mut slice))
+                .expect("frame should decode");
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_control_frames_with_nonzero_stream_id() {
+        let header = [0x06u8, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("stream id must be zero");
+        assert!(matches!(
+            error,
+            MuxError::InvalidStreamId(FrameType::Unregister, 7)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_non_utf8_register_payload() {
+        let header = [0x05u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let error = Frame::decode(&header, &[0xff]).expect_err("node id must be utf-8");
+        assert!(matches!(
+            error,
+            MuxError::InvalidPayload(FrameType::Register, 1)
+        ));
     }
 }

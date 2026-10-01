@@ -1,34 +1,40 @@
-//! Relay transport gate: TLS listener requiring client certificates whose
-//! SHA-256 SPKI fingerprint is whitelisted in an `authorized_nodes/`
-//! directory.
+//! Relay transport gate and connection lifecycle: TLS listener requiring
+//! client certificates whose SHA-256 SPKI fingerprint is whitelisted in an
+//! `authorized_nodes/` directory; authenticated links then speak the framed
+//! relay protocol (docs/relay-design.md 协议分层): the first frame must be
+//! `Register`, after which the link is a connection-table entry kept alive
+//! by heartbeats and removed by unregister, link loss, replacement, or
+//! heartbeat-timeout eviction (node 生命周期).
 //!
-//! Governing design: docs/relay-design.md (身份认证与入网 / node 生命周期 /
-//! 管理通道). Device identity is the self-signed certificate fingerprint
-//! (no CA); the relay requests a client certificate during the mTLS
-//! handshake, and a fingerprint that is not whitelisted fails the handshake
-//! at the transport layer — the same layer where revoked nodes fail on
-//! their next handshake after their whitelist entry is removed.
+//! Device identity is the self-signed certificate fingerprint (no CA); the
+//! relay requests a client certificate during the mTLS handshake, and a
+//! fingerprint that is not whitelisted fails the handshake at the transport
+//! layer — the same layer where revoked nodes fail on their next handshake
+//! after their whitelist entry is removed.
 //!
-//! This slice is the transport gate only: authenticated connections are held
-//! open until shutdown; the register/heartbeat protocol loop that reads from
-//! them lands with the connection-table slice.
+//! The connection table is memory-only (数据策略): the relay persists no
+//! session or traffic data. Stream routing (`open_stream` between
+//! registered nodes) lands with the routing slice.
 
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
+use crate::infra::relay_connection_table::{
+    RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
+};
+use crate::infra::relay_mux::frame::{read_frame, Frame};
 
 // rustls re-exports `HandshakeSignatureValid` under `client::danger` for both
 // verifier kinds; there is no `server::danger` re-export.
@@ -66,17 +72,22 @@ pub struct RelayServeConfig {
     pub authorized_nodes_dir: PathBuf,
     /// The relay's own identity (self-signed certificate).
     pub credentials: NodeCredentialPaths,
+    /// Connection-table lifecycle timing (heartbeat eviction and the
+    /// register deadline).
+    pub lifecycle: RelayLifecycleConfig,
 }
 
 impl RelayServeConfig {
     /// Returns the default configuration for `listen`: whitelist under
-    /// `~/.waitagent/authorized_nodes/`, credentials at the default paths.
+    /// `~/.waitagent/authorized_nodes/`, credentials at the default paths,
+    /// lifecycle timing per docs/relay-design.md (node 生命周期).
     pub fn new(listen: SocketAddr) -> Self {
         Self {
             listen,
             authorized_nodes_dir: crate::host::ssh::remote_host_home::waitagent_home()
                 .join("authorized_nodes"),
             credentials: NodeCredentialPaths::default_paths(),
+            lifecycle: RelayLifecycleConfig::default(),
         }
     }
 }
@@ -205,7 +216,7 @@ impl rustls::server::danger::ClientCertVerifier for WhitelistedClientCertVerifie
 /// Handle to a running relay transport gate.
 pub struct RelayServerHandle {
     local_addr: SocketAddr,
-    active: Arc<AtomicUsize>,
+    table: Arc<RelayConnectionTable>,
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -216,12 +227,12 @@ impl RelayServerHandle {
         self.local_addr
     }
 
-    /// Returns the number of authenticated connections currently held.
+    /// Returns the number of registered nodes in the connection table.
     pub fn active_connections(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        self.table.len()
     }
 
-    /// Stops the accept loop and closes all held connections.
+    /// Stops the accept loop, the sweeper, and every link task.
     ///
     /// Dropping the handle without calling `shutdown` has the same effect:
     /// the watch senders drop, the loops observe `changed()` resolving, and
@@ -235,11 +246,22 @@ impl RelayServerHandle {
     }
 }
 
+/// A running relay: the server handle plus the lifecycle event stream.
+/// Events are ephemeral notifications (see [`RelayLifecycleEvent`]); dropping
+/// the receiver never affects connection handling.
+pub struct StartedRelay {
+    pub server: RelayServerHandle,
+    pub events: mpsc::Receiver<RelayLifecycleEvent>,
+}
+
+const EVENT_QUEUE: usize = 128;
+
 /// Starts the relay transport gate: binds the listener, ensures the relay's
-/// own credentials, and spawns the accept loop. Authenticated connections
-/// are held until shutdown — the protocol loop lands with the
-/// connection-table slice.
-pub async fn start(config: RelayServeConfig) -> Result<RelayServerHandle, RelayServerError> {
+/// own credentials, and spawns the accept loop plus the eviction sweeper.
+/// Every authenticated link runs the register/heartbeat lifecycle and owns
+/// its connection-table entry until unregister, loss, replacement, or
+/// eviction.
+pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServerError> {
     node_credentials::ensure_credentials(&config.credentials)?;
     let cert_pem = fs::read_to_string(&config.credentials.cert_path)?;
     let key_pem = fs::read_to_string(&config.credentials.key_path)?;
@@ -262,9 +284,30 @@ pub async fn start(config: RelayServeConfig) -> Result<RelayServerHandle, RelayS
     let local_addr = listener.local_addr()?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let active = Arc::new(AtomicUsize::new(0));
-    let task_shutdown_tx = shutdown_tx.clone();
-    let task_active = active.clone();
+    let table = Arc::new(RelayConnectionTable::default());
+    let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
+    let lifecycle = config.lifecycle.clone();
+
+    let sweeper_table = table.clone();
+    let sweeper_lifecycle = lifecycle.clone();
+    let mut sweeper_shutdown = shutdown_tx.subscribe();
+    let sweeper_events = events_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = sweeper_shutdown.changed() => return,
+                _ = tokio::time::sleep(sweeper_lifecycle.sweep_interval) => {
+                    for (node_id, entry) in sweeper_table.evict_idle(sweeper_lifecycle.offline_after) {
+                        let _ = entry.retire_tx.send(true);
+                        let _ = sweeper_events.try_send(RelayLifecycleEvent::EvictedOffline { node_id });
+                    }
+                }
+            }
+        }
+    });
+
+    let task_table = table.clone();
+    let task_events = events_tx;
 
     let task = tokio::spawn(async move {
         loop {
@@ -276,8 +319,9 @@ pub async fn start(config: RelayServeConfig) -> Result<RelayServerHandle, RelayS
                         break;
                     };
                     let acceptor = acceptor.clone();
-                    let active = task_active.clone();
-                    let mut conn_shutdown = task_shutdown_tx.subscribe();
+                    let table = task_table.clone();
+                    let events = task_events.clone();
+                    let lifecycle = lifecycle.clone();
                     tokio::spawn(async move {
                         let handshake =
                             tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
@@ -296,26 +340,144 @@ pub async fn start(config: RelayServeConfig) -> Result<RelayServerHandle, RelayS
                             }
                             Ok(Ok(tls)) => tls,
                         };
-                        active.fetch_add(1, Ordering::SeqCst);
-                        // Transport gate: hold the authenticated connection
-                        // until shutdown. The register/heartbeat protocol
-                        // loop replaces this hold in the connection-table
-                        // slice.
-                        let _tls = tls;
-                        let _ = conn_shutdown.changed().await;
-                        active.fetch_sub(1, Ordering::SeqCst);
+                        run_link_lifecycle(tls, peer_addr, table, events, lifecycle).await;
                     });
                 }
             }
         }
     });
 
-    Ok(RelayServerHandle {
-        local_addr,
-        active,
-        shutdown_tx,
-        task,
+    Ok(StartedRelay {
+        server: RelayServerHandle {
+            local_addr,
+            table,
+            shutdown_tx,
+            task,
+        },
+        events: events_rx,
     })
+}
+
+type ServerTls = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+
+/// Post-handshake link lifecycle: register, heartbeat, unregister.
+async fn run_link_lifecycle(
+    mut tls: ServerTls,
+    peer_addr: SocketAddr,
+    table: Arc<RelayConnectionTable>,
+    events: mpsc::Sender<RelayLifecycleEvent>,
+    lifecycle: RelayLifecycleConfig,
+) {
+    let peer_fingerprint = {
+        let (_, server_conn) = tls.get_ref();
+        match server_conn
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+        {
+            Some(cert) => match node_credentials::cert_fingerprint_from_der(cert.as_ref()) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    ERROR_LOG.log_error(format!(
+                        "[relay] {peer_addr}: peer certificate fingerprint failed: {error}"
+                    ));
+                    return;
+                }
+            },
+            // Mandatory client auth makes this an invariant; a missing peer
+            // certificate means the rustls contract broke — close the link
+            // rather than continue without identity.
+            None => {
+                ERROR_LOG.log_error(format!(
+                    "[relay] {peer_addr}: no peer certificate after mandatory client auth"
+                ));
+                return;
+            }
+        }
+    };
+
+    // The first frame must be Register within the deadline.
+    let first = tokio::time::timeout(lifecycle.register_timeout, read_frame(&mut tls)).await;
+    let node_id = match first {
+        Err(_) => {
+            ERROR_LOG.log_error(format!("[relay] {peer_addr}: register deadline exceeded"));
+            return;
+        }
+        Ok(Err(error)) => {
+            ERROR_LOG.log_error(format!(
+                "[relay] {peer_addr}: link closed before register: {error}"
+            ));
+            return;
+        }
+        Ok(Ok(Frame::Register { node_id })) => node_id,
+        Ok(Ok(other)) => {
+            ERROR_LOG.log_error(format!(
+                "[relay] {peer_addr}: first frame must be Register, got {other:?}"
+            ));
+            return;
+        }
+    };
+
+    // The node id is self-proving only when it equals the mTLS fingerprint
+    // (docs/relay-design.md node_id 策略); anything else is a
+    // misconfiguration or an impostor and must never register.
+    if !node_id.eq_ignore_ascii_case(&peer_fingerprint) {
+        ERROR_LOG.log_error(format!(
+            "[relay] {peer_addr}: register node id {node_id:?} does not match peer fingerprint {peer_fingerprint}"
+        ));
+        return;
+    }
+
+    let registered = table.register(&node_id);
+    match &registered.previous {
+        Some(previous) => {
+            let _ = previous.retire_tx.send(true);
+            let _ = events.try_send(RelayLifecycleEvent::Replaced {
+                node_id: node_id.clone(),
+            });
+        }
+        None => {
+            let _ = events.try_send(RelayLifecycleEvent::Registered {
+                node_id: node_id.clone(),
+            });
+        }
+    }
+
+    let mut retire_rx = registered.retire_rx;
+    loop {
+        tokio::select! {
+            _ = retire_rx.changed() => {
+                // Replaced or evicted: the table entry is already gone or
+                // owned by a successor; never remove someone else's entry.
+                table.remove_if_current(&node_id, registered.connection_id);
+                break;
+            }
+            read = read_frame(&mut tls) => {
+                match read {
+                    Ok(Frame::Heartbeat) => table.touch(&node_id, registered.connection_id),
+                    Ok(Frame::Unregister) => {
+                        if table.remove_if_current(&node_id, registered.connection_id) {
+                            let _ = events.try_send(RelayLifecycleEvent::Unregistered { node_id: node_id.clone() });
+                        }
+                        break;
+                    }
+                    Ok(other) => {
+                        ERROR_LOG.log_error(format!(
+                            "[relay] {peer_addr} ({node_id}): unexpected frame on relay link: {other:?}; stream routing lands with the routing slice"
+                        ));
+                        table.remove_if_current(&node_id, registered.connection_id);
+                        break;
+                    }
+                    Err(error) => {
+                        ERROR_LOG.log_error(format!(
+                            "[relay] {peer_addr} ({node_id}): link closed: {error}"
+                        ));
+                        table.remove_if_current(&node_id, registered.connection_id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -482,11 +644,15 @@ mod tests {
     }
 
     struct RunningServer {
-        handle: RelayServerHandle,
+        server: RelayServerHandle,
+        events: mpsc::Receiver<RelayLifecycleEvent>,
         config: RelayServeConfig,
     }
 
-    async fn start_test_server(whitelist: &[String]) -> RunningServer {
+    async fn start_test_server_with(
+        whitelist: &[String],
+        lifecycle: RelayLifecycleConfig,
+    ) -> RunningServer {
         install_provider();
         let dir = temp_dir("server");
         let whitelist_dir = dir.join("authorized_nodes");
@@ -501,9 +667,18 @@ mod tests {
                 key_path: dir.join("relay.key"),
                 cert_path: dir.join("relay.crt"),
             },
+            lifecycle,
         };
-        let handle = start(config.clone()).await.expect("server should start");
-        RunningServer { handle, config }
+        let started = start(config.clone()).await.expect("server should start");
+        RunningServer {
+            server: started.server,
+            events: started.events,
+            config,
+        }
+    }
+
+    async fn start_test_server(whitelist: &[String]) -> RunningServer {
+        start_test_server_with(whitelist, RelayLifecycleConfig::default()).await
     }
 
     async fn active_connections_reaches(handle: &RelayServerHandle, expected: usize) {
@@ -515,6 +690,59 @@ mod tests {
                 handle.active_connections()
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn next_event(rx: &mut mpsc::Receiver<RelayLifecycleEvent>) -> RelayLifecycleEvent {
+        timeout(NO_DEADLOCK, rx.recv())
+            .await
+            .expect("event should arrive within the deadline")
+            .expect("event stream should stay open")
+    }
+
+    type ClientTls = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+
+    async fn open_node_link(
+        addr: SocketAddr,
+        client: &TestNode,
+        server_der: &[u8],
+    ) -> Result<ClientTls, String> {
+        let verifier = Arc::new(ExactCertVerifier {
+            der: server_der.to_vec(),
+        });
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    client.cert_der.clone(),
+                )],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(client.key_der.clone()),
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|error| error.to_string())?;
+        let server_name = rustls::pki_types::ServerName::try_from("waitagent")
+            .map_err(|error| error.to_string())?;
+        connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Reads until the link ends; a closed lifecycle link surfaces as EOF or
+    /// an error, never as a hang.
+    async fn expect_link_closed(tls: &mut ClientTls) {
+        let mut buf = [0u8; 1];
+        let outcome = timeout(NO_DEADLOCK, tls.read(&mut buf)).await;
+        match outcome {
+            Ok(Ok(0)) => {}
+            Ok(Err(_)) => {}
+            other => panic!("link should close, got {other:?}"),
         }
     }
 
@@ -540,11 +768,12 @@ mod tests {
         let server = start_test_server(&[client.fingerprint()]).await;
         let server_der = server_cert_der(&server.config);
 
-        connect_client(server.handle.local_addr(), Some(&client), &server_der)
+        connect_client(server.server.local_addr(), Some(&client), &server_der)
             .await
             .expect("whitelisted client handshake should succeed");
-        active_connections_reaches(&server.handle, 1).await;
-        server.handle.shutdown().await;
+        // The link is now awaiting Register; nothing is registered yet.
+        active_connections_reaches(&server.server, 0).await;
+        server.server.shutdown().await;
     }
 
     #[tokio::test]
@@ -553,15 +782,15 @@ mod tests {
         let server = start_test_server(&[]).await;
         let server_der = server_cert_der(&server.config);
 
-        let error = connect_client(server.handle.local_addr(), Some(&client), &server_der)
+        let error = connect_client(server.server.local_addr(), Some(&client), &server_der)
             .await
             .expect_err("unknown fingerprint must fail the handshake");
         assert!(
             !error.is_empty(),
             "the client should observe a handshake failure, got: {error}"
         );
-        active_connections_reaches(&server.handle, 0).await;
-        server.handle.shutdown().await;
+        active_connections_reaches(&server.server, 0).await;
+        server.server.shutdown().await;
     }
 
     #[tokio::test]
@@ -569,14 +798,14 @@ mod tests {
         let server = start_test_server(&[]).await;
         let server_der = server_cert_der(&server.config);
 
-        let error = connect_client(server.handle.local_addr(), None, &server_der)
+        let error = connect_client(server.server.local_addr(), None, &server_der)
             .await
             .expect_err("offering no client certificate must fail the handshake");
         assert!(
             !error.is_empty(),
             "the client should observe a handshake failure, got: {error}"
         );
-        server.handle.shutdown().await;
+        server.server.shutdown().await;
     }
 
     #[tokio::test]
@@ -586,44 +815,273 @@ mod tests {
         let server = start_test_server(&[fingerprint.clone()]).await;
         let server_der = server_cert_der(&server.config);
 
-        connect_client(server.handle.local_addr(), Some(&client), &server_der)
+        let first_link = open_node_link(server.server.local_addr(), &client, &server_der)
             .await
             .expect("first handshake should succeed");
-        active_connections_reaches(&server.handle, 1).await;
 
         // Revoke: the whitelist entry goes away, so the next handshake fails
-        // at the transport layer while the already-authenticated connection
-        // stays held.
+        // at the transport layer while the earlier link stays open.
         fs::remove_file(server.config.authorized_nodes_dir.join(&fingerprint))
             .expect("revoke should remove the entry");
-        let error = connect_client(server.handle.local_addr(), Some(&client), &server_der)
+        let error = connect_client(server.server.local_addr(), Some(&client), &server_der)
             .await
             .expect_err("revoked fingerprint must fail new handshakes");
         assert!(!error.is_empty());
-        active_connections_reaches(&server.handle, 1).await;
-        server.handle.shutdown().await;
+        drop(first_link);
+        server.server.shutdown().await;
     }
 
     #[tokio::test]
-    async fn shutdown_terminates_listener_and_held_connections() {
+    async fn shutdown_terminates_listener_and_connections() {
         let client = TestNode::generate();
-        let server = start_test_server(&[client.fingerprint()]).await;
+        let mut server = start_test_server(&[client.fingerprint()]).await;
         let server_der = server_cert_der(&server.config);
 
-        connect_client(server.handle.local_addr(), Some(&client), &server_der)
+        let mut link = open_node_link(server.server.local_addr(), &client, &server_der)
             .await
             .expect("handshake should succeed");
-        active_connections_reaches(&server.handle, 1).await;
+        crate::infra::relay_mux::frame::write_frame(
+            &mut link,
+            &Frame::Register {
+                node_id: client.fingerprint(),
+            },
+        )
+        .await
+        .expect("register should write");
+        assert!(matches!(
+            next_event(&mut server.events).await,
+            RelayLifecycleEvent::Registered { .. }
+        ));
+        active_connections_reaches(&server.server, 1).await;
 
-        let addr = server.handle.local_addr();
-        server.handle.shutdown().await;
+        let addr = server.server.local_addr();
+        server.server.shutdown().await;
 
-        // The listener port must be closed after shutdown; held connections
-        // exit on the shutdown watch and drop with their tasks.
+        // The listener port must be closed after shutdown; link tasks exit
+        // on the shutdown watch and drop with their tasks.
         let connect = timeout(NO_DEADLOCK, tokio::net::TcpStream::connect(addr)).await;
         assert!(
             matches!(connect, Ok(Err(_))),
             "new connections must fail after shutdown, got: {connect:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn register_then_heartbeat_silence_evicts() {
+        let client = TestNode::generate();
+        let lifecycle = RelayLifecycleConfig::fast_for_tests();
+        let offline = lifecycle.offline_after;
+        let mut server = start_test_server_with(&[client.fingerprint()], lifecycle).await;
+        let server_der = server_cert_der(&server.config);
+
+        let mut link = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("handshake should succeed");
+        crate::infra::relay_mux::frame::write_frame(
+            &mut link,
+            &Frame::Register {
+                node_id: client.fingerprint(),
+            },
+        )
+        .await
+        .expect("register should write");
+        let node_id = match next_event(&mut server.events).await {
+            RelayLifecycleEvent::Registered { node_id } => node_id,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+        active_connections_reaches(&server.server, 1).await;
+
+        // Heartbeats keep the entry alive past the offline deadline.
+        for _ in 0..4 {
+            tokio::time::sleep(offline / 2).await;
+            crate::infra::relay_mux::frame::write_frame(&mut link, &Frame::Heartbeat)
+                .await
+                .expect("heartbeat should write");
+        }
+        assert_eq!(server.server.active_connections(), 1);
+
+        // Silence beyond the offline deadline evicts the node and closes
+        // the link.
+        match next_event(&mut server.events).await {
+            RelayLifecycleEvent::EvictedOffline { node_id: evicted } => {
+                assert_eq!(evicted, node_id);
+            }
+            other => panic!("expected EvictedOffline, got {other:?}"),
+        }
+        active_connections_reaches(&server.server, 0).await;
+        expect_link_closed(&mut link).await;
+        server.server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_register_replaces_stale_link() {
+        let client = TestNode::generate();
+        let mut server = start_test_server_with(
+            &[client.fingerprint()],
+            RelayLifecycleConfig::fast_for_tests(),
+        )
+        .await;
+        let server_der = server_cert_der(&server.config);
+
+        let mut stale = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("first handshake should succeed");
+        crate::infra::relay_mux::frame::write_frame(
+            &mut stale,
+            &Frame::Register {
+                node_id: client.fingerprint(),
+            },
+        )
+        .await
+        .expect("register should write");
+        assert!(matches!(
+            next_event(&mut server.events).await,
+            RelayLifecycleEvent::Registered { .. }
+        ));
+
+        let mut fresh = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("second handshake should succeed");
+        crate::infra::relay_mux::frame::write_frame(
+            &mut fresh,
+            &Frame::Register {
+                node_id: client.fingerprint(),
+            },
+        )
+        .await
+        .expect("re-register should write");
+        assert!(matches!(
+            next_event(&mut server.events).await,
+            RelayLifecycleEvent::Replaced { .. }
+        ));
+        active_connections_reaches(&server.server, 1).await;
+
+        // The stale link is retired and closed; the fresh link stays open.
+        expect_link_closed(&mut stale).await;
+        drop(fresh);
+        server.server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unregister_removes_entry_and_closes_link() {
+        let client = TestNode::generate();
+        let mut server = start_test_server_with(
+            &[client.fingerprint()],
+            RelayLifecycleConfig::fast_for_tests(),
+        )
+        .await;
+        let server_der = server_cert_der(&server.config);
+
+        let mut link = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("handshake should succeed");
+        let register = Frame::Register {
+            node_id: client.fingerprint(),
+        };
+        crate::infra::relay_mux::frame::write_frame(&mut link, &register)
+            .await
+            .expect("register should write");
+        assert!(matches!(
+            next_event(&mut server.events).await,
+            RelayLifecycleEvent::Registered { .. }
+        ));
+        active_connections_reaches(&server.server, 1).await;
+
+        crate::infra::relay_mux::frame::write_frame(&mut link, &Frame::Unregister)
+            .await
+            .expect("unregister should write");
+        assert!(matches!(
+            next_event(&mut server.events).await,
+            RelayLifecycleEvent::Unregistered { .. }
+        ));
+        active_connections_reaches(&server.server, 0).await;
+        expect_link_closed(&mut link).await;
+        server.server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn register_with_mismatched_node_id_closes_link() {
+        let client = TestNode::generate();
+        let server = start_test_server_with(
+            &[client.fingerprint()],
+            RelayLifecycleConfig::fast_for_tests(),
+        )
+        .await;
+        let server_der = server_cert_der(&server.config);
+
+        let mut link = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("handshake should succeed");
+        crate::infra::relay_mux::frame::write_frame(
+            &mut link,
+            &Frame::Register {
+                node_id: "impostor".to_string(),
+            },
+        )
+        .await
+        .expect("register should write");
+        expect_link_closed(&mut link).await;
+        active_connections_reaches(&server.server, 0).await;
+        server.server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn first_frame_must_be_register() {
+        let client = TestNode::generate();
+        let server = start_test_server_with(
+            &[client.fingerprint()],
+            RelayLifecycleConfig::fast_for_tests(),
+        )
+        .await;
+        let server_der = server_cert_der(&server.config);
+
+        let mut link = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("handshake should succeed");
+        crate::infra::relay_mux::frame::write_frame(&mut link, &Frame::Heartbeat)
+            .await
+            .expect("frame should write");
+        expect_link_closed(&mut link).await;
+        active_connections_reaches(&server.server, 0).await;
+        server.server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stream_frame_before_routing_fails_link() {
+        let client = TestNode::generate();
+        let mut server = start_test_server_with(
+            &[client.fingerprint()],
+            RelayLifecycleConfig::fast_for_tests(),
+        )
+        .await;
+        let server_der = server_cert_der(&server.config);
+
+        let mut link = open_node_link(server.server.local_addr(), &client, &server_der)
+            .await
+            .expect("handshake should succeed");
+        crate::infra::relay_mux::frame::write_frame(
+            &mut link,
+            &Frame::Register {
+                node_id: client.fingerprint(),
+            },
+        )
+        .await
+        .expect("register should write");
+        assert!(matches!(
+            next_event(&mut server.events).await,
+            RelayLifecycleEvent::Registered { .. }
+        ));
+        crate::infra::relay_mux::frame::write_frame(
+            &mut link,
+            &Frame::Data {
+                stream_id: 1,
+                payload: b"too early".to_vec(),
+            },
+        )
+        .await
+        .expect("frame should write");
+        expect_link_closed(&mut link).await;
+        active_connections_reaches(&server.server, 0).await;
+        server.server.shutdown().await;
     }
 }
