@@ -4,7 +4,7 @@ on:
     types: [opened, edited, synchronize]
 
 jobs:
-  conventional-title:
+  pr-title:
     runs-on: ubuntu-latest
     steps:
       - name: Check PR title is Conventional Commits
