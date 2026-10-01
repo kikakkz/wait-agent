@@ -62,6 +62,13 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
 - Work happens in issues; plans are posted as issue comments before
   implementation for anything non-trivial.
 - Acceptance criteria in the issue define "done"; PRs state how each is met.
+- Multiple PRs may be in flight (feature and fix work proceed in parallel).
+  Merges to main go through the merge queue: the queue validates each PR on
+  top of everything ahead of it and merges only when green, so trunk stays
+  releasable no matter how many PRs are concurrent.
+- Once a PR is open, do not rebase or force-push it; push follow-up commits
+  and let the squash merge clean up history (restarting CI and review churn
+  costs more than tidy intermediate commits).
 - Reviews judge conformance to this file as much as code quality.
 - Bots and agents follow the same rules as humans: same CI, same trailer
   policy, same issue protocol.
