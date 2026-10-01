@@ -23,7 +23,10 @@ if git diff --cached --name-only | grep -qE '\.rs$|\.toml$|^proto/|^tests/.*\.rs
   cargo build
 
   echo "==> Running ratatui / session_sync tests (release)..."
-  cargo test --release ratatui session_sync
+  # cargo test accepts a single TESTNAME positional per invocation; the
+  # filters are substring matches, so run them separately.
+  cargo test --release ratatui
+  cargo test --release session_sync
 else
   echo "==> No Rust paths in this commit; skipping cargo gate (CI enforces it on PRs)."
 fi
