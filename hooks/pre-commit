@@ -9,15 +9,21 @@ fi
 echo "==> Running governance checks..."
 python3 .agents/tools/check_branch_name.py
 
-echo "==> Running cargo fmt --check..."
-cargo fmt --check
+# Skip the Rust gate when the commit touches no Rust-relevant paths;
+# CI still enforces the full gate on every PR.
+if git diff --cached --name-only | grep -qE '\.rs$|\.toml$|^proto/|^tests/.*\.rs$'; then
+  echo "==> Running cargo fmt --check..."
+  cargo fmt --check
 
-echo "==> Running cargo clippy..."
-# TODO: switch to 'cargo clippy -- -D warnings' once all legacy warnings are fixed.
-cargo clippy
+  echo "==> Running cargo clippy..."
+  # TODO: switch to 'cargo clippy -- -D warnings' once all legacy warnings are fixed.
+  cargo clippy
 
-echo "==> Running cargo build..."
-cargo build
+  echo "==> Running cargo build..."
+  cargo build
 
-echo "==> Running ratatui / session_sync tests (release)..."
-cargo test --release ratatui session_sync
+  echo "==> Running ratatui / session_sync tests (release)..."
+  cargo test --release ratatui session_sync
+else
+  echo "==> No Rust paths in this commit; skipping cargo gate (CI enforces it on PRs)."
+fi

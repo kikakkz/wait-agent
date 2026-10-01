@@ -9,7 +9,7 @@ Date: `2026-04-12`
 This document explains the human delivery strategy for the WaitAgent MVP.
 
 It is no longer the place for exact machine execution ordering.
-Detailed task sequencing now lives in `.agents/tasks/` and related runbooks.
+Detailed task sequencing lives in GitHub issues (see .agents/decisions/AD-0001).
 
 ## 2. MVP Strategy
 

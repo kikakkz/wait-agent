@@ -30,6 +30,17 @@ the old local task board is frozen under `archive/`.
   `primitives/`, `runbooks/`, `schemas/`, `state/`), kept read-only for
   archaeology. Do not add new material here and do not extend its files.
 
+## `skills/` — agent skills
+
+- `small-step-iteration/` is repo-authored glue (branch sizing, PR
+  discipline) and may be edited like any repo file.
+- Vendored skills (upstream name directories, e.g. `incremental-implementation/`)
+  carry a provenance header: upstream repo, revision sha, license. Do not
+  edit their content; update by re-vendoring a new revision.
+- Upstream skills that mention local task files defer to this repo's
+  contract: the task tracker is GitHub issues (AD-0001), so plan/task
+  artifacts live in issues, never in `tasks/plan.md`-style local files.
+
 ## General
 
 - Never store secrets in this directory.
