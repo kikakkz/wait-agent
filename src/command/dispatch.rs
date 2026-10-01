@@ -103,6 +103,8 @@ impl CommandDispatcher {
             Command::RelayServe(command) => {
                 crate::command::relay_serve::run(command, &self.network)
             }
+            Command::RelayStatus(command) => crate::command::relay_serve::run_status(command),
+            Command::RelayShutdown(command) => crate::command::relay_serve::run_shutdown(command),
             Command::GenerateNodeCredentials => {
                 let paths = match (&self.network.node_key_path, &self.network.node_cert_path) {
                     (Some(key_path), Some(cert_path)) => NodeCredentialPaths {

@@ -217,6 +217,37 @@ impl RelayConnectionTable {
             .filter_map(|node_id| table.remove(&node_id).map(|entry| (node_id, entry)))
             .collect()
     }
+
+    /// Returns a point-in-time view of the registered nodes for the admin
+    /// socket: `(node_id, connection_id, idle milliseconds)`. The table
+    /// lock is released before the per-entry `last_seen` reads (lock order:
+    /// table, then entry).
+    pub(crate) fn snapshot(&self) -> Vec<(String, u64, u128)> {
+        let now = Instant::now();
+        let entries = self
+            .entries
+            .lock()
+            .expect("relay connection table lock poisoned")
+            .iter()
+            .map(|(node_id, entry)| {
+                (
+                    node_id.clone(),
+                    entry.connection_id,
+                    entry.last_seen.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries
+            .into_iter()
+            .map(|(node_id, connection_id, last_seen)| {
+                let idle_ms = last_seen
+                    .lock()
+                    .map(|last_seen| now.duration_since(*last_seen).as_millis())
+                    .unwrap_or(0);
+                (node_id, connection_id, idle_ms)
+            })
+            .collect()
+    }
 }
 
 /// Handle handed to the registering link task.
@@ -338,5 +369,22 @@ mod tests {
             "relay-initiated stream ids start even"
         );
         assert!(table.lookup(&node_id("missing")).is_none());
+    }
+
+    #[test]
+    fn snapshot_lists_registered_nodes_with_idle_time() {
+        let table = RelayConnectionTable::default();
+        table.register(&node_id("node-a"), dummy_outbound());
+        table.register(&node_id("node-b"), dummy_outbound());
+        std::thread::sleep(Duration::from_millis(5));
+        let mut snapshot = table.snapshot();
+        snapshot.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].0, node_id("node-a"));
+        assert_eq!(snapshot[1].0, node_id("node-b"));
+        assert!(
+            snapshot.iter().all(|(_, _, idle_ms)| *idle_ms < 500),
+            "fresh entries should report small idle times"
+        );
     }
 }

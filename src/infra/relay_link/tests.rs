@@ -19,6 +19,7 @@ use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
 use crate::infra::relay_routing::error_code;
 use crate::infra::relay_server::{start, RelayServeConfig, RelayServerHandle};
 
+mod admin;
 mod routing;
 
 const NO_DEADLOCK: Duration = Duration::from_secs(10);

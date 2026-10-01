@@ -174,6 +174,8 @@ pub enum Command {
     RatatuiNodeServer(RatatuiNodeServerCommand),
     RatatuiClient(RatatuiClientCommand),
     RelayServe(RelayServeCommand),
+    RelayStatus(RelayStatusCommand),
+    RelayShutdown(RelayShutdownCommand),
     GenerateNodeCredentials,
     ProvisionMsys,
     Help(String),
@@ -212,6 +214,18 @@ pub struct RelayServeCommand {
     pub listen: Option<String>,
     /// authorized_nodes whitelist directory override.
     pub authorized_nodes_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RelayStatusCommand {
+    /// Listen address the relay was started with (derives the admin socket).
+    pub listen: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RelayShutdownCommand {
+    /// Listen address the relay was started with (derives the admin socket).
+    pub listen: Option<String>,
 }
 
 /// Used directly by ratatui runtime code; not parsed from the CLI.
@@ -554,7 +568,7 @@ fn parse_no_args(args: Vec<String>) -> Result<(), CliError> {
 fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
     let Some(subcommand) = args.first().cloned() else {
         return Err(CliError::MissingValue(
-            "relay subcommand (serve)".to_string(),
+            "relay subcommand (serve | status | shutdown)".to_string(),
         ));
     };
     match subcommand.as_str() {
@@ -562,7 +576,53 @@ fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
             args.remove(0);
             Ok(Command::RelayServe(parse_relay_serve(args)?))
         }
+        "status" => {
+            args.remove(0);
+            Ok(Command::RelayStatus(parse_relay_listen_flag(args)?))
+        }
+        "shutdown" => {
+            args.remove(0);
+            Ok(Command::RelayShutdown(parse_relay_listen_flag(args)?))
+        }
         other => Err(CliError::UnknownSubcommand(format!("relay {other}"))),
+    }
+}
+
+fn parse_relay_listen_flag<T: Default + HasListenFlag>(
+    mut args: Vec<String>,
+) -> Result<T, CliError> {
+    let mut command = T::default();
+    while let Some(flag) = args.first().cloned() {
+        match flag.as_str() {
+            "--listen" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--listen".to_string()))?;
+                args.remove(0);
+                command.set_listen(value);
+            }
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(flag)),
+        }
+    }
+    Ok(command)
+}
+
+pub trait HasListenFlag {
+    fn set_listen(&mut self, value: String);
+}
+
+impl HasListenFlag for RelayStatusCommand {
+    fn set_listen(&mut self, value: String) {
+        self.listen = Some(value);
+    }
+}
+
+impl HasListenFlag for RelayShutdownCommand {
+    fn set_listen(&mut self, value: String) {
+        self.listen = Some(value);
     }
 }
 
@@ -608,6 +668,8 @@ fn help_text() -> String {
         "  waitagent detach [<index>]",
         "  waitagent stop [<index>]",
         "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>]",
+        "  waitagent relay status [--listen <addr>]",
+        "  waitagent relay shutdown [--listen <addr>]",
         "  waitagent version",
     ]
     .join("\n")
@@ -913,5 +975,21 @@ mod tests {
             .collect::<Vec<_>>();
         let error = Cli::parse(argv).expect_err("relay invite is not implemented yet");
         assert_eq!(error.to_string(), "unknown subcommand: relay invite");
+    }
+
+    #[test]
+    fn parses_relay_status_and_shutdown_with_listen_flag() {
+        match parse(&["waitagent", "relay", "status"]).command {
+            Command::RelayStatus(command) => {
+                assert_eq!(command.listen, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match parse(&["waitagent", "relay", "shutdown", "--listen", "0.0.0.0:9999"]).command {
+            Command::RelayShutdown(command) => {
+                assert_eq!(command.listen.as_deref(), Some("0.0.0.0:9999"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

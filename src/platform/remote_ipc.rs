@@ -453,6 +453,25 @@ pub struct RemoteControlAsyncStream {
     inner: tokio::net::TcpStream,
 }
 
+impl RemoteControlAsyncStream {
+    /// Connects to a remote-control listener.
+    pub async fn connect(addr: &RemoteControlAddr) -> io::Result<Self> {
+        match addr {
+            #[cfg(unix)]
+            RemoteControlAddr::Unix(path) => {
+                let inner = tokio::net::UnixStream::connect(path).await?;
+                Ok(Self { inner })
+            }
+            #[cfg(windows)]
+            RemoteControlAddr::Tcp(tcp_addr) => {
+                let inner = tokio::net::TcpStream::connect(tcp_addr).await?;
+                let _ = inner.set_nodelay(true);
+                Ok(Self { inner })
+            }
+        }
+    }
+}
+
 impl tokio::io::AsyncRead for RemoteControlAsyncStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
