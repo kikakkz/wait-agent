@@ -32,10 +32,12 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
+use crate::infra::relay_admin::{relay_admin_addr, run_admin_listener};
 use crate::infra::relay_connection_table::{
     RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
 };
 use crate::infra::relay_routing::RoutingTable;
+use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncListener};
 
 // rustls re-exports `HandshakeSignatureValid` under `client::danger` for both
 // verifier kinds; there is no `server::danger` re-export.
@@ -61,6 +63,8 @@ pub enum RelayServerError {
     MissingPrivateKey(PathBuf),
     #[error("rustls error: {0}")]
     Tls(#[from] rustls::Error),
+    #[error("admin socket {0} failed to bind: {1}")]
+    AdminIo(String, io::Error),
 }
 
 /// Configuration for [`start`].
@@ -217,6 +221,7 @@ impl rustls::server::danger::ClientCertVerifier for WhitelistedClientCertVerifie
 /// Handle to a running relay transport gate.
 pub struct RelayServerHandle {
     local_addr: SocketAddr,
+    admin_addr: RemoteControlAddr,
     table: Arc<RelayConnectionTable>,
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -228,9 +233,20 @@ impl RelayServerHandle {
         self.local_addr
     }
 
+    /// Returns the address of the local admin socket.
+    pub fn admin_addr(&self) -> &RemoteControlAddr {
+        &self.admin_addr
+    }
+
     /// Returns the number of registered nodes in the connection table.
     pub fn active_connections(&self) -> usize {
         self.table.len()
+    }
+
+    /// Waits until the accept loop stops (admin `shutdown`, listener error,
+    /// or a dropped shutdown sender) without triggering the shutdown itself.
+    pub async fn wait_until_stopped(self) {
+        let _ = self.task.await;
     }
 
     /// Stops the accept loop, the sweeper, and every link task.
@@ -238,8 +254,7 @@ impl RelayServerHandle {
     /// Dropping the handle without calling `shutdown` has the same effect:
     /// the watch senders drop, the loops observe `changed()` resolving, and
     /// the accept loop breaks out of its select.
-    // Used by tests today; the admin socket slice (#55) wires it into
-    // graceful daemon shutdown.
+    // Used by tests today; the admin `shutdown` command is the runtime path.
     #[allow(dead_code)]
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
@@ -257,11 +272,11 @@ pub struct StartedRelay {
 
 const EVENT_QUEUE: usize = 128;
 
-/// Starts the relay transport gate: binds the listener, ensures the relay's
-/// own credentials, and spawns the accept loop plus the eviction sweeper.
-/// Every authenticated link runs the register/heartbeat lifecycle and owns
-/// its connection-table entry until unregister, loss, replacement, or
-/// eviction.
+/// Starts the relay transport gate: binds the TLS listener and the local
+/// admin socket, ensures the relay's own credentials, and spawns the accept
+/// loop, the eviction sweeper, and the admin listener. Every authenticated
+/// link runs the register/heartbeat lifecycle and owns its connection-table
+/// entry until unregister, loss, replacement, or eviction.
 pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServerError> {
     node_credentials::ensure_credentials(&config.credentials)?;
     let cert_pem = fs::read_to_string(&config.credentials.cert_path)?;
@@ -283,12 +298,26 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
 
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
+    // The admin socket is the bootstrap/emergency channel: a relay that
+    // cannot bind it must not start half-managed.
+    let admin_addr = relay_admin_addr(local_addr);
+    let admin_listener = RemoteControlAsyncListener::bind(&admin_addr)
+        .await
+        .map_err(|error| RelayServerError::AdminIo(admin_addr.to_arg_string(), error))?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let table = Arc::new(RelayConnectionTable::default());
     let routing = Arc::new(RoutingTable::default());
     let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
     let lifecycle = config.lifecycle.clone();
+
+    tokio::spawn(run_admin_listener(
+        admin_listener,
+        admin_addr.clone(),
+        table.clone(),
+        local_addr,
+        shutdown_tx.clone(),
+    ));
 
     let sweeper_table = table.clone();
     let sweeper_lifecycle = lifecycle.clone();
@@ -357,6 +386,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     Ok(StartedRelay {
         server: RelayServerHandle {
             local_addr,
+            admin_addr,
             table,
             shutdown_tx,
             task,

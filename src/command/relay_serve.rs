@@ -1,28 +1,42 @@
-//! `waitagent relay serve` runtime: starts the relay transport gate (TLS
-//! listener with mTLS whitelist auth, see `infra::relay_server`) and runs
-//! until the process is killed. Graceful signal shutdown arrives with the
-//! admin socket slice; the register/heartbeat protocol arrives with the
-//! connection-table slice.
+//! `waitagent relay` runtimes: `serve` starts the relay (TLS listener with
+//! mTLS whitelist auth plus the local admin socket, see
+//! `infra::relay_server` / `infra::relay_admin`) and runs until the admin
+//! `shutdown` command or a listener error stops it; `status` and `shutdown`
+//! speak the admin protocol over the owner-control socket and print clear
+//! guidance when the relay is not running — nothing here implicitly starts
+//! a daemon.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use crate::cli::{RelayServeCommand, RemoteNetworkConfig};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::cli::{
+    RelayServeCommand, RelayShutdownCommand, RelayStatusCommand, RemoteNetworkConfig,
+};
 use crate::error::AppError;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
+use crate::infra::relay_admin::{relay_admin_addr, relay_not_running_guidance};
 use crate::infra::relay_server::{self, RelayServeConfig, DEFAULT_RELAY_LISTEN_PORT};
 use crate::lifecycle::LifecycleError;
+use crate::platform::remote_ipc::RemoteControlAsyncStream;
 
-pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<(), AppError> {
-    let listen_text = command
-        .listen
-        .clone()
-        .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_RELAY_LISTEN_PORT}"));
-    let listen: SocketAddr = listen_text.parse().map_err(|error| {
+fn default_listen_text() -> String {
+    format!("0.0.0.0:{DEFAULT_RELAY_LISTEN_PORT}")
+}
+
+fn parse_listen(listen: &Option<String>) -> Result<(String, SocketAddr), AppError> {
+    let listen_text = listen.clone().unwrap_or_else(default_listen_text);
+    let addr: SocketAddr = listen_text.parse().map_err(|error| {
         AppError::Lifecycle(LifecycleError::Protocol(format!(
             "invalid --listen address {listen_text:?}: {error}"
         )))
     })?;
+    Ok((listen_text, addr))
+}
+
+pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<(), AppError> {
+    let (_listen_text, listen) = parse_listen(&command.listen)?;
 
     let mut config = RelayServeConfig::new(listen);
     if let Some(dir) = command.authorized_nodes_dir {
@@ -50,18 +64,15 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
                 )))
             })?;
         let whitelist_dir = config.authorized_nodes_dir.clone();
-        let authorized = relay_server::authorized_node_fingerprints(&whitelist_dir).map_err(
-            |error| {
+        let authorized =
+            relay_server::authorized_node_fingerprints(&whitelist_dir).map_err(|error| {
                 AppError::Lifecycle(LifecycleError::Io(
                     format!("scan {}", whitelist_dir.display()),
                     error,
                 ))
-            },
-        )?;
+            })?;
         let started = relay_server::start(config).await.map_err(|error| {
-            AppError::Lifecycle(LifecycleError::Protocol(format!(
-                "relay listener: {error}"
-            )))
+            AppError::Lifecycle(LifecycleError::Protocol(format!("relay listener: {error}")))
         })?;
         let handle = started.server;
         drop(started.events);
@@ -72,14 +83,84 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
             authorized.len(),
             whitelist_dir.display()
         );
+        println!("admin socket: {}", handle.admin_addr());
         println!("active connections: {}", handle.active_connections());
-        println!(
-            "transport gate only: authenticated connections are held open until the register/heartbeat protocol lands"
-        );
-        // Run until the process is killed; the admin socket slice adds
-        // graceful shutdown.
-        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let _ = rx.await;
+        handle.wait_until_stopped().await;
+        println!("relay stopped");
         Ok(())
     })
+}
+
+pub fn run_status(command: RelayStatusCommand) -> Result<(), AppError> {
+    let response = admin_request(&command.listen, r#"{"command":"status"}"#)?;
+    println!("{response}");
+    Ok(())
+}
+
+pub fn run_shutdown(command: RelayShutdownCommand) -> Result<(), AppError> {
+    let response = admin_request(&command.listen, r#"{"command":"shutdown"}"#)?;
+    println!("{response}");
+    Ok(())
+}
+
+/// Sends one admin request and returns the response body. A missing or
+/// unreachable socket is a clear guidance error, never an implicit start.
+fn admin_request(listen: &Option<String>, request: &str) -> Result<String, AppError> {
+    let (listen_text, listen_addr) = parse_listen(listen)?;
+    let addr = relay_admin_addr(listen_addr);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            AppError::Lifecycle(LifecycleError::Io(
+                "build relay admin runtime".to_string(),
+                error,
+            ))
+        })?;
+    runtime.block_on(async move {
+        let mut stream = RemoteControlAsyncStream::connect(&addr)
+            .await
+            .map_err(|error| {
+                AppError::Lifecycle(LifecycleError::Protocol(format!(
+                    "{}\n(detail: {error})",
+                    relay_not_running_guidance(&addr, &listen_text)
+                )))
+            })?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|error| {
+                AppError::Lifecycle(LifecycleError::Io(
+                    "write relay admin request".to_string(),
+                    error,
+                ))
+            })?;
+        stream.shutdown().await.map_err(|error| {
+            AppError::Lifecycle(LifecycleError::Io(
+                "shut down relay admin request".to_string(),
+                error,
+            ))
+        })?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .map_err(|error| {
+                AppError::Lifecycle(LifecycleError::Io(
+                    "read relay admin response".to_string(),
+                    error,
+                ))
+            })?;
+        Ok(response)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_listen_text_matches_the_serve_default() {
+        assert_eq!(default_listen_text(), "0.0.0.0:7475");
+    }
 }
