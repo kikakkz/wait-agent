@@ -47,6 +47,19 @@ module_map:
         per-stream credit); MuxStream is a PeerConnection via blanket impl;
         lands ahead of its first consumer (node relay client), so
         infra/mod.rs carries a transitional #[allow(dead_code)]
+    - path: src/infra/relay_server.rs
+      responsibility: >
+        relay transport gate (issue #52): TLS listener requiring client
+        certificates, whitelist auth by SPKI fingerprint against an
+        authorized_nodes/ directory (revocation = entry removal), holds
+        authenticated connections until the register/heartbeat protocol
+        (#53) replaces the hold
+  command_layer:
+    - path: src/command/relay_serve.rs
+      responsibility: >
+        `waitagent relay serve` runtime: builds the gate config, runs it on
+        a multi-thread runtime until killed; graceful signal shutdown lands
+        with the admin socket slice (#55)
     - path: src/infra/node_credentials.rs
       responsibility: node device identity — self-signed cert + SPKI fingerprint
     - path: src/infra/operator_auth.rs
