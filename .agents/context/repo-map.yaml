@@ -49,11 +49,23 @@ module_map:
         infra/mod.rs carries a transitional #[allow(dead_code)]
     - path: src/infra/relay_server.rs
       responsibility: >
-        relay transport gate + link lifecycle (issues #52-#53): mTLS
-        whitelist listener; after handshake each link must Register (node
-        id = peer fingerprint) within the deadline, then Heartbeat /
-        Unregister drive the memory-only connection table; stream routing
-        lands with #54
+        relay listener/handle/config (issue #52): mTLS whitelist gate,
+        accept loop, eviction sweeper, lifecycle events; per-link protocol
+        and routing live in relay_link/relay_routing (files split to stay
+        under the 1000-line cap)
+    - path: src/infra/relay_link.rs
+      responsibility: >
+        per-link relay protocol loop (issues #53-#54): register/heartbeat
+        lifecycle plus routing dispatch; TLS stream split into a reader
+        task and a writer task pumping a bounded outbound queue, so
+        cross-link forwarding couples TCP-like backpressure between the
+        two legs of a routed stream
+    - path: src/infra/relay_routing.rs
+      responsibility: >
+        stream routing table (issue #54): directional legs per routed
+        stream with half-close bookkeeping, structured error codes
+        (TARGET_UNKNOWN/STREAM_UNKNOWN/STREAM_CLOSED), teardown that
+        notifies surviving peers with CloseStream
     - path: src/infra/relay_connection_table.rs
       responsibility: >
         memory-only node_id -> connection registry (issue #53):
