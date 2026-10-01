@@ -1,4 +1,5 @@
 use crate::infra::operator_auth::{self};
+use crate::infra::peer_connection;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
 use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
@@ -1085,8 +1086,9 @@ impl TlsPinConnector {
 }
 
 impl Service<tonic::transport::Uri> for TlsPinConnector {
-    type Response =
-        hyper_util::rt::tokio::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Response = hyper_util::rt::tokio::TokioIo<
+        tokio_rustls::client::TlsStream<Box<dyn peer_connection::PeerConnection>>,
+    >;
     type Error = std::io::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -1111,21 +1113,7 @@ impl Service<tonic::transport::Uri> for TlsPinConnector {
                     (host.to_string(), port)
                 })
                 .unwrap_or_else(|| (authority.to_string(), 443));
-            let stream = match tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                tokio::net::TcpStream::connect((host.as_str(), port)),
-            )
-            .await
-            {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => return Err(error),
-                Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "tls-pin tcp connect timed out",
-                    ))
-                }
-            };
+            let stream = peer_connection::dial_tcp_peer_connection(&host, port).await?;
             let tls_stream =
                 match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, stream))
                     .await
@@ -1709,5 +1697,82 @@ mod tests {
             .expect("ephemeral listener should report local addr");
         drop(listener);
         addr
+    }
+
+    #[test]
+    fn tls_pin_handshake_runs_over_peer_connection_seam() {
+        use sha2::Digest;
+
+        // bootstrap.rs installs this at process start; unit tests must install
+        // it themselves. Concurrent installs from other tests are fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut params = rcgen::CertificateParams::new(vec!["waitagent".to_string()]);
+        params.alg = &rcgen::PKCS_ED25519;
+        let cert = rcgen::Certificate::from_params(params).expect("cert should generate");
+        let cert_der = cert.serialize_der().expect("cert should serialize");
+        let key_der = cert.serialize_private_key_der();
+        let spki = crate::infra::node_credentials::extract_spki_from_cert_der(&cert_der)
+            .expect("spki should extract");
+        let pin = super::hex_encode(&super::Sha256::digest(&spki));
+
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(cert_der)],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(key_der),
+                ),
+            )
+            .expect("server config should build");
+        server_config.alpn_protocols = vec![b"h2".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        runtime.block_on(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener should report addr");
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.expect("accept");
+                let mut tls = acceptor.accept(tcp).await.expect("tls accept");
+                let mut buf = [0u8; 4];
+                tls.read_exact(&mut buf).await.expect("server read");
+                tls.write_all(b"pong").await.expect("server write");
+            });
+
+            let stream =
+                crate::infra::peer_connection::dial_tcp_peer_connection("127.0.0.1", addr.port())
+                    .await
+                    .expect("seam dial should succeed");
+            let verifier = std::sync::Arc::new(super::PinnedCertVerifier { pin });
+            let mut config = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+            let server_name = rustls::pki_types::ServerName::try_from("waitagent")
+                .expect("server name should parse");
+            let mut tls = tokio::time::timeout(
+                super::CONNECT_TIMEOUT,
+                connector.connect(server_name, stream),
+            )
+            .await
+            .expect("handshake should finish within the connect timeout")
+            .expect("handshake over the seam should succeed");
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            tls.write_all(b"ping").await.expect("client write");
+            let mut buf = [0u8; 4];
+            tls.read_exact(&mut buf).await.expect("client read");
+            assert_eq!(&buf, b"pong");
+            server.await.expect("server task");
+        });
     }
 }

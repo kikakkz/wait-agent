@@ -2,6 +2,7 @@ pub mod best_effort;
 pub mod error_log;
 pub mod node_credentials;
 pub mod operator_auth;
+pub mod peer_connection;
 pub mod remote_grpc_proto;
 pub mod remote_grpc_transport;
 pub mod remote_node_paths;
