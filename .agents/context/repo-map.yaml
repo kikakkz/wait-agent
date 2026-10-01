@@ -49,11 +49,17 @@ module_map:
         infra/mod.rs carries a transitional #[allow(dead_code)]
     - path: src/infra/relay_server.rs
       responsibility: >
-        relay transport gate (issue #52): TLS listener requiring client
-        certificates, whitelist auth by SPKI fingerprint against an
-        authorized_nodes/ directory (revocation = entry removal), holds
-        authenticated connections until the register/heartbeat protocol
-        (#53) replaces the hold
+        relay transport gate + link lifecycle (issues #52-#53): mTLS
+        whitelist listener; after handshake each link must Register (node
+        id = peer fingerprint) within the deadline, then Heartbeat /
+        Unregister drive the memory-only connection table; stream routing
+        lands with #54
+    - path: src/infra/relay_connection_table.rs
+      responsibility: >
+        memory-only node_id -> connection registry (issue #53):
+        identity-guarded register/replace/touch/remove, heartbeat-timeout
+        eviction (10s beats, 30s offline), lifecycle event channel
+        (Registered/Replaced/Unregistered/EvictedOffline) as the test hook
   command_layer:
     - path: src/command/relay_serve.rs
       responsibility: >

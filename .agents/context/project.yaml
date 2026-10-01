@@ -22,16 +22,15 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-conn-table
-  stage_title: relay connection table with register and heartbeat lifecycle (issue #53)
+  stage_id: relay-1-routing
+  stage_title: open/close stream routing between registered nodes (issue #54)
 current_focus:
-  default_task_id: "#53"
+  default_task_id: "#54"
   focus_statement: >
-    build the relay-side connection table on top of the landed transport
-    gate (#52): node register/unregister control frames over the held mTLS
-    links, heartbeat liveness (10s interval, 3 missed beats = offline),
-    and structured presence events; then stream routing (#54) and the
-    local admin socket (#55)
+    route mux streams between registered nodes on the relay: open_stream /
+    close_stream control frames resolve target node links in the connection
+    table, relay Data/Window frames between the two links, and structured
+    error frames cover unknown targets; then the local admin socket (#55)
 upcoming_focus:
   - node relay client slice (long-lived link, on-demand streams,
     re-register on reconnect, presence events)
