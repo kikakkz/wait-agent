@@ -22,25 +22,27 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-node-client
-  stage_title: node relay client — persistent link, on-demand streams (issue #32)
+  stage_id: relay-1-backpressure
+  stage_title: per-stream window backpressure and fair scheduling (issue #33)
 current_focus:
-  default_task_id: "#32"
+  default_task_id: "#33"
   focus_statement: >
-    node relay client, step 3 of 3 (closes #32): presence events
-    (register/unregister/heartbeat timeout of remote nodes) over a
-    structured channel into the console — remote-hosts sidebar status
-    and status line — reusing the step-1 RelayLinkConnected/
-    RelayLinkDisconnected state events (today log-only) and the
-    handle's client-wide inbound machinery; steps 1 (persistent link,
-    PR #90) and 2 (open_stream dialing through the relay-link-mode
-    mux, PR #93, relay_mux dead-code allow removed) are landed; #36
-    extends the same channel for error semantics; SharedState
-    single-writer and broadcast_snapshot single-caller rules apply
+    per-stream window backpressure and fair scheduling on the relay
+    (design-doc Phase-1 task 5): independent window/ack backpressure
+    per routed stream with senders honoring per-stream windows, and
+    fair scheduling across streams sharing a link so one busy stream
+    cannot starve others; lock order must be documented before adding
+    locks and no lock may be held while broadcasting or doing I/O;
+    verification includes cargo test --release ratatui session_sync,
+    clippy, a loom model test for any lock-free path touched, and the
+    docker e2e deferred to #37; #32 (node relay client, all three
+    steps) is closed and its relay-link-mode mux carries per-stream
+    credit already — the relay side passes Window through blindly
 upcoming_focus:
   - config surface relay.toml loading and remote-hosts `via` selector
-    (issue #35, unblocked once #32 closes)
-  - per-stream window backpressure and fair scheduling (issue #33)
+    (issue #35, now fully unblocked: #31, #32, #34 all landed)
+  - structured error semantics relay to node to console (issue #36,
+    reuses the #32 presence channel)
 source_of_truth:
   - AGENTS.md
   - docs/relay-design.md

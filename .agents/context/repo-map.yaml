@@ -89,16 +89,18 @@ module_map:
         TokenExpired errors from the wire codes
     - path: src/infra/relay_client.rs
       responsibility: >
-        node relay client (issue #32): persistent outbound TLS link
-        pinned by relay.toml fingerprint with client-auth node cert;
-        Register on connect (silent ack), heartbeat via send_control,
-        unbounded backoff reconnect/re-register on its own tokio
-        runtime in a std thread; the handle exposes
+        node relay client (issue #32, complete): persistent outbound
+        TLS link pinned by relay.toml fingerprint with client-auth node
+        cert; Register on connect (silent ack), heartbeat via
+        send_control, unbounded backoff reconnect/re-register on its
+        own tokio runtime in a std thread; the handle exposes
         open_stream(target)/accept_inbound() returning boxed
-        PeerConnections over the relay-link-mode mux (client-wide
-        inbound queue survives reconnects); Connected/Disconnected
-        events bridge into StateEventLoop as log-only RelayLink state
-        events until step 3 gives them presence semantics
+        PeerConnections over the relay-link-mode mux, plus watch()
+        with persisted interests re-declared after every Register and
+        implicit watch on open_stream; Connected/Disconnected/Presence
+        events bridge into StateEventLoop (RelayLink state events,
+        RelayPeerOnline/Offline, SharedState relay_presence map) for
+        the sidebar annotation and footer counts
     - path: src/infra/relay_toml_store.rs
       responsibility: >
         ~/.waitagent/relay.toml store (issue #31 write side, #32 step 1
@@ -122,6 +124,14 @@ module_map:
         accounting, admit_register/admit_open admission decisions feeding
         the NODE_CAPACITY/STREAM_CAPACITY/THROUGHPUT_EXCEEDED structured
         rejections in relay_link
+    - path: src/infra/relay_presence.rs
+      responsibility: >
+        relay presence hub (issue #32 step 3, PR #96): watcher map
+        (target fingerprint -> connection -> outbound), Watch replay
+        with current state, transition-only publish (first register
+        online; unregister/link-loss/remove/eviction offline; replaced
+        publishes nothing), per-link purge in the run_link epilogue;
+        frames Watch 0x0E / Presence 0x0D live in relay_mux/frame.rs
     - path: src/infra/relay_connection_table.rs
       responsibility: >
         memory-only node_id -> connection registry (issue #53):
