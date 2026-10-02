@@ -55,11 +55,11 @@ module_map:
         under the 1000-line cap)
     - path: src/infra/relay_link.rs
       responsibility: >
-        per-link relay protocol loop (issues #53-#54): register/heartbeat
-        lifecycle plus routing dispatch; TLS stream split into a reader
-        task and a writer task pumping a bounded outbound queue, so
-        cross-link forwarding couples TCP-like backpressure between the
-        two legs of a routed stream
+        per-link relay protocol loop (issues #53-#54, capacity admission
+        #34): register/heartbeat lifecycle plus routing dispatch; TLS
+        stream split into a reader task and a writer task pumping a bounded
+        outbound queue, so cross-link forwarding couples TCP-like
+        backpressure between the two legs of a routed stream
     - path: src/infra/relay_routing.rs
       responsibility: >
         stream routing table (issue #54): directional legs per routed
@@ -69,9 +69,19 @@ module_map:
     - path: src/infra/relay_admin.rs
       responsibility: >
         relay local admin socket (issue #55): owner-only channel per the
-        remote_ipc owner-control pattern; one-JSON-request protocol with
-        connection-table status and graceful shutdown today; invite/remove
-        land with the enrollment slice
+        remote_ipc owner-control pattern; one-JSON-request protocol over
+        RelayAdminContext (table + routing + listener + capacity + meter)
+        with connection-table status, capacity/usage fields (#34), and
+        graceful shutdown today; invite/remove land with the enrollment
+        slice
+    - path: src/infra/relay_capacity.rs
+      responsibility: >
+        single-relay capacity model (issue #34): RelayCapacityConfig
+        (max_nodes/max_streams/max_throughput_bytes_per_sec with
+        conservative placeholder defaults), UsageMeter 1s-window byte
+        accounting, admit_register/admit_open admission decisions feeding
+        the NODE_CAPACITY/STREAM_CAPACITY/THROUGHPUT_EXCEEDED structured
+        rejections in relay_link
     - path: src/infra/relay_connection_table.rs
       responsibility: >
         memory-only node_id -> connection registry (issue #53):
