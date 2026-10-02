@@ -26,6 +26,7 @@ mod client;
 mod enrollment;
 mod join;
 mod routing;
+mod streams;
 
 const NO_DEADLOCK: Duration = Duration::from_secs(10);
 

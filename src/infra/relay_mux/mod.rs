@@ -99,6 +99,10 @@ pub enum MuxError {
     ProtocolViolation(String),
     #[error("mux connection closed: {0}")]
     ConnectionClosed(String),
+    /// An operation that is only legal on a relay-link-mode connection was
+    /// attempted on a node-to-node connection.
+    #[error("operation requires a relay-link mux connection")]
+    NotRelayLink,
 }
 
 impl From<MuxError> for io::Error {
@@ -114,9 +118,8 @@ impl From<MuxError> for io::Error {
             | MuxError::PayloadTooLong(_)
             | MuxError::InvalidPayload(_, _)
             | MuxError::InvalidStreamId(_, _)
-            | MuxError::ProtocolViolation(_) => {
-                io::Error::new(ErrorKind::InvalidData, error.to_string())
-            }
+            | MuxError::ProtocolViolation(_)
+            | MuxError::NotRelayLink => io::Error::new(ErrorKind::InvalidData, error.to_string()),
             MuxError::ConnectionClosed(_) => {
                 io::Error::new(ErrorKind::ConnectionReset, error.to_string())
             }

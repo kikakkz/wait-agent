@@ -8,11 +8,8 @@ pub mod relay_capacity;
 pub mod relay_client;
 pub mod relay_connection_table;
 pub mod relay_enrollment;
-// relay_mux lands ahead of its first consumer (the node relay client in the
-// relay daemon slices); remove this allow once it is wired in.
 pub mod relay_join;
 pub mod relay_link;
-#[allow(dead_code)]
 pub mod relay_mux;
 pub mod relay_routing;
 pub mod relay_server;
