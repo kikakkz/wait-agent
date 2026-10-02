@@ -63,9 +63,9 @@ module_map:
       responsibility: >
         per-link relay protocol loop (issues #53-#54, capacity admission
         #34): register/heartbeat lifecycle plus routing dispatch; TLS
-        stream split into a reader task and a writer task pumping a bounded
-        outbound queue, so cross-link forwarding couples TCP-like
-        backpressure between the two legs of a routed stream
+        stream split into a reader task and the relay_scheduler egress
+        (#33) — cross-link forwarding couples TCP-like backpressure
+        between the two legs of a routed stream
     - path: src/infra/relay_routing.rs
       responsibility: >
         stream routing table (issue #54): directional legs per routed
@@ -132,6 +132,16 @@ module_map:
         online; unregister/link-loss/remove/eviction offline; replaced
         publishes nothing), per-link purge in the run_link epilogue;
         frames Watch 0x0E / Presence 0x0D live in relay_mux/frame.rs
+    - path: src/infra/relay_scheduler.rs
+      responsibility: >
+        per-link egress fair scheduler (issue #33, PR #101): Data/
+        Window classified into per-stream byte-capped buckets (1 MiB
+        each, 64 MiB link budget) giving bounded end-to-end
+        backpressure; control/teardown frames on a priority queue
+        drained first; deficit round-robin across buckets (64 KiB
+        round budget) so one busy stream cannot starve others; mutex
+        is a leaf — batches under lock, socket writes after; spawned
+        by run_link in place of the old raw writer pump
     - path: src/infra/relay_connection_table.rs
       responsibility: >
         memory-only node_id -> connection registry (issue #53):
