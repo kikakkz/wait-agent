@@ -7,10 +7,13 @@
 //! request and half-closes; the server reads to EOF, answers once, and
 //! closes (the exact idiom of the remote runtime owner control channel).
 //! `status` queries the connection table; `shutdown` stops the relay
-//! gracefully. invite/remove land with the enrollment slice.
+//! gracefully; `invite` mints enrollment tokens and `remove` revokes a
+//! whitelisted node (whitelist entry + live link).
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,6 +22,9 @@ use tokio::sync::watch;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::relay_capacity::{RelayCapacityConfig, RelayUsage, SharedUsageMeter};
 use crate::infra::relay_connection_table::RelayConnectionTable;
+use crate::infra::relay_enrollment::{
+    remove_authorized_node, EnrollmentTokenStore, DEFAULT_DEPLOY_TTL, DEFAULT_INVITE_TTL,
+};
 use crate::infra::relay_routing::RoutingTable;
 use crate::platform::remote_ipc::{
     cleanup_remote_listener, RemoteControlAddr, RemoteControlAsyncListener,
@@ -59,12 +65,28 @@ pub fn relay_admin_addr(listen: SocketAddr) -> RemoteControlAddr {
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct RelayAdminRequest {
     pub(crate) command: String,
+    #[serde(default)]
+    pub(crate) ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) deploy: Option<bool>,
+    #[serde(default)]
+    pub(crate) fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RelayAdminCommand {
     Status,
     Shutdown,
+    /// Mint an enrollment token; `deploy` selects a reusable deploy token
+    /// over a one-time invite token.
+    Invite {
+        ttl_secs: Option<u64>,
+        deploy: bool,
+    },
+    /// Revoke a whitelisted node and drop its live link.
+    Remove {
+        fingerprint: String,
+    },
 }
 
 /// One registered node as exposed over the admin socket.
@@ -129,6 +151,21 @@ impl RelayAdminResponse {
         }
     }
 
+    /// A success answer whose payload is a human-readable `message` (the
+    /// invite/remove responses).
+    fn message_ok(message: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            listen: None,
+            registered_nodes: None,
+            nodes: None,
+            capacity: None,
+            usage: None,
+            message: Some(message.into()),
+            error: None,
+        }
+    }
+
     fn error(message: impl Into<String>) -> Self {
         Self {
             ok: false,
@@ -150,12 +187,24 @@ pub(crate) fn parse_relay_admin_command(body: &str) -> Result<RelayAdminCommand,
     match request.command.as_str() {
         "status" => Ok(RelayAdminCommand::Status),
         "shutdown" => Ok(RelayAdminCommand::Shutdown),
+        "invite" => Ok(RelayAdminCommand::Invite {
+            ttl_secs: request.ttl_secs,
+            deploy: request.deploy.unwrap_or(false),
+        }),
+        "remove" => {
+            let fingerprint = request
+                .fingerprint
+                .ok_or_else(|| "remove requires a `fingerprint` field".to_string())?;
+            Ok(RelayAdminCommand::Remove { fingerprint })
+        }
         other => Err(format!("unknown admin command: {other:?}")),
     }
 }
 
 /// Builds the response for a parsed command against a table snapshot. Pure;
-/// the shutdown side effect lives in [`run_admin_listener`].
+/// the shutdown side effect lives in [`run_admin_listener`], and the
+/// enrollment commands (invite/remove) are answered by the impure
+/// [`handle_invite`] / [`handle_remove`] wrappers in the dispatch loop.
 pub(crate) fn handle_relay_admin_command(
     command: RelayAdminCommand,
     snapshot: RelayAdminStatus,
@@ -163,6 +212,64 @@ pub(crate) fn handle_relay_admin_command(
     match command {
         RelayAdminCommand::Status => RelayAdminResponse::status(snapshot),
         RelayAdminCommand::Shutdown => RelayAdminResponse::shutdown(),
+        // Enrollment commands never reach the pure handler; the dispatch
+        // loop routes them to the impure wrappers. Flag the routing bug.
+        RelayAdminCommand::Invite { .. } | RelayAdminCommand::Remove { .. } => {
+            RelayAdminResponse::error("internal error: enrollment command reached the pure handler")
+        }
+    }
+}
+
+/// `invite`: mints the enrollment token, persists the store (best-effort —
+/// a persist failure is logged, never fatal), and answers with the raw
+/// token plus its unix expiry.
+fn handle_invite(
+    ttl_secs: Option<u64>,
+    deploy: bool,
+    tokens: &Arc<EnrollmentTokenStore>,
+    tokens_path: &Path,
+) -> RelayAdminResponse {
+    let (ttl, one_time) = match (deploy, ttl_secs) {
+        (true, Some(secs)) => (Duration::from_secs(secs), false),
+        (true, None) => (DEFAULT_DEPLOY_TTL, false),
+        (false, Some(secs)) => (Duration::from_secs(secs), true),
+        (false, None) => (DEFAULT_INVITE_TTL, true),
+    };
+    let minted = tokens.mint(one_time, ttl);
+    if let Err(error) = tokens.persist(tokens_path) {
+        ERROR_LOG.log_error(format!("[relay-admin] token persist failed: {error}"));
+    }
+    let kind = if minted.one_time {
+        "one-time invite token"
+    } else {
+        "deploy token (reusable until expiry)"
+    };
+    RelayAdminResponse::message_ok(format!(
+        "token: {}\nexpires_at: {}\nkind: {kind}",
+        minted.token, minted.expires_at_unix
+    ))
+}
+
+/// `remove`: revokes the whitelist entry (when present) and drops the live
+/// link (when registered). Reports both halves so the operator sees whether
+/// the node was whitelisted, online, or both.
+fn handle_remove(
+    fingerprint: &str,
+    whitelist_dir: &Path,
+    table: &Arc<RelayConnectionTable>,
+) -> RelayAdminResponse {
+    match remove_authorized_node(whitelist_dir, fingerprint) {
+        Ok(removed_from_whitelist) => {
+            let retired = table.retire(&fingerprint.to_lowercase());
+            let detail = match (removed_from_whitelist, retired) {
+                (true, true) => "whitelist entry removed; live link dropped",
+                (true, false) => "whitelist entry removed; no live link",
+                (false, true) => "no whitelist entry; live link dropped",
+                (false, false) => "no whitelist entry; no live link",
+            };
+            RelayAdminResponse::message_ok(format!("removed: {fingerprint} ({detail})"))
+        }
+        Err(error) => RelayAdminResponse::error(format!("remove {fingerprint}: {error}")),
     }
 }
 
@@ -174,6 +281,9 @@ pub(crate) struct RelayAdminContext {
     pub(crate) listen: SocketAddr,
     pub(crate) capacity: RelayCapacityConfig,
     pub(crate) meter: SharedUsageMeter,
+    pub(crate) tokens: Arc<EnrollmentTokenStore>,
+    pub(crate) tokens_path: PathBuf,
+    pub(crate) whitelist_dir: PathBuf,
 }
 
 /// Accept loop for the admin socket. `shutdown_tx` is the server-wide
@@ -204,6 +314,9 @@ pub(crate) async fn run_admin_listener(
                         listen,
                         capacity,
                         meter,
+                        tokens,
+                        tokens_path,
+                        whitelist_dir,
                     } = context;
                     let mut bytes = Vec::new();
                     if let Err(error) = stream.read_to_end(&mut bytes).await {
@@ -251,6 +364,12 @@ pub(crate) async fn run_admin_listener(
                             // Answer first, then stop the relay.
                             let _ = shutdown_tx.send(true);
                             response
+                        }
+                        Ok(RelayAdminCommand::Invite { ttl_secs, deploy }) => {
+                            handle_invite(ttl_secs, deploy, &tokens, &tokens_path)
+                        }
+                        Ok(RelayAdminCommand::Remove { fingerprint }) => {
+                            handle_remove(&fingerprint, &whitelist_dir, &table)
                         }
                         Err(message) => RelayAdminResponse::error(message),
                     };
@@ -325,11 +444,114 @@ mod tests {
     }
 
     #[test]
+    fn parses_invite_command_with_options() {
+        assert_eq!(
+            parse_relay_admin_command(r#"{"command":"invite"}"#),
+            Ok(RelayAdminCommand::Invite {
+                ttl_secs: None,
+                deploy: false
+            })
+        );
+        assert_eq!(
+            parse_relay_admin_command(r#"{"command":"invite","ttl_secs":3600,"deploy":true}"#),
+            Ok(RelayAdminCommand::Invite {
+                ttl_secs: Some(3600),
+                deploy: true
+            })
+        );
+    }
+
+    #[test]
+    fn parses_remove_command_with_fingerprint() {
+        assert_eq!(
+            parse_relay_admin_command(r#"{"command":"remove","fingerprint":"7c857a105486f46d"}"#),
+            Ok(RelayAdminCommand::Remove {
+                fingerprint: "7c857a105486f46d".to_string()
+            })
+        );
+        let missing = parse_relay_admin_command(r#"{"command":"remove"}"#).unwrap_err();
+        assert!(missing.contains("fingerprint"), "{missing}");
+    }
+
+    #[test]
     fn parse_rejects_unknown_and_malformed_requests() {
-        let unknown = parse_relay_admin_command(r#"{"command":"invite"}"#).unwrap_err();
+        let unknown = parse_relay_admin_command(r#"{"command":"bogus"}"#).unwrap_err();
         assert!(unknown.contains("unknown admin command"));
         let malformed = parse_relay_admin_command("{not json").unwrap_err();
         assert!(malformed.contains("invalid admin request"));
+    }
+
+    #[test]
+    fn invite_response_carries_token_and_expiry() {
+        let tokens = Arc::new(EnrollmentTokenStore::new());
+        let path = std::env::temp_dir().join(format!(
+            "waitagent-admin-invite-{}-{}.json",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        let response = handle_invite(None, false, &tokens, &path);
+        assert!(response.ok);
+        let message = response.message.expect("invite answers with a message");
+        let token = message
+            .lines()
+            .find_map(|line| line.strip_prefix("token: "))
+            .expect("message carries the raw token");
+        assert_eq!(token.len(), 43, "256-bit base64url-no-pad token");
+        assert!(
+            message.lines().any(|line| line.starts_with("expires_at: ")),
+            "message carries the unix expiry: {message}"
+        );
+
+        // The minted token redeems against the same store.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        assert_eq!(
+            tokens.redeem(token, now),
+            crate::infra::relay_enrollment::RedeemOutcome::EnrollOk { one_time: true }
+        );
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn remove_response_reports_whitelist_and_link_outcome() {
+        let dir = std::env::temp_dir().join(format!(
+            "waitagent-admin-remove-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("whitelist dir");
+        std::fs::write(dir.join("deadbeef"), b"pem").expect("entry");
+
+        let table = Arc::new(RelayConnectionTable::default());
+        let response = handle_remove("DeadBeef", &dir, &table);
+        assert!(response.ok);
+        assert!(response
+            .message
+            .expect("remove answers with a message")
+            .contains("whitelist entry removed"));
+        assert!(
+            std::fs::metadata(dir.join("deadbeef")).is_err(),
+            "entry gone"
+        );
+
+        // Second remove: nothing left.
+        let response = handle_remove("deadbeef", &dir, &table);
+        assert!(response.ok);
+        assert!(response
+            .message
+            .expect("message")
+            .contains("no whitelist entry; no live link"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

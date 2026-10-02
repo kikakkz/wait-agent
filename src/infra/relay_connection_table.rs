@@ -194,6 +194,25 @@ impl RelayConnectionTable {
         }
     }
 
+    /// Removes the entry for `node_id` and signals its link task to retire —
+    /// the `relay remove` revocation path (docs/relay-design.md node 生命周
+    /// 期). Mirrors the replace-retire logic in `register`. Returns whether a
+    /// live entry was removed.
+    pub(crate) fn retire(&self, node_id: &str) -> bool {
+        let entry = self
+            .entries
+            .lock()
+            .expect("relay connection table lock poisoned")
+            .remove(node_id);
+        match entry {
+            Some(entry) => {
+                let _ = entry.retire_tx.send(true);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Removes and returns every entry silent for longer than `max_idle`.
     /// Callers retire the returned links and emit `EvictedOffline`.
     pub(crate) fn evict_idle(&self, max_idle: Duration) -> Vec<(String, ConnectionEntry)> {
@@ -369,6 +388,24 @@ mod tests {
             "relay-initiated stream ids start even"
         );
         assert!(table.lookup(&node_id("missing")).is_none());
+    }
+
+    #[test]
+    fn retire_removes_entry_and_signals_the_link() {
+        let table = RelayConnectionTable::default();
+        let registered = table.register(&node_id("node-a"), dummy_outbound());
+        let retire_rx = registered.retire_rx;
+
+        assert!(table.retire(&node_id("node-a")));
+        assert_eq!(table.len(), 0);
+        assert!(
+            *retire_rx.borrow(),
+            "retire must send true on the entry's watch before dropping it"
+        );
+        assert!(
+            !table.retire(&node_id("node-a")),
+            "a second retire finds no live entry"
+        );
     }
 
     #[test]

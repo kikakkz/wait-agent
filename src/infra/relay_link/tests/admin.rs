@@ -94,7 +94,7 @@ async fn admin_unknown_command_gets_a_structured_error() {
     let server = start_test_server(&[client.fingerprint()]).await;
     let admin_addr = server.server.admin_addr().clone();
 
-    let body = admin_request(&admin_addr, r#"{"command":"invite"}"#).await;
+    let body = admin_request(&admin_addr, r#"{"command":"bogus"}"#).await;
     let response: serde_json::Value = serde_json::from_str(&body).expect("error json");
     assert_eq!(response["ok"], false);
     assert!(response["error"]

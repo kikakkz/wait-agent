@@ -111,7 +111,7 @@ struct RegisteredLink {
     retire_rx: tokio::sync::watch::Receiver<bool>,
 }
 
-fn peer_fingerprint(tls: &ServerTls, peer_addr: SocketAddr) -> Option<String> {
+pub(crate) fn peer_fingerprint(tls: &ServerTls, peer_addr: SocketAddr) -> Option<String> {
     let (_, server_conn) = tls.get_ref();
     match server_conn
         .peer_certificates()

@@ -25,7 +25,7 @@ fn default_listen_text() -> String {
     format!("0.0.0.0:{DEFAULT_RELAY_LISTEN_PORT}")
 }
 
-fn parse_listen(listen: &Option<String>) -> Result<(String, SocketAddr), AppError> {
+pub(crate) fn parse_listen(listen: &Option<String>) -> Result<(String, SocketAddr), AppError> {
     let listen_text = listen.clone().unwrap_or_else(default_listen_text);
     let addr: SocketAddr = listen_text.parse().map_err(|error| {
         AppError::Lifecycle(LifecycleError::Protocol(format!(
@@ -77,6 +77,7 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
         let handle = started.server;
         drop(started.events);
         println!("relay listening on {}", handle.local_addr());
+        println!("enrollment listener on {}", handle.enroll_local_addr());
         println!("relay identity fingerprint: {fingerprint}");
         println!(
             "authorized nodes: {} ({})",
@@ -105,7 +106,8 @@ pub fn run_shutdown(command: RelayShutdownCommand) -> Result<(), AppError> {
 
 /// Sends one admin request and returns the response body. A missing or
 /// unreachable socket is a clear guidance error, never an implicit start.
-fn admin_request(listen: &Option<String>, request: &str) -> Result<String, AppError> {
+/// Shared by the status/shutdown/invite/remove commands.
+pub(crate) fn admin_request(listen: &Option<String>, request: &str) -> Result<String, AppError> {
     let (listen_text, listen_addr) = parse_listen(listen)?;
     let addr = relay_admin_addr(listen_addr);
     let runtime = tokio::runtime::Builder::new_current_thread()
