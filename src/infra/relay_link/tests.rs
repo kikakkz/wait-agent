@@ -22,6 +22,7 @@ use crate::infra::relay_server::{start, RelayServeConfig, RelayServerHandle};
 
 mod admin;
 mod capacity;
+mod client;
 mod enrollment;
 mod join;
 mod routing;

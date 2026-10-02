@@ -496,6 +496,25 @@ fn run_state_event_loop(
                 }
             }
 
+            StateEvent::RelayLinkConnected { relay_address } => {
+                // Log-only: step 3 of issue #32 turns relay-link lifecycle
+                // into a real presence signal; until then there is no
+                // SharedState mutation to make.
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] relay link connected: {relay_address}"
+                ));
+            }
+
+            StateEvent::RelayLinkDisconnected {
+                relay_address,
+                reason,
+            } => {
+                // Log-only: see RelayLinkConnected above.
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] relay link {relay_address} disconnected: {reason}"
+                ));
+            }
+
             StateEvent::ReconnectSnapshotHosts => {
                 reconnect_snapshot_hosts(
                     &shared,
@@ -2656,6 +2675,26 @@ mod state_loop_tests {
 
         drop(tx);
         drop(client_writer);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn relay_link_events_are_handled_log_only() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (_shared, tx, _client_writer, handle) = start_test_loop();
+
+        // Step 1 of issue #32 handles relay-link lifecycle as log-only; the
+        // loop must accept both variants without mutating SharedState.
+        let _ = tx.send(StateEvent::RelayLinkConnected {
+            relay_address: "127.0.0.1:7475".to_string(),
+        });
+        let _ = tx.send(StateEvent::RelayLinkDisconnected {
+            relay_address: "127.0.0.1:7475".to_string(),
+            reason: "test disconnect".to_string(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        drop(tx);
         handle.join().expect("state loop should exit cleanly");
     }
 

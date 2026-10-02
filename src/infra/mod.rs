@@ -5,6 +5,7 @@ pub mod operator_auth;
 pub mod peer_connection;
 pub mod relay_admin;
 pub mod relay_capacity;
+pub mod relay_client;
 pub mod relay_connection_table;
 pub mod relay_enrollment;
 // relay_mux lands ahead of its first consumer (the node relay client in the
