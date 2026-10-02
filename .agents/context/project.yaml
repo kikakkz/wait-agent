@@ -22,23 +22,24 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-config
-  stage_title: config surface — relay.toml and remote-hosts via (issue #35)
+  stage_id: relay-1-node-client
+  stage_title: node relay client — persistent link, on-demand streams (issue #32)
 current_focus:
-  default_task_id: "#35"
+  default_task_id: "#32"
   focus_statement: >
-    land the relay config surface: node relay.toml (address,
-    relay_fingerprint, heartbeat) and relay relay.toml (listen, admin
-    socket, whitelist dir, token params, heartbeat, capacity limits) with
-    validation, remote-hosts `via = "relay" | "direct"` selector (no
-    implicit fallback), and Ctrl-W connect-path integration through the
-    PeerConnection seam; depends on #31, #32, #34 — #34 (capacity model)
-    is landed, #31 (enrollment invite) and #32 (node relay client) are
-    still open
+    land the node relay client in small steps: (1) persistent outbound
+    TLS link to the configured relay (address + pinned fingerprint from
+    relay.toml) with reconnect/re-register on the existing reconnect
+    worker pattern; (2) open_stream(target_node_id) dialing remote
+    nodes through the relay as a PeerConnection so session protocols
+    run unmodified; (3) presence events (register/unregister/heartbeat
+    timeout) over a structured channel into the console — #36 extends
+    that channel for error semantics; SharedState single-writer and
+    broadcast_snapshot single-caller rules apply to presence handling
 upcoming_focus:
-  - structured error semantics (issue #36)
-  - node relay client slice (long-lived link, on-demand streams,
-    re-register on reconnect, presence events)
+  - config surface relay.toml loading and remote-hosts `via` selector
+    (issue #35, unblocked once #32 lands)
+  - per-stream window backpressure and fair scheduling (issue #33)
 source_of_truth:
   - AGENTS.md
   - docs/relay-design.md
