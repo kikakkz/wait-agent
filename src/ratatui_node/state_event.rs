@@ -126,6 +126,23 @@ pub(crate) enum StateEvent {
     /// Sent by `NetworkProbe` so the state loop can distinguish a transient
     /// control-plane outage from a permanent remote host failure.
     NetworkConnectivityChanged { online: bool },
+    /// The persistent outbound link to the pinned relay connected.
+    ///
+    /// Log-only until step 3 of issue #32 turns relay-link lifecycle into a
+    /// real presence signal; sent by the relay client forwarder in `run`.
+    RelayLinkConnected {
+        /// The relay address the link registered with.
+        relay_address: String,
+    },
+    /// The persistent outbound link to the pinned relay dropped; the relay
+    /// client is backing off and will reconnect. Log-only until step 3 of
+    /// issue #32 turns relay-link lifecycle into a real presence signal.
+    RelayLinkDisconnected {
+        /// The relay address that was dialed.
+        relay_address: String,
+        /// Why the link ended (see `RelayClientEvent::Disconnected`).
+        reason: String,
+    },
     /// A previously unreachable outbound-dial peer is now reachable at L4.
     ///
     /// Sent by `PeerReachabilityProbeWorker` so the state loop can reset the

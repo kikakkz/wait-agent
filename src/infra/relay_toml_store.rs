@@ -40,10 +40,6 @@ impl RelayTomlConfig {
     }
 
     /// Loads the config from `path`; a missing file yields `None`.
-    // Consumed by the node-side relay client when it connects through the
-    // relay (later slice); today only tests and the join flow read
-    // relay.toml back.
-    #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Option<Self>, RelayTomlStoreError> {
         if !path.is_file() {
             return Ok(None);

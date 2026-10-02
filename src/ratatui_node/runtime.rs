@@ -4,6 +4,9 @@ use crate::domain::session_catalog::{
     SessionTransport,
 };
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::node_credentials::NodeCredentialPaths;
+use crate::infra::relay_client::{RelayClient, RelayClientConfig, RelayClientEvent};
+use crate::infra::relay_toml_store::RelayTomlConfig;
 #[cfg(unix)]
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::lifecycle::LifecycleError;
@@ -1129,6 +1132,38 @@ impl RatatuiNodeRuntime {
             ERROR_LOG.log(format!("[ratatui-node] operator key setup failed: {error}"));
         }
 
+        // Maintain a persistent outbound link to the pinned relay once the
+        // operator enrolled this node via `relay join`; a missing relay.toml
+        // means "no relay" and a broken one must not stop the runtime.
+        let relay_config =
+            RelayTomlConfig::load(&RelayTomlConfig::default_path()).unwrap_or_else(|error| {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] relay.toml unreadable; relay link disabled: {error}"
+                ));
+                None
+            });
+        let mut relay_client = None;
+        let mut _relay_forwarder = None;
+        if let Some(relay) = relay_config {
+            let credentials = NodeCredentialPaths::default_paths();
+            if let Err(error) = crate::infra::node_credentials::ensure_credentials(&credentials) {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] relay client credentials failed: {error}"
+                ));
+            } else {
+                let (relay_event_tx, relay_event_rx) =
+                    tokio::sync::mpsc::channel::<RelayClientEvent>(16);
+                relay_client = Some(RelayClient::spawn(
+                    RelayClientConfig::from_relay_toml(relay, credentials),
+                    relay_event_tx,
+                ));
+                let state_tx = state_event_loop.sender();
+                _relay_forwarder = Some(std::thread::spawn(move || {
+                    forward_relay_link_events(relay_event_rx, state_tx);
+                }));
+            }
+        }
+
         // Peer node servers host a default authority-host session for remote
         // viewers. Create it now that the IO loops are running; it will be
         // published through the local catalog to the remote authority.
@@ -1351,6 +1386,11 @@ impl RatatuiNodeRuntime {
             }
         }
 
+        // Stop the persistent relay link; the event forwarder exits on its own
+        // once the client's event channel closes.
+        if let Some(relay_client) = relay_client {
+            relay_client.cancel();
+        }
         if let Some(signal_server) = signal_server {
             signal_server.cleanup();
         }
@@ -1366,6 +1406,31 @@ impl RatatuiNodeRuntime {
             self.network.port
         ));
         Ok(())
+    }
+}
+
+/// Relay client forwarder thread body: maps relay-link lifecycle events onto
+/// `StateEvent` variants for the state loop until the relay client stops (its
+/// event channel closes).
+fn forward_relay_link_events(
+    mut relay_event_rx: tokio::sync::mpsc::Receiver<RelayClientEvent>,
+    state_tx: mpsc::Sender<StateEvent>,
+) {
+    while let Some(event) = relay_event_rx.blocking_recv() {
+        let state_event = match event {
+            RelayClientEvent::Connected { relay_address } => {
+                StateEvent::RelayLinkConnected { relay_address }
+            }
+            RelayClientEvent::Disconnected {
+                relay_address,
+                reason,
+            } => StateEvent::RelayLinkDisconnected {
+                relay_address,
+                reason,
+            },
+            RelayClientEvent::Connecting { .. } => continue,
+        };
+        let _ = state_tx.send(state_event);
     }
 }
 

@@ -1,0 +1,745 @@
+//! The node-side relay client: one persistent outbound mTLS link to the
+//! pinned relay (docs/relay-design.md 协议分层). After `relay join` writes
+//! `relay.toml`, the node runtime keeps an always-on connection registered
+//! with the relay: dial → TLS (client auth + fingerprint pin) → `Register` →
+//! heartbeat loop, with backoff-reconnect forever — the relay is
+//! infrastructure, so a dropped link is retried until it comes back.
+//!
+//! Step 1 of issue #32 is link lifecycle only: frames the relay routes toward
+//! this node (`OpenStream`/`Data`/`Window`/`Close`/`CloseStream`) are logged
+//! and ignored; stream support lands with step 2. Connection-level `Error`
+//! frames and protocol violations are fatal for the link (the retry loop
+//! re-registers), matching the server-side link loop in `relay_link`.
+
+use std::fs;
+use std::io;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+use thiserror::Error;
+use tokio::io::{ReadHalf, WriteHalf};
+use tokio::sync::{mpsc, watch};
+use tokio_rustls::TlsConnector;
+
+use crate::infra::error_log::ERROR_LOG;
+use crate::infra::node_credentials::{self, NodeCredentialPaths};
+use crate::infra::peer_connection::{dial_tcp_peer_connection, PeerConnection};
+use crate::infra::relay_link::LINK_OUTBOUND_QUEUE;
+use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
+use crate::infra::relay_server::DEFAULT_RELAY_LISTEN_PORT;
+use crate::infra::relay_toml_store::RelayTomlConfig;
+
+/// Default cadence of `Frame::Heartbeat` on an established link: the relay
+/// evicts after 30s of silence (three missed 10s beats).
+pub const DEFAULT_RELAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Upper bound on the relay TLS handshake, matching the server's own
+/// `HANDSHAKE_TIMEOUT`.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The client's link to the relay.
+type ClientLink = tokio_rustls::client::TlsStream<Box<dyn PeerConnection>>;
+
+/// Configuration for [`RelayClient::spawn`].
+#[derive(Debug, Clone)]
+pub struct RelayClientConfig {
+    /// The pinned relay: address and expected TLS certificate fingerprint.
+    pub relay: RelayTomlConfig,
+    /// This node's mTLS identity (self-signed certificate and key).
+    pub credentials: NodeCredentialPaths,
+    /// How often `Frame::Heartbeat` is written on an established link.
+    pub heartbeat_interval: Duration,
+    /// Backoff between reconnect attempts.
+    pub retry: RelayRetryPolicy,
+}
+
+impl RelayClientConfig {
+    /// Builds a config from a parsed `relay.toml`, defaulting the heartbeat
+    /// cadence to [`DEFAULT_RELAY_HEARTBEAT_INTERVAL`] and the retry policy to
+    /// [`RelayRetryPolicy::default`].
+    pub fn from_relay_toml(relay: RelayTomlConfig, credentials: NodeCredentialPaths) -> Self {
+        Self {
+            relay,
+            credentials,
+            heartbeat_interval: DEFAULT_RELAY_HEARTBEAT_INTERVAL,
+            retry: RelayRetryPolicy::default(),
+        }
+    }
+}
+
+/// Exponential backoff between reconnect attempts: `initial_delay`, doubling
+/// per attempt up to `max_delay`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayRetryPolicy {
+    /// Delay before the first retry after a dropped link.
+    pub initial_delay: Duration,
+    /// Upper bound on the retry delay.
+    pub max_delay: Duration,
+}
+
+impl Default for RelayRetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Lifecycle notifications of the persistent relay link, consumed by the node
+/// runtime (forwarded into `StateEvent` for the state loop).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayClientEvent {
+    /// A connection attempt started (also emitted before each retry).
+    Connecting {
+        /// The relay address being dialed.
+        relay_address: String,
+    },
+    /// The link is established: TLS authenticated, `Register` written, no
+    /// refusal received.
+    Connected {
+        /// The relay address the link is registered with.
+        relay_address: String,
+    },
+    /// The link dropped; the client is backing off before reconnecting.
+    Disconnected {
+        /// The relay address that was dialed.
+        relay_address: String,
+        /// Why the link ended (read error, relay `Error` frame, protocol
+        /// violation, dial/handshake failure).
+        reason: String,
+    },
+}
+
+/// Spawned relay client (issue #32, step 1). All state lives on the client
+/// thread; interact with it only through [`RelayClient::spawn`] and
+/// [`RelayClientHandle`].
+pub struct RelayClient;
+
+impl RelayClient {
+    /// Starts the persistent relay link on a dedicated thread with its own
+    /// multi-thread tokio runtime, reporting lifecycle through `event_tx`.
+    /// The link runs until [`RelayClientHandle::cancel`] (or Drop) signals the
+    /// stop watch; reconnects retry forever.
+    pub fn spawn(
+        config: RelayClientConfig,
+        event_tx: mpsc::Sender<RelayClientEvent>,
+    ) -> RelayClientHandle {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let worker = thread::Builder::new()
+            .name("relay-client".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        ERROR_LOG.log_error(format!(
+                            "[relay-client] failed to build tokio runtime: {error}"
+                        ));
+                        return;
+                    }
+                };
+                runtime.block_on(run_client(config, event_tx, stop_rx));
+            })
+            .map_err(|error| {
+                ERROR_LOG.log_error(format!("[relay-client] failed to spawn thread: {error}"));
+            })
+            .ok();
+        RelayClientHandle { stop_tx, worker }
+    }
+}
+
+/// Handle to a running [`RelayClient`] thread. Dropping it (or calling
+/// [`RelayClientHandle::cancel`]) signals the stop watch and joins the thread
+/// best-effort; every blocking phase of the run loop observes the watch, so
+/// the join is prompt.
+pub struct RelayClientHandle {
+    stop_tx: watch::Sender<bool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl RelayClientHandle {
+    /// Stops the persistent link and waits for the client thread to exit.
+    pub fn cancel(self) {
+        // Drop signals the stop watch and joins the worker.
+    }
+}
+
+impl Drop for RelayClientHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(true);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Internal result of one connection attempt.
+enum RunOutcome {
+    /// The stop watch fired; the run loop must exit without emitting
+    /// `Disconnected`.
+    Cancelled,
+    /// The link ended (or never came up); carries whether registration
+    /// succeeded before the drop and the human-readable reason.
+    Disconnected { registered: bool, reason: String },
+}
+
+async fn run_client(
+    config: RelayClientConfig,
+    event_tx: mpsc::Sender<RelayClientEvent>,
+    mut stop_rx: watch::Receiver<bool>,
+) {
+    let relay_address = config.relay.address.clone();
+    let mut delay = config.retry.initial_delay;
+    loop {
+        if *stop_rx.borrow_and_update() {
+            return;
+        }
+        emit(
+            &event_tx,
+            RelayClientEvent::Connecting {
+                relay_address: relay_address.clone(),
+            },
+        );
+        match run_once(&config, &event_tx, &mut stop_rx).await {
+            RunOutcome::Cancelled => return,
+            RunOutcome::Disconnected { registered, reason } => {
+                if registered {
+                    // A long-lived link dropping should restart at the
+                    // initial delay, not at the capped backoff.
+                    delay = config.retry.initial_delay;
+                }
+                emit(
+                    &event_tx,
+                    RelayClientEvent::Disconnected {
+                        relay_address: relay_address.clone(),
+                        reason,
+                    },
+                );
+            }
+        }
+        if *stop_rx.borrow() {
+            return;
+        }
+        tokio::select! {
+            _ = stop_rx.changed() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        delay = (delay * 2).min(config.retry.max_delay);
+    }
+}
+
+/// Runs one dial → TLS → register → serve cycle. Cancellation wins over every
+/// phase; every failure is converted into a disconnect reason so the caller
+/// can report and retry.
+async fn run_once(
+    config: &RelayClientConfig,
+    event_tx: &mpsc::Sender<RelayClientEvent>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> RunOutcome {
+    if *stop_rx.borrow() {
+        return RunOutcome::Cancelled;
+    }
+    let (host, port) = match parse_relay_address(&config.relay.address) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return RunOutcome::Disconnected {
+                registered: false,
+                reason: error.to_string(),
+            };
+        }
+    };
+    let identity = match prepare_identity(config) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return RunOutcome::Disconnected {
+                registered: false,
+                reason: format!("identity load failed: {error}"),
+            };
+        }
+    };
+    let ClientIdentity {
+        own_fingerprint,
+        certs,
+        key,
+    } = identity;
+    let tls_config = match build_client_config(config, certs, key) {
+        Ok(tls_config) => tls_config,
+        Err(error) => {
+            return RunOutcome::Disconnected {
+                registered: false,
+                reason: error.to_string(),
+            };
+        }
+    };
+    let connector = TlsConnector::from(Arc::new(tls_config));
+    let server_name = match rustls::pki_types::ServerName::try_from("waitagent") {
+        Ok(server_name) => server_name,
+        Err(error) => {
+            return RunOutcome::Disconnected {
+                registered: false,
+                reason: format!("invalid relay server name: {error}"),
+            };
+        }
+    };
+    let tcp = tokio::select! {
+        _ = stop_rx.changed() => return RunOutcome::Cancelled,
+        dialed = dial_tcp_peer_connection(&host, port) => match dialed {
+            Ok(tcp) => tcp,
+            Err(error) => {
+                return RunOutcome::Disconnected {
+                    registered: false,
+                    reason: format!("tcp dial to {host}:{port} failed: {error}"),
+                };
+            }
+        },
+    };
+    let mut tls = tokio::select! {
+        _ = stop_rx.changed() => return RunOutcome::Cancelled,
+        handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp)) => {
+            match handshake {
+                Err(_) => {
+                    return RunOutcome::Disconnected {
+                        registered: false,
+                        reason: "relay TLS handshake timed out".to_string(),
+                    };
+                }
+                Ok(Err(error)) => {
+                    return RunOutcome::Disconnected {
+                        registered: false,
+                        reason: format!("relay TLS handshake failed: {error}"),
+                    };
+                }
+                Ok(Ok(tls)) => tls,
+            }
+        }
+    };
+    let register = Frame::Register {
+        node_id: own_fingerprint,
+    };
+    tokio::select! {
+        _ = stop_rx.changed() => return RunOutcome::Cancelled,
+        written = write_frame(&mut tls, &register) => {
+            if let Err(error) = written {
+                return RunOutcome::Disconnected {
+                    registered: false,
+                    reason: format!("register write failed: {error}"),
+                };
+            }
+        }
+    };
+    emit(
+        event_tx,
+        RelayClientEvent::Connected {
+            relay_address: config.relay.address.clone(),
+        },
+    );
+    serve_registered(tls, config, stop_rx).await
+}
+
+/// The registered phase: a writer task pumps the bounded outbound queue, a
+/// heartbeat task feeds it, and this task reads until the link ends.
+async fn serve_registered(
+    tls: ClientLink,
+    config: &RelayClientConfig,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> RunOutcome {
+    let (reader, writer) = tokio::io::split(tls);
+    let (outbound_tx, outbound_rx) = mpsc::channel::<Frame>(LINK_OUTBOUND_QUEUE);
+    let writer_task = tokio::spawn(writer_loop(writer, outbound_rx, stop_rx.clone()));
+    let heartbeat_task = tokio::spawn(heartbeat_loop(
+        config.heartbeat_interval,
+        outbound_tx.clone(),
+        stop_rx.clone(),
+    ));
+    let outcome = reader_loop(reader, stop_rx).await;
+    heartbeat_task.abort();
+    let _ = heartbeat_task.await;
+    drop(outbound_tx);
+    let _ = writer_task.await;
+    match outcome {
+        Some(reason) => RunOutcome::Disconnected {
+            registered: true,
+            reason,
+        },
+        None => RunOutcome::Cancelled,
+    }
+}
+
+/// Reads frames from the registered link until it ends. `None` = cancelled;
+/// `Some(reason)` = the disconnect reason. Stream-routed frames are logged
+/// and ignored (step 2 of issue #32 adds stream support); frames the relay
+/// must never send are protocol violations and fatal.
+async fn reader_loop(
+    mut reader: ReadHalf<ClientLink>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> Option<String> {
+    loop {
+        if *stop_rx.borrow() {
+            return None;
+        }
+        tokio::select! {
+            _ = stop_rx.changed() => return None,
+            frame = read_frame(&mut reader) => match frame {
+                Ok(Frame::Error { stream_id, code, message }) => {
+                    ERROR_LOG.log_error(format!(
+                        "[relay-client] relay error on stream {stream_id}: code 0x{code:04x}: {message}"
+                    ));
+                    return Some(format!("relay error 0x{code:04x}: {message}"));
+                }
+                Ok(
+                    Frame::OpenStream { .. }
+                    | Frame::Data { .. }
+                    | Frame::Window { .. }
+                    | Frame::Close { .. }
+                    | Frame::CloseStream { .. },
+                ) => {
+                    ERROR_LOG.log_debug(
+                        "[relay-client] ignoring relay stream frame; stream support arrives with step 2 of issue #32"
+                            .to_string(),
+                    );
+                }
+                Ok(other) => {
+                    ERROR_LOG.log_error(format!(
+                        "[relay-client] protocol violation: unexpected frame from relay: {other:?}"
+                    ));
+                    return Some(format!(
+                        "protocol violation: unexpected frame from relay: {other:?}"
+                    ));
+                }
+                Err(error) => {
+                    ERROR_LOG.log_error(format!("[relay-client] relay link closed: {error}"));
+                    return Some(format!("relay link closed: {error}"));
+                }
+            },
+        }
+    }
+}
+
+/// Drains the outbound queue into the link's write half. Exits when every
+/// sender dropped (link teardown), the write fails (relay gone), or the stop
+/// watch fires — the last keeps `cancel` prompt even when a stalled relay
+/// holds a write parked.
+async fn writer_loop(
+    mut writer: WriteHalf<ClientLink>,
+    mut outbound: mpsc::Receiver<Frame>,
+    mut stop_rx: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = stop_rx.changed() => return,
+            frame = outbound.recv() => {
+                let Some(frame) = frame else { return; };
+                tokio::select! {
+                    _ = stop_rx.changed() => return,
+                    written = write_frame(&mut writer, &frame) => {
+                        if let Err(error) = written {
+                            ERROR_LOG
+                                .log_error(format!("[relay-client] link writer failed: {error}"));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Writes one `Frame::Heartbeat` into the outbound queue per interval. The
+/// queue backpressures bursts; a closed queue means the link is being torn
+/// down.
+async fn heartbeat_loop(
+    interval: Duration,
+    outbound_tx: mpsc::Sender<Frame>,
+    mut stop_rx: watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(interval);
+    loop {
+        tokio::select! {
+            _ = stop_rx.changed() => return,
+            _ = tick.tick() => {
+                if outbound_tx.send(Frame::Heartbeat).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn emit(event_tx: &mpsc::Sender<RelayClientEvent>, event: RelayClientEvent) {
+    if let Err(error) = event_tx.try_send(event) {
+        ERROR_LOG.log_debug(format!(
+            "[relay-client] event not delivered ({error}); link continues"
+        ));
+    }
+}
+
+/// Loads (generating when missing) this node's identity and its PEM key
+/// material. Small local files, read once per connection attempt — the same
+/// sync-read idiom as `relay_join` and the relay server startup.
+fn prepare_identity(config: &RelayClientConfig) -> Result<ClientIdentity, RelayClientConnectError> {
+    let own_fingerprint = node_credentials::ensure_credentials(&config.credentials)?;
+    let cert_pem = fs::read_to_string(&config.credentials.cert_path)?;
+    let key_pem = fs::read_to_string(&config.credentials.key_path)?;
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .map_err(|error| RelayClientConnectError::Tls(error.to_string()))?;
+    if certs.is_empty() {
+        return Err(RelayClientConnectError::Credentials(
+            node_credentials::NodeCredentialsError::MissingEndEntityCertificate,
+        ));
+    }
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .map_err(|error| RelayClientConnectError::Tls(error.to_string()))?
+        .ok_or_else(|| {
+            RelayClientConnectError::Tls(format!(
+                "no private key in {:?}",
+                config.credentials.key_path
+            ))
+        })?;
+    Ok(ClientIdentity {
+        own_fingerprint,
+        certs,
+        key,
+    })
+}
+
+struct ClientIdentity {
+    own_fingerprint: String,
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+}
+
+fn build_client_config(
+    config: &RelayClientConfig,
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+) -> Result<rustls::ClientConfig, RelayClientConnectError> {
+    let verifier = Arc::new(PinnedServerCertVerifier {
+        expected_fingerprint: config.relay.relay_fingerprint.clone(),
+    });
+    rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_client_auth_cert(certs, key)
+        .map_err(|error| RelayClientConnectError::Tls(error.to_string()))
+}
+
+/// Connect-phase failures, converted to disconnect reasons at the run loop.
+#[derive(Debug, Error)]
+enum RelayClientConnectError {
+    #[error("invalid relay address {0:?}: {1}")]
+    Address(String, String),
+    #[error(transparent)]
+    Credentials(#[from] node_credentials::NodeCredentialsError),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("tls error: {0}")]
+    Tls(String),
+}
+
+/// rustls server-cert verifier pinning the relay certificate fingerprint from
+/// `relay.toml`: the end-entity SPKI SHA-256 must match the pin (learned via
+/// the token-authenticated enrollment session), while TLS 1.2/1.3 signature
+/// checks are delegated to ring so the relay proves possession of its private
+/// key (same construction as `relay_join`'s enrollment verifier).
+#[derive(Debug)]
+struct PinnedServerCertVerifier {
+    expected_fingerprint: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let fingerprint = node_credentials::cert_fingerprint_from_der(end_entity.as_ref())
+            .map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        if fingerprint.eq_ignore_ascii_case(&self.expected_fingerprint) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Splits `host[:port]`; a missing port defaults to
+/// [`DEFAULT_RELAY_LISTEN_PORT`]. The data port is the base port (the
+/// enrollment offset used by `relay join` does not apply here).
+fn parse_relay_address(address: &str) -> Result<(String, u16), RelayClientConnectError> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Err(RelayClientConnectError::Address(
+            address.to_string(),
+            "empty address".to_string(),
+        ));
+    }
+    match address.rsplit_once(':') {
+        Some((host, port)) => {
+            let host = host.trim();
+            if host.is_empty() {
+                return Err(RelayClientConnectError::Address(
+                    address.to_string(),
+                    "missing host".to_string(),
+                ));
+            }
+            let port = port.trim().parse::<u16>().map_err(|_| {
+                RelayClientConnectError::Address(
+                    address.to_string(),
+                    "port is not a number".to_string(),
+                )
+            })?;
+            Ok((host.to_string(), port))
+        }
+        None => Ok((address.to_string(), DEFAULT_RELAY_LISTEN_PORT)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+
+    #[test]
+    fn retry_policy_defaults_to_half_second_initial_and_five_second_cap() {
+        let policy = RelayRetryPolicy::default();
+        assert_eq!(policy.initial_delay, Duration::from_millis(500));
+        assert_eq!(policy.max_delay, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn from_relay_toml_defaults_heartbeat_and_retry() {
+        let config = RelayClientConfig::from_relay_toml(
+            RelayTomlConfig {
+                address: "relay.example:7475".to_string(),
+                relay_fingerprint: "ab".to_string(),
+            },
+            NodeCredentialPaths {
+                key_path: std::path::PathBuf::from("node.key"),
+                cert_path: std::path::PathBuf::from("node.crt"),
+            },
+        );
+        assert_eq!(config.heartbeat_interval, DEFAULT_RELAY_HEARTBEAT_INTERVAL);
+        assert_eq!(config.retry, RelayRetryPolicy::default());
+    }
+
+    #[test]
+    fn address_without_port_defaults_to_the_relay_port() {
+        let (host, port) = parse_relay_address("relay.example").expect("parse");
+        assert_eq!(host, "relay.example");
+        assert_eq!(port, DEFAULT_RELAY_LISTEN_PORT);
+    }
+
+    #[test]
+    fn address_with_explicit_port_wins() {
+        let (host, port) = parse_relay_address("relay.example:9999").expect("parse");
+        assert_eq!(host, "relay.example");
+        assert_eq!(port, 9999);
+    }
+
+    #[test]
+    fn address_rejects_garbage() {
+        assert!(matches!(
+            parse_relay_address(""),
+            Err(RelayClientConnectError::Address(..))
+        ));
+        assert!(matches!(
+            parse_relay_address(":9999"),
+            Err(RelayClientConnectError::Address(..))
+        ));
+        assert!(matches!(
+            parse_relay_address("host:notaport"),
+            Err(RelayClientConnectError::Address(..))
+        ));
+    }
+
+    #[test]
+    fn pinned_verifier_accepts_matching_fingerprint_case_insensitively() {
+        let cert = rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec![
+            "waitagent".to_string(),
+        ]))
+        .expect("cert should generate");
+        let der = cert.serialize_der().expect("cert should serialize");
+        let fingerprint = node_credentials::cert_fingerprint_from_der(&der).expect("fingerprint");
+        let uppercased = fingerprint.to_uppercase();
+        let verifier = PinnedServerCertVerifier {
+            expected_fingerprint: uppercased,
+        };
+        let now = rustls::pki_types::UnixTime::now();
+        let result = verifier.verify_server_cert(
+            &rustls::pki_types::CertificateDer::from(der.clone()),
+            &[],
+            &rustls::pki_types::ServerName::try_from("waitagent").expect("server name"),
+            &[],
+            now,
+        );
+        assert!(result.is_ok(), "pin match must verify: {result:?}");
+    }
+
+    #[test]
+    fn pinned_verifier_rejects_mismatched_fingerprint() {
+        let cert = rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec![
+            "waitagent".to_string(),
+        ]))
+        .expect("cert should generate");
+        let der = cert.serialize_der().expect("cert should serialize");
+        let verifier = PinnedServerCertVerifier {
+            expected_fingerprint: "deadbeef".to_string(),
+        };
+        let now = rustls::pki_types::UnixTime::now();
+        let result = verifier.verify_server_cert(
+            &rustls::pki_types::CertificateDer::from(der),
+            &[],
+            &rustls::pki_types::ServerName::try_from("waitagent").expect("server name"),
+            &[],
+            now,
+        );
+        assert!(result.is_err(), "pin mismatch must fail");
+    }
+}
