@@ -24,6 +24,7 @@ mod admin;
 mod capacity;
 mod client;
 mod enrollment;
+mod fairness;
 mod join;
 mod presence;
 mod routing;
