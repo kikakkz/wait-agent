@@ -5,28 +5,32 @@
 //! heartbeat loop, with backoff-reconnect forever — the relay is
 //! infrastructure, so a dropped link is retried until it comes back.
 //!
-//! Step 1 of issue #32 is link lifecycle only: frames the relay routes toward
-//! this node (`OpenStream`/`Data`/`Window`/`Close`/`CloseStream`) are logged
-//! and ignored; stream support lands with step 2. Connection-level `Error`
-//! frames and protocol violations are fatal for the link (the retry loop
-//! re-registers), matching the server-side link loop in `relay_link`.
+//! The registered link is a relay-mode [`MuxConnection`]: the node drives
+//! `Register`/`Heartbeat` through [`MuxConnection::send_control`], opens
+//! node-to-node streams with [`RelayClientHandle::open_stream`], and consumes
+//! relay-routed inbound streams with [`RelayClientHandle::accept_inbound`].
+//! Stream frames (`OpenStream`/`Data`/`Window`/`Close`/`CloseStream`) are
+//! dispatched by the mux; connection-level `Error` frames (stream id 0) reach
+//! the supervisor through the mux control channel and are fatal for the link
+//! (the retry loop re-registers), matching the server-side link loop.
 
 use std::fs;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsConnector;
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
 use crate::infra::peer_connection::{dial_tcp_peer_connection, PeerConnection};
-use crate::infra::relay_link::LINK_OUTBOUND_QUEUE;
-use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
+use crate::infra::relay_mux::connection::{MuxConnection, MuxOpener};
+use crate::infra::relay_mux::frame::Frame;
+use crate::infra::relay_mux::stream::MuxStream;
+use crate::infra::relay_mux::{MuxError, ACCEPT_QUEUE};
 use crate::infra::relay_server::DEFAULT_RELAY_LISTEN_PORT;
 use crate::infra::relay_toml_store::RelayTomlConfig;
 
@@ -38,8 +42,27 @@ pub const DEFAULT_RELAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// `HANDSHAKE_TIMEOUT`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Capacity of the control channel the mux forwards connection-level relay
+/// `Error` frames into.
+const CONTROL_QUEUE: usize = 16;
+
 /// The client's link to the relay.
 type ClientLink = tokio_rustls::client::TlsStream<Box<dyn PeerConnection>>;
+
+/// Errors of the stream-opening handle API.
+#[derive(Debug, Error)]
+pub enum RelayClientError {
+    /// No relay link is currently established (still connecting, between
+    /// retries, or after a connection-level refusal).
+    #[allow(dead_code)]
+    // Constructed by `open_stream`, consumed by the relay stream integration
+    // tests; the runtime caller lands with step 3 of issue #32.
+    #[error("no relay link is currently established")]
+    NotConnected,
+    /// The underlying mux rejected the operation.
+    #[error("mux error: {0}")]
+    Mux(#[from] MuxError),
+}
 
 /// Configuration for [`RelayClient::spawn`].
 #[derive(Debug, Clone)]
@@ -96,8 +119,9 @@ pub enum RelayClientEvent {
         /// The relay address being dialed.
         relay_address: String,
     },
-    /// The link is established: TLS authenticated, `Register` written, no
-    /// refusal received.
+    /// The link is established: TLS authenticated, `Register` handed to the
+    /// link (the relay answers refusal only by closing the link or an
+    /// `Error` frame, both of which surface as `Disconnected`).
     Connected {
         /// The relay address the link is registered with.
         relay_address: String,
@@ -112,7 +136,7 @@ pub enum RelayClientEvent {
     },
 }
 
-/// Spawned relay client (issue #32, step 1). All state lives on the client
+/// Spawned relay client (issue #32). All connection state lives on the client
 /// thread; interact with it only through [`RelayClient::spawn`] and
 /// [`RelayClientHandle`].
 pub struct RelayClient;
@@ -127,6 +151,13 @@ impl RelayClient {
         event_tx: mpsc::Sender<RelayClientEvent>,
     ) -> RelayClientHandle {
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (inbound_tx, inbound_rx) = mpsc::channel::<MuxStream>(ACCEPT_QUEUE);
+        let link_state = Arc::new(ClientLinkState {
+            opener_slot: Mutex::new(None),
+            inbound_tx,
+        });
+        let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
+        let worker_state = link_state.clone();
         let worker = thread::Builder::new()
             .name("relay-client".to_string())
             .spawn(move || {
@@ -142,14 +173,34 @@ impl RelayClient {
                         return;
                     }
                 };
-                runtime.block_on(run_client(config, event_tx, stop_rx));
+                let _ = runtime_tx.send(runtime.handle().clone());
+                runtime.block_on(run_client(config, event_tx, stop_rx, worker_state));
             })
             .map_err(|error| {
                 ERROR_LOG.log_error(format!("[relay-client] failed to spawn thread: {error}"));
             })
             .ok();
-        RelayClientHandle { stop_tx, worker }
+        // The thread sends its runtime handle before running; a spawn/build
+        // failure leaves None and the stream APIs report NotConnected.
+        let runtime = runtime_rx.recv().ok();
+        RelayClientHandle {
+            stop_tx,
+            worker,
+            link_state,
+            inbound: Mutex::new(inbound_rx),
+            runtime,
+        }
     }
+}
+
+/// State shared between the client thread (which installs a fresh opener
+/// after every successful register and clears it before reconnecting) and the
+/// handle (which reads it from arbitrary runtime threads).
+struct ClientLinkState {
+    opener_slot: Mutex<Option<MuxOpener>>,
+    /// Client-wide inbound stream queue; survives reconnects so a consumer
+    /// never has to re-arm its accept loop.
+    inbound_tx: mpsc::Sender<MuxStream>,
 }
 
 /// Handle to a running [`RelayClient`] thread. Dropping it (or calling
@@ -159,9 +210,66 @@ impl RelayClient {
 pub struct RelayClientHandle {
     stop_tx: watch::Sender<bool>,
     worker: Option<JoinHandle<()>>,
+    // Consumed by `open_stream`/`accept_inbound`: the relay stream
+    // integration tests exercise them end-to-end; the runtime consumer
+    // lands with step 3 of issue #32.
+    #[allow(dead_code)]
+    link_state: Arc<ClientLinkState>,
+    #[allow(dead_code)]
+    inbound: Mutex<mpsc::Receiver<MuxStream>>,
+    #[allow(dead_code)]
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl RelayClientHandle {
+    /// Opens a node-to-node stream toward `target_node_id` through the relay.
+    ///
+    /// Returns immediately with the stream handle; the relay routes the
+    /// open asynchronously, so a refusal (unknown target, target offline)
+    /// surfaces later as an error on stream use, while the link itself stays
+    /// up.
+    ///
+    /// Returns [`RelayClientError::NotConnected`] when no link is established.
+    /// Blocks the calling thread until the open is queued; must not be called
+    /// from an asynchronous execution context.
+    #[allow(dead_code)]
+    // Consumed by the relay stream integration tests; the runtime consumer
+    // lands with step 3 of issue #32.
+    pub fn open_stream(
+        &self,
+        target_node_id: &str,
+    ) -> Result<Box<dyn PeerConnection>, RelayClientError> {
+        let opener = {
+            let slot = self
+                .link_state
+                .opener_slot
+                .lock()
+                .map_err(|_| RelayClientError::NotConnected)?;
+            slot.clone().ok_or(RelayClientError::NotConnected)?
+        };
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or(RelayClientError::NotConnected)?;
+        let stream = runtime.block_on(opener.open_stream_to(target_node_id))?;
+        Ok(Box::new(stream))
+    }
+
+    /// Blocks until the next relay-routed inbound stream arrives, returning it
+    /// as a [`PeerConnection`]. Returns `None` once the client has stopped.
+    ///
+    /// The queue is client-wide and survives reconnects. Must not be called
+    /// from an asynchronous execution context.
+    #[allow(dead_code)]
+    // Consumed by the relay stream integration tests; the runtime consumer
+    // lands with step 3 of issue #32.
+    pub fn accept_inbound(&self) -> Option<Box<dyn PeerConnection>> {
+        let mut inbound = self.inbound.lock().ok()?;
+        inbound
+            .blocking_recv()
+            .map(|stream| Box::new(stream) as Box<dyn PeerConnection>)
+    }
+
     /// Stops the persistent link and waits for the client thread to exit.
     pub fn cancel(self) {
         // Drop signals the stop watch and joins the worker.
@@ -191,6 +299,7 @@ async fn run_client(
     config: RelayClientConfig,
     event_tx: mpsc::Sender<RelayClientEvent>,
     mut stop_rx: watch::Receiver<bool>,
+    link_state: Arc<ClientLinkState>,
 ) {
     let relay_address = config.relay.address.clone();
     let mut delay = config.retry.initial_delay;
@@ -204,7 +313,7 @@ async fn run_client(
                 relay_address: relay_address.clone(),
             },
         );
-        match run_once(&config, &event_tx, &mut stop_rx).await {
+        match run_once(&config, &event_tx, &mut stop_rx, &link_state).await {
             RunOutcome::Cancelled => return,
             RunOutcome::Disconnected { registered, reason } => {
                 if registered {
@@ -239,6 +348,7 @@ async fn run_once(
     config: &RelayClientConfig,
     event_tx: &mpsc::Sender<RelayClientEvent>,
     stop_rx: &mut watch::Receiver<bool>,
+    link_state: &Arc<ClientLinkState>,
 ) -> RunOutcome {
     if *stop_rx.borrow() {
         return RunOutcome::Cancelled;
@@ -297,7 +407,7 @@ async fn run_once(
             }
         },
     };
-    let mut tls = tokio::select! {
+    let tls = tokio::select! {
         _ = stop_rx.changed() => return RunOutcome::Cancelled,
         handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp)) => {
             match handshake {
@@ -317,49 +427,100 @@ async fn run_once(
             }
         }
     };
-    let register = Frame::Register {
+    serve_registered(tls, config, event_tx, stop_rx, link_state, own_fingerprint).await
+}
+
+/// The registered phase: the TLS link runs as a relay-mode mux connection.
+/// This task supervises: connection death (→ reconnect), connection-level
+/// relay `Error` frames forwarded by the mux (→ log + reconnect), inbound
+/// stream forwarding into the client-wide accept queue, and the stop watch.
+/// The opener is installed in the handle's slot for the duration and cleared
+/// before returning.
+async fn serve_registered(
+    tls: ClientLink,
+    config: &RelayClientConfig,
+    event_tx: &mpsc::Sender<RelayClientEvent>,
+    stop_rx: &mut watch::Receiver<bool>,
+    link_state: &Arc<ClientLinkState>,
+    own_fingerprint: String,
+) -> RunOutcome {
+    let (control_tx, mut control_rx) = mpsc::channel::<Frame>(CONTROL_QUEUE);
+    let mut conn = MuxConnection::spawn_relay_link(tls, control_tx);
+    let opener = conn.opener();
+    if let Err(error) = opener.send_control(Frame::Register {
         node_id: own_fingerprint,
-    };
-    tokio::select! {
-        _ = stop_rx.changed() => return RunOutcome::Cancelled,
-        written = write_frame(&mut tls, &register) => {
-            if let Err(error) = written {
-                return RunOutcome::Disconnected {
-                    registered: false,
-                    reason: format!("register write failed: {error}"),
-                };
-            }
-        }
-    };
+    }) {
+        return RunOutcome::Disconnected {
+            registered: false,
+            reason: format!("register send failed: {error}"),
+        };
+    }
+    if let Ok(mut slot) = link_state.opener_slot.lock() {
+        *slot = Some(opener.clone());
+    }
     emit(
         event_tx,
         RelayClientEvent::Connected {
             relay_address: config.relay.address.clone(),
         },
     );
-    serve_registered(tls, config, stop_rx).await
-}
-
-/// The registered phase: a writer task pumps the bounded outbound queue, a
-/// heartbeat task feeds it, and this task reads until the link ends.
-async fn serve_registered(
-    tls: ClientLink,
-    config: &RelayClientConfig,
-    stop_rx: &mut watch::Receiver<bool>,
-) -> RunOutcome {
-    let (reader, writer) = tokio::io::split(tls);
-    let (outbound_tx, outbound_rx) = mpsc::channel::<Frame>(LINK_OUTBOUND_QUEUE);
-    let writer_task = tokio::spawn(writer_loop(writer, outbound_rx, stop_rx.clone()));
     let heartbeat_task = tokio::spawn(heartbeat_loop(
         config.heartbeat_interval,
-        outbound_tx.clone(),
+        opener,
         stop_rx.clone(),
     ));
-    let outcome = reader_loop(reader, stop_rx).await;
+
+    let mut forward_inbound = true;
+    let outcome = loop {
+        if *stop_rx.borrow() {
+            break None;
+        }
+        if conn.is_closed() {
+            break Some(format!("relay link closed: {}", conn.dead_reason()));
+        }
+        tokio::select! {
+            _ = stop_rx.changed() => break None,
+            frame = control_rx.recv() => match frame {
+                Some(Frame::Error { code, message, .. }) => {
+                    ERROR_LOG.log_error(format!(
+                        "[relay-client] relay error: code 0x{code:04x}: {message}"
+                    ));
+                    break Some(format!("relay error 0x{code:04x}: {message}"));
+                }
+                Some(other) => {
+                    ERROR_LOG.log_debug(format!(
+                        "[relay-client] ignoring unexpected control frame: {other:?}"
+                    ));
+                }
+                None => break Some(format!("relay link closed: {}", conn.dead_reason())),
+            },
+            accepted = conn.accept() => match accepted {
+                Some(stream) => {
+                    if !forward_inbound {
+                        // The accept receiver is gone; drop further inbound
+                        // streams (their connections are unusable anyway).
+                        continue;
+                    }
+                    tokio::select! {
+                        _ = stop_rx.changed() => break None,
+                        sent = link_state.inbound_tx.send(stream) => {
+                            if sent.is_err() {
+                                forward_inbound = false;
+                            }
+                        }
+                    }
+                }
+                None => break Some(format!("relay link closed: {}", conn.dead_reason())),
+            },
+        }
+    };
+
+    if let Ok(mut slot) = link_state.opener_slot.lock() {
+        *slot = None;
+    }
     heartbeat_task.abort();
     let _ = heartbeat_task.await;
-    drop(outbound_tx);
-    let _ = writer_task.await;
+    drop(conn);
     match outcome {
         Some(reason) => RunOutcome::Disconnected {
             registered: true,
@@ -369,99 +530,18 @@ async fn serve_registered(
     }
 }
 
-/// Reads frames from the registered link until it ends. `None` = cancelled;
-/// `Some(reason)` = the disconnect reason. Stream-routed frames are logged
-/// and ignored (step 2 of issue #32 adds stream support); frames the relay
-/// must never send are protocol violations and fatal.
-async fn reader_loop(
-    mut reader: ReadHalf<ClientLink>,
-    stop_rx: &mut watch::Receiver<bool>,
-) -> Option<String> {
-    loop {
-        if *stop_rx.borrow() {
-            return None;
-        }
-        tokio::select! {
-            _ = stop_rx.changed() => return None,
-            frame = read_frame(&mut reader) => match frame {
-                Ok(Frame::Error { stream_id, code, message }) => {
-                    ERROR_LOG.log_error(format!(
-                        "[relay-client] relay error on stream {stream_id}: code 0x{code:04x}: {message}"
-                    ));
-                    return Some(format!("relay error 0x{code:04x}: {message}"));
-                }
-                Ok(
-                    Frame::OpenStream { .. }
-                    | Frame::Data { .. }
-                    | Frame::Window { .. }
-                    | Frame::Close { .. }
-                    | Frame::CloseStream { .. },
-                ) => {
-                    ERROR_LOG.log_debug(
-                        "[relay-client] ignoring relay stream frame; stream support arrives with step 2 of issue #32"
-                            .to_string(),
-                    );
-                }
-                Ok(other) => {
-                    ERROR_LOG.log_error(format!(
-                        "[relay-client] protocol violation: unexpected frame from relay: {other:?}"
-                    ));
-                    return Some(format!(
-                        "protocol violation: unexpected frame from relay: {other:?}"
-                    ));
-                }
-                Err(error) => {
-                    ERROR_LOG.log_error(format!("[relay-client] relay link closed: {error}"));
-                    return Some(format!("relay link closed: {error}"));
-                }
-            },
-        }
-    }
-}
-
-/// Drains the outbound queue into the link's write half. Exits when every
-/// sender dropped (link teardown), the write fails (relay gone), or the stop
-/// watch fires — the last keeps `cancel` prompt even when a stalled relay
-/// holds a write parked.
-async fn writer_loop(
-    mut writer: WriteHalf<ClientLink>,
-    mut outbound: mpsc::Receiver<Frame>,
-    mut stop_rx: watch::Receiver<bool>,
-) {
-    loop {
-        tokio::select! {
-            _ = stop_rx.changed() => return,
-            frame = outbound.recv() => {
-                let Some(frame) = frame else { return; };
-                tokio::select! {
-                    _ = stop_rx.changed() => return,
-                    written = write_frame(&mut writer, &frame) => {
-                        if let Err(error) = written {
-                            ERROR_LOG
-                                .log_error(format!("[relay-client] link writer failed: {error}"));
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Writes one `Frame::Heartbeat` into the outbound queue per interval. The
-/// queue backpressures bursts; a closed queue means the link is being torn
-/// down.
-async fn heartbeat_loop(
-    interval: Duration,
-    outbound_tx: mpsc::Sender<Frame>,
-    mut stop_rx: watch::Receiver<bool>,
-) {
+/// Writes one `Frame::Heartbeat` per interval through the mux opener. Exits
+/// on the stop watch or when the link dies (the next send fails).
+async fn heartbeat_loop(interval: Duration, opener: MuxOpener, mut stop_rx: watch::Receiver<bool>) {
     let mut tick = tokio::time::interval(interval);
     loop {
         tokio::select! {
             _ = stop_rx.changed() => return,
             _ = tick.tick() => {
-                if outbound_tx.send(Frame::Heartbeat).await.is_err() {
+                if let Err(error) = opener.send_control(Frame::Heartbeat) {
+                    ERROR_LOG.log_debug(format!(
+                        "[relay-client] heartbeat not sent ({error}); link is going down"
+                    ));
                     return;
                 }
             }

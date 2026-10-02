@@ -12,16 +12,36 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use super::frame::{read_frame, write_frame, Frame};
+use crate::infra::error_log::ERROR_LOG;
+
+use super::frame::{read_frame, write_frame, Frame, MAX_NODE_ID_LEN};
 use super::stream::{MuxStream, StreamState};
 use super::{first_stream_id, owns_stream_id, MuxError, ACCEPT_QUEUE, OUTBOUND_QUEUE};
 
 /// Which side of the connection this handle is. The client allocates odd
 /// stream ids, the server even ids.
+#[allow(dead_code)]
+// `Server` parity is exercised by the node-to-node unit tests; runtime
+// node-to-node mux links land with the relay mux adoption (issue #51). The
+// relay client is always `Client` parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MuxRole {
     Client,
     Server,
+}
+
+/// What speaks on the other end of the connection. Node-to-node links carry
+/// only the four mux frames; relay links additionally carry the relay
+/// control frames (`OpenStream`/`CloseStream`/`Error` routing plus the
+/// register/heartbeat channel the node client drives through
+/// [`MuxOpener::send_control`]).
+#[allow(dead_code)]
+// `NodeToNode` is selected by `spawn`, which the node-to-node unit tests
+// exercise; the runtime consumer lands with issue #51.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    NodeToNode,
+    RelayLink,
 }
 
 /// Per-stream state as stored in the connection's stream table. Dropping an
@@ -32,6 +52,9 @@ pub(crate) struct StreamEntry {
     pub(crate) inbound: mpsc::Sender<Vec<u8>>,
     pub(crate) state: Arc<Mutex<StreamState>>,
     pub(crate) peer_fin: Arc<AtomicBool>,
+    /// Full teardown by the relay (`CloseStream` / stream-scoped `Error`):
+    /// pending and future reads/writes must fail with an error, not EOF.
+    pub(crate) reset: Arc<AtomicBool>,
 }
 
 pub(crate) type StreamTable = HashMap<u32, StreamEntry>;
@@ -51,12 +74,22 @@ pub(crate) struct ConnectionShared {
     /// Signals both loops to exit on failure.
     shutdown_tx: watch::Sender<bool>,
     role: MuxRole,
+    /// What speaks on the other end; selects the reader dispatch and which
+    /// outbound helpers are legal.
+    mode: Mode,
+    // Read by `open_stream`/`open_stream_to`; node-to-node opens are
+    // test-only until issue #51, so the counter is test-read today.
+    #[allow(dead_code)]
     next_local_id: AtomicU32,
 }
 
 impl ConnectionShared {
     pub(crate) fn role(&self) -> MuxRole {
         self.role
+    }
+
+    pub(crate) fn is_relay_link(&self) -> bool {
+        matches!(self.mode, Mode::RelayLink)
     }
 
     pub(crate) fn wake_outbound(&self) {
@@ -137,7 +170,32 @@ pub struct MuxConnection {
 
 impl MuxConnection {
     /// Spawns the reader and writer loops over `io`.
+    #[allow(dead_code)]
+    // Node-to-node mux links are exercised by the unit tests; the runtime
+    // consumer lands with the relay mux adoption (issue #51).
     pub fn spawn(io: impl AsyncRead + AsyncWrite + Send + Unpin + 'static, role: MuxRole) -> Self {
+        Self::build(io, role, Mode::NodeToNode, None)
+    }
+
+    /// Spawns the loops over a node-to-relay link: `Client` parity (node
+    /// streams are odd, relay-routed inbound streams even) and the relay
+    /// control-frame dispatch. Connection-level `Error` frames (stream id 0)
+    /// are forwarded to `control_tx`; the stream-scoped relay frames
+    /// (`OpenStream` even / `CloseStream` / `Error`) are dispatched onto
+    /// streams without involving the control channel.
+    pub fn spawn_relay_link(
+        io: impl AsyncRead + AsyncWrite + Send + Unpin + 'static,
+        control_tx: mpsc::Sender<Frame>,
+    ) -> Self {
+        Self::build(io, MuxRole::Client, Mode::RelayLink, Some(control_tx))
+    }
+
+    fn build(
+        io: impl AsyncRead + AsyncWrite + Send + Unpin + 'static,
+        role: MuxRole,
+        mode: Mode,
+        control: Option<mpsc::Sender<Frame>>,
+    ) -> Self {
         let (reader, writer) = tokio::io::split(io);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
         let (accept_tx, accept_rx) = mpsc::channel(ACCEPT_QUEUE);
@@ -150,6 +208,7 @@ impl MuxConnection {
             close_reason: Mutex::new(None),
             shutdown_tx,
             role,
+            mode,
             next_local_id: AtomicU32::new(first_stream_id(role).get()),
         });
         let table = Arc::new(Mutex::new(HashMap::new()));
@@ -159,6 +218,7 @@ impl MuxConnection {
             table.clone(),
             accept_tx,
             shutdown_rx_reader,
+            control,
         ));
         let writer_task = tokio::spawn(writer_loop(
             writer,
@@ -181,7 +241,26 @@ impl MuxConnection {
         self.shared.dead.load(Ordering::Acquire)
     }
 
+    /// Returns why the connection died (the generic close message when no
+    /// reason was recorded).
+    pub(crate) fn dead_reason(&self) -> String {
+        self.shared.dead_reason()
+    }
+
+    /// Returns a cloneable handle for opening relay-routed streams and
+    /// sending relay control frames, usable while this connection is owned by
+    /// a driver task (the node relay client installs it in its handle).
+    pub fn opener(&self) -> MuxOpener {
+        MuxOpener {
+            shared: self.shared.clone(),
+            table: self.table.clone(),
+        }
+    }
+
     /// Opens a new stream toward the peer.
+    #[allow(dead_code)]
+    // Node-to-node opens are exercised by the unit tests; the runtime
+    // consumer lands with the relay mux adoption (issue #51).
     pub async fn open_stream(&self) -> Result<MuxStream, MuxError> {
         if self.shared.dead.load(Ordering::Acquire) {
             return Err(MuxError::ConnectionClosed(self.shared.dead_reason()));
@@ -214,10 +293,131 @@ impl MuxConnection {
         Ok(stream)
     }
 
+    /// Opens a new stream toward `target_node_id` through the relay
+    /// (relay-link mode only). Returns immediately; a refusal arrives
+    /// asynchronously as an `Error` frame for the stream and surfaces on
+    /// stream use.
+    #[allow(dead_code)]
+    // The relay client drives the `MuxOpener` it gets from
+    // `MuxConnection::opener` while the supervisor owns the connection; this
+    // wrapper exists for connection-owning callers and the tests.
+    pub async fn open_stream_to(&self, target_node_id: &str) -> Result<MuxStream, MuxError> {
+        self.opener().open_stream_to(target_node_id).await
+    }
+
+    /// Sends a relay control frame on a relay-link connection (relay-link
+    /// mode only). Only `Register` / `Unregister` / `Heartbeat` are accepted.
+    #[allow(dead_code)]
+    // See `open_stream_to` above: connection-owning callers and tests use
+    // this wrapper; the relay client drives its `MuxOpener`.
+    pub fn send_control(&self, frame: Frame) -> Result<(), MuxError> {
+        self.opener().send_control(frame)
+    }
+
     /// Accepts the next stream opened by the peer. Returns `None` once the
     /// connection is closed and all pending streams have been delivered.
     pub async fn accept(&mut self) -> Option<MuxStream> {
         self.accept_rx.recv().await
+    }
+}
+
+/// Cloneable stream/control handle of a [`MuxConnection`] (see
+/// [`MuxConnection::opener`]). Holds only the connection-wide arcs, so it is
+/// cheap to clone into driver tasks and client handles while the connection
+/// itself stays owned by its driver.
+#[derive(Clone)]
+pub struct MuxOpener {
+    shared: Arc<ConnectionShared>,
+    // Inserted-stream table for `open_stream_to`; exercised end-to-end by
+    // the relay stream integration tests.
+    #[allow(dead_code)]
+    table: Arc<Mutex<StreamTable>>,
+}
+
+impl MuxOpener {
+    /// Opens a relay-routed stream toward `target_node_id` (relay-link mode
+    /// only). The relay answers with an `OpenStream` for the peer and routes
+    /// the stream's frames; an unknown target (or any other refusal) arrives
+    /// asynchronously as an `Error` frame for the returned stream and
+    /// surfaces as an error on stream use — the connection stays up.
+    pub async fn open_stream_to(&self, target_node_id: &str) -> Result<MuxStream, MuxError> {
+        if !self.shared.is_relay_link() {
+            return Err(MuxError::NotRelayLink);
+        }
+        if target_node_id.len() as u32 > MAX_NODE_ID_LEN {
+            return Err(MuxError::ProtocolViolation(format!(
+                "target node id of {} bytes exceeds the {MAX_NODE_ID_LEN}-byte limit",
+                target_node_id.len()
+            )));
+        }
+        if self.shared.dead.load(Ordering::Acquire) {
+            return Err(MuxError::ConnectionClosed(self.shared.dead_reason()));
+        }
+        // Relay-link streams are node-initiated: odd ids, stepping by 2
+        // (wraps after ~2^31 streams; the occupied check surfaces a bug).
+        let stream_id = self.shared.next_local_id.fetch_add(2, Ordering::SeqCst);
+        let (stream, entry) = MuxStream::new(stream_id, self.shared.clone());
+        let occupied = lock_table(&self.table)?.insert(stream_id, entry).is_some();
+        if occupied {
+            fail_connection(
+                &self.shared,
+                &self.table,
+                format!("stream id {stream_id} is still live"),
+            );
+            return Err(MuxError::ProtocolViolation(format!(
+                "stream id {stream_id} is still live"
+            )));
+        }
+        if self
+            .shared
+            .outbound
+            .send(Frame::OpenStream {
+                stream_id,
+                target_node_id: target_node_id.to_string(),
+            })
+            .await
+            .is_err()
+        {
+            let _ = lock_table(&self.table).map(|mut table| table.remove(&stream_id));
+            return Err(MuxError::ConnectionClosed(self.shared.dead_reason()));
+        }
+        Ok(stream)
+    }
+
+    /// Sends one relay control frame: only `Register` / `Unregister` /
+    /// `Heartbeat` are legal on a relay link, and only in relay-link mode.
+    /// Uses `try_send`; a full queue maps to an error (the caller decides
+    /// whether to retry — the heartbeat task skips a beat, the node client
+    /// reconnects).
+    pub fn send_control(&self, frame: Frame) -> Result<(), MuxError> {
+        if !self.shared.is_relay_link() {
+            return Err(MuxError::NotRelayLink);
+        }
+        match &frame {
+            Frame::Register { node_id } if node_id.len() as u32 > MAX_NODE_ID_LEN => {
+                return Err(MuxError::ProtocolViolation(format!(
+                    "Register node id of {} bytes exceeds the {MAX_NODE_ID_LEN}-byte limit",
+                    node_id.len()
+                )));
+            }
+            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat => {}
+            other => {
+                return Err(MuxError::ProtocolViolation(format!(
+                    "{other:?} is not a relay control frame"
+                )));
+            }
+        }
+        self.shared
+            .outbound
+            .try_send(frame)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    MuxError::ConnectionClosed("mux outbound queue is full".to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    MuxError::ConnectionClosed(self.shared.dead_reason())
+                }
+            })
     }
 }
 
@@ -238,6 +438,7 @@ async fn reader_loop(
     table: Arc<Mutex<StreamTable>>,
     accept_tx: mpsc::Sender<MuxStream>,
     mut shutdown: watch::Receiver<bool>,
+    control: Option<mpsc::Sender<Frame>>,
 ) {
     loop {
         let frame = tokio::select! {
@@ -252,6 +453,10 @@ async fn reader_loop(
         };
         match frame {
             Frame::Open { stream_id } => {
+                if shared.is_relay_link() {
+                    fail_connection(&shared, &table, "node-to-node Open frame on a relay link");
+                    return;
+                }
                 if owns_stream_id(shared.role(), stream_id) {
                     fail_connection(
                         &shared,
@@ -260,29 +465,82 @@ async fn reader_loop(
                     );
                     return;
                 }
-                let (stream, entry) = MuxStream::new(stream_id, shared.clone());
-                let occupied = match lock_table(&table) {
-                    Ok(mut table) => table.insert(stream_id, entry).is_some(),
-                    Err(error) => {
-                        fail_connection(&shared, &table, error.to_string());
-                        return;
-                    }
-                };
-                if occupied {
+                if push_inbound_stream(&shared, &table, &accept_tx, stream_id)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // Relay-routed inbound stream: the relay allocates even ids on
+            // relay links. An odd id is a misroute of a stream we initiated.
+            Frame::OpenStream { stream_id, .. } => {
+                if !relay_link_or_fail(&shared, &table) {
+                    return;
+                }
+                if stream_id % 2 != 0 {
                     fail_connection(
                         &shared,
                         &table,
-                        format!("peer reopened live stream {stream_id}"),
+                        format!("relay routed an odd (locally initiated) OpenStream {stream_id}"),
                     );
                     return;
                 }
-                if accept_tx.send(stream).await.is_err() {
-                    fail_connection(
-                        &shared,
-                        &table,
-                        "connection handle dropped while accepting a stream",
-                    );
+                if push_inbound_stream(&shared, &table, &accept_tx, stream_id)
+                    .await
+                    .is_err()
+                {
                     return;
+                }
+            }
+            // Full teardown of one routed stream (both legs), driven by the
+            // relay. Unknown ids are expected teardown races: log and ignore.
+            Frame::CloseStream { stream_id } => {
+                if !relay_link_or_fail(&shared, &table) {
+                    return;
+                }
+                teardown_stream(&table, stream_id);
+            }
+            Frame::Error {
+                stream_id,
+                code,
+                message,
+            } => {
+                if !relay_link_or_fail(&shared, &table) {
+                    return;
+                }
+                if stream_id == 0 {
+                    // Connection-level error: forward to the control channel
+                    // and stay alive — the client (not the mux) decides
+                    // whether the link survives.
+                    let Some(control) = &control else {
+                        fail_connection(
+                            &shared,
+                            &table,
+                            "connection-level relay error without a control channel",
+                        );
+                        return;
+                    };
+                    if control
+                        .send(Frame::Error {
+                            stream_id,
+                            code,
+                            message,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        fail_connection(
+                            &shared,
+                            &table,
+                            "relay control receiver dropped while forwarding a connection error",
+                        );
+                        return;
+                    }
+                } else {
+                    // Stream-scoped error (OpenStream refusal, leg-closed
+                    // race): reset exactly that stream; the link stays up.
+                    teardown_stream(&table, stream_id);
                 }
             }
             Frame::Data { stream_id, payload } => {
@@ -365,23 +623,22 @@ async fn reader_loop(
                     waker.wake();
                 }
             }
-            // Relay control frames (register / unregister / heartbeat /
-            // open_stream / error / close_stream) and the enrollment pair
-            // (enroll / enroll_response) belong on the node-to-relay link,
-            // which the daemon reads directly — never on a node-to-node
-            // mux connection.
+            // Node-to-relay control frames never travel node-to-relay in the
+            // relay→node direction: the relay never sends them. The
+            // enrollment pair belongs on the enrollment listener only.
             Frame::Register { .. }
             | Frame::Unregister
             | Frame::Heartbeat
-            | Frame::OpenStream { .. }
-            | Frame::Error { .. }
-            | Frame::CloseStream { .. }
             | Frame::Enroll { .. }
             | Frame::EnrollResponse { .. } => {
                 fail_connection(
                     &shared,
                     &table,
-                    "relay control frame on a node-to-node mux connection",
+                    if shared.is_relay_link() {
+                        "node-only control frame received from the relay"
+                    } else {
+                        "relay control frame on a node-to-node mux connection"
+                    },
                 );
                 return;
             }
@@ -435,304 +692,88 @@ fn lookup(
     entry
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::infra::relay_mux::frame::write_frame;
-    use crate::infra::relay_mux::DEFAULT_STREAM_WINDOW;
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::timeout;
-
-    const NO_DEADLOCK: Duration = Duration::from_secs(10);
-
-    fn pair(buffer: usize) -> (MuxConnection, MuxConnection) {
-        let (a, b) = tokio::io::duplex(buffer);
-        (
-            MuxConnection::spawn(a, MuxRole::Client),
-            MuxConnection::spawn(b, MuxRole::Server),
-        )
+/// Fails the connection unless it is a relay link; returns whether the loop
+/// arm may continue. Keeps the node-to-node dispatch byte-identical.
+fn relay_link_or_fail(shared: &ConnectionShared, table: &Mutex<StreamTable>) -> bool {
+    if shared.is_relay_link() {
+        return true;
     }
+    fail_connection(
+        shared,
+        table,
+        "relay control frame on a node-to-node mux connection",
+    );
+    false
+}
 
-    #[tokio::test]
-    async fn open_accept_and_echo_both_directions() {
-        let (client, mut server) = pair(4096);
-        let mut client_stream = client.open_stream().await.expect("open");
-        let mut server_stream = timeout(NO_DEADLOCK, server.accept())
-            .await
-            .expect("accept should not deadlock")
-            .expect("server should accept");
-        assert_eq!(server_stream.id(), client_stream.id());
-
-        client_stream
-            .write_all(b"ping")
-            .await
-            .expect("client write");
-        let mut buf = [0u8; 4];
-        timeout(NO_DEADLOCK, server_stream.read_exact(&mut buf))
-            .await
-            .expect("read should not deadlock")
-            .expect("server read");
-        assert_eq!(&buf, b"ping");
-
-        server_stream
-            .write_all(b"pong")
-            .await
-            .expect("server write");
-        timeout(NO_DEADLOCK, client_stream.read_exact(&mut buf))
-            .await
-            .expect("read should not deadlock")
-            .expect("client read");
-        assert_eq!(&buf, b"pong");
-    }
-
-    #[tokio::test]
-    async fn stream_ids_follow_role_parity() {
-        let (mut client, mut server) = pair(4096);
-        let first = client.open_stream().await.expect("open first");
-        let second = client.open_stream().await.expect("open second");
-        assert_eq!(first.id(), 1, "client allocates odd ids");
-        assert_eq!(second.id(), 3, "client ids step by 2");
-        let accepted_first = server.accept().await.expect("accept first");
-        let accepted_second = server.accept().await.expect("accept second");
-        assert_eq!(accepted_first.id(), 1);
-        assert_eq!(accepted_second.id(), 3);
-
-        let server_stream = server.open_stream().await.expect("server open");
-        assert_eq!(server_stream.id(), 2, "server allocates even ids");
-        let accepted = client.accept().await.expect("client accept");
-        assert_eq!(accepted.id(), 2);
-    }
-
-    #[tokio::test]
-    async fn half_close_drains_buffered_data_then_eof_and_reverse_leg_stays_open() {
-        let (client, mut server) = pair(4096);
-        let mut client_stream = client.open_stream().await.expect("open");
-        let mut server_stream = server.accept().await.expect("accept");
-
-        client_stream
-            .write_all(b"before-close")
-            .await
-            .expect("client write");
-        client_stream.shutdown().await.expect("client half-close");
-
-        let mut received = Vec::new();
-        timeout(NO_DEADLOCK, server_stream.read_to_end(&mut received))
-            .await
-            .expect("read should not deadlock")
-            .expect("server read to eof");
-        assert_eq!(received, b"before-close");
-
-        // The peer's write leg is still open after our half-close.
-        server_stream
-            .write_all(b"after-peer-close")
-            .await
-            .expect("server can still write");
-        let mut buf = [0u8; 16];
-        client_stream
-            .read_exact(&mut buf)
-            .await
-            .expect("client read on open leg");
-        assert_eq!(&buf, b"after-peer-close");
-    }
-
-    #[tokio::test]
-    async fn write_after_shutdown_fails() {
-        let (client, mut server) = pair(4096);
-        let mut client_stream = client.open_stream().await.expect("open");
-        let _server_stream = server.accept().await.expect("accept");
-        client_stream.shutdown().await.expect("half-close");
-        let error = client_stream
-            .write_all(b"nope")
-            .await
-            .expect_err("write after half-close must fail");
-        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-    }
-
-    #[tokio::test]
-    async fn window_backpressure_parks_sender_until_peer_reads() {
-        let (client, mut server) = pair(64 * 1024);
-        let client_stream = client.open_stream().await.expect("open");
-        let mut server_stream = server.accept().await.expect("accept");
-
-        let total = (DEFAULT_STREAM_WINDOW + 64 * 1024) as usize;
-        let payload = vec![0xabu8; total];
-        let mut writer = client_stream;
-        let writer = tokio::spawn(async move {
-            writer
-                .write_all(&payload)
-                .await
-                .expect("write_all should finish once credit flows");
-        });
-        let mut writer = writer;
-
-        // The sender exhausts the initial window and parks: without a reader
-        // it must not complete on its own.
-        let premature = timeout(Duration::from_millis(300), &mut writer).await;
-        assert!(
-            premature.is_err(),
-            "sender must park once the initial window is exhausted"
+/// Creates a stream for a peer-initiated id (inbound `Open` on node-to-node
+/// links, relay-routed `OpenStream` on relay links) and queues it for
+/// `accept`. Fails the connection on id collision or a dropped accept queue.
+async fn push_inbound_stream(
+    shared: &Arc<ConnectionShared>,
+    table: &Mutex<StreamTable>,
+    accept_tx: &mpsc::Sender<MuxStream>,
+    stream_id: u32,
+) -> Result<(), ()> {
+    let (stream, entry) = MuxStream::new(stream_id, shared.clone());
+    let occupied = match lock_table(table) {
+        Ok(mut table) => table.insert(stream_id, entry).is_some(),
+        Err(error) => {
+            fail_connection(shared, table, error.to_string());
+            return Err(());
+        }
+    };
+    if occupied {
+        fail_connection(
+            shared,
+            table,
+            format!("peer reopened live stream {stream_id}"),
         );
-
-        // Once the peer reads, grants flow and the parked writer completes
-        // with every byte delivered in order.
-        let mut received = vec![0u8; total];
-        timeout(NO_DEADLOCK, server_stream.read_exact(&mut received))
-            .await
-            .expect("read should not deadlock")
-            .expect("server read all");
-        assert!(received.iter().all(|byte| *byte == 0xab));
-
-        timeout(NO_DEADLOCK, writer)
-            .await
-            .expect("writer should complete after grants")
-            .expect("writer task");
+        return Err(());
     }
-
-    #[tokio::test]
-    async fn concurrent_streams_keep_per_stream_order() {
-        let (client, mut server) = pair(64 * 1024);
-        const STREAMS: usize = 8;
-        const CHUNKS: usize = 4;
-        const CHUNK: usize = 16 * 1024;
-
-        let mut client_streams = Vec::with_capacity(STREAMS);
-        for _ in 0..STREAMS {
-            client_streams.push(client.open_stream().await.expect("open"));
-        }
-
-        // Interleave writes across streams; each stream's payload is a
-        // single repeated tag byte so any cross-stream corruption shows up
-        // as a wrong tag.
-        let mut writers = Vec::with_capacity(STREAMS);
-        for (index, mut stream) in client_streams.into_iter().enumerate() {
-            writers.push(tokio::spawn(async move {
-                let tag = index as u8;
-                for _ in 0..CHUNKS {
-                    stream
-                        .write_all(&vec![tag; CHUNK])
-                        .await
-                        .expect("interleaved write");
-                }
-            }));
-        }
-
-        let mut accepted = Vec::with_capacity(STREAMS);
-        for expected_id in [1u32, 3, 5, 7, 9, 11, 13, 15] {
-            let stream = server.accept().await.expect("accept");
-            assert_eq!(stream.id(), expected_id);
-            accepted.push(stream);
-        }
-
-        let mut readers = Vec::with_capacity(STREAMS);
-        for (index, mut stream) in accepted.into_iter().enumerate() {
-            readers.push(tokio::spawn(async move {
-                let mut payload = vec![0u8; CHUNKS * CHUNK];
-                stream
-                    .read_exact(&mut payload)
-                    .await
-                    .expect("read full stream");
-                let tag = index as u8;
-                assert!(
-                    payload.iter().all(|byte| *byte == tag),
-                    "stream {index} must carry only its tag byte"
-                );
-            }));
-        }
-
-        for handle in writers {
-            timeout(NO_DEADLOCK, handle)
-                .await
-                .expect("writer should finish")
-                .expect("writer task");
-        }
-        for handle in readers {
-            timeout(NO_DEADLOCK, handle)
-                .await
-                .expect("reader should finish")
-                .expect("reader task");
-        }
-    }
-
-    #[tokio::test]
-    async fn data_for_unknown_stream_resets_connection() {
-        // The raw end acts as the server peer (even stream ids).
-        let (raw, mux_io) = tokio::io::duplex(4096);
-        let mut mux = MuxConnection::spawn(mux_io, MuxRole::Client);
-        let mut raw = raw;
-
-        write_frame(&mut raw, &Frame::Open { stream_id: 2 })
-            .await
-            .expect("raw open");
-        let mut accepted = mux.accept().await.expect("accept raw-opened stream");
-        write_frame(
-            &mut raw,
-            &Frame::Data {
-                stream_id: 3,
-                payload: b"stray".to_vec(),
-            },
-        )
-        .await
-        .expect("raw data for unknown stream");
-
-        let mut buf = [0u8; 1];
-        let error = timeout(NO_DEADLOCK, accepted.read(&mut buf))
-            .await
-            .expect("read should fail, not hang")
-            .expect_err("live stream must observe the reset");
-        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
-        assert!(mux.is_closed());
-        assert!(
-            mux.open_stream().await.is_err(),
-            "opens must fail after the reset"
+    if accept_tx.send(stream).await.is_err() {
+        fail_connection(
+            shared,
+            table,
+            "connection handle dropped while accepting a stream",
         );
+        return Err(());
     }
+    Ok(())
+}
 
-    #[tokio::test]
-    async fn open_with_local_parity_resets_connection() {
-        // The raw end sends an odd id (client parity) to a client-role
-        // connection: only the peer's parity is legal for peer opens.
-        let (raw, mux_io) = tokio::io::duplex(4096);
-        let mut mux = MuxConnection::spawn(mux_io, MuxRole::Client);
-        let mut raw = raw;
-
-        write_frame(&mut raw, &Frame::Open { stream_id: 3 })
-            .await
-            .expect("raw open with client parity");
-
-        let accepted = timeout(NO_DEADLOCK, mux.accept())
-            .await
-            .expect("accept should not hang");
-        assert!(
-            accepted.is_none(),
-            "a violating open must fail the connection"
-        );
-        assert!(mux.is_closed());
-    }
-
-    #[tokio::test]
-    async fn dropping_connection_unblocks_peer_streams() {
-        let (client, mut server) = pair(4096);
-        let mut client_stream = client.open_stream().await.expect("open");
-        client_stream
-            .write_all(b"payload")
-            .await
-            .expect("client write");
-        let mut server_stream = server.accept().await.expect("accept");
-
-        drop(client);
-        drop(client_stream);
-
-        // The peer must observe the connection end within the deadline —
-        // either a clean EOF after draining or a reset — and never hang.
-        let mut received = Vec::new();
-        let outcome = timeout(NO_DEADLOCK, server_stream.read_to_end(&mut received)).await;
-        let result = outcome.expect("peer read must not hang");
-        if result.is_err() {
-            assert_eq!(
-                result.expect_err("reset path").kind(),
-                std::io::ErrorKind::ConnectionReset
-            );
-        }
+/// Full teardown of one stream on a relay link (`CloseStream` or a
+/// stream-scoped `Error`): the reset flag is stored first so a reader woken
+/// by the inbound-sender drop never observes a clean EOF, the entry is
+/// removed (dropping the sender closes the reader's queue), and a parked
+/// writer's waker is taken and woken only after the state lock is released.
+fn teardown_stream(table: &Mutex<StreamTable>, stream_id: u32) {
+    let entry = match lock_table(table) {
+        Ok(mut table) => table.remove(&stream_id),
+        Err(_) => None,
+    };
+    let Some(entry) = entry else {
+        // Teardown races with in-flight frames are expected on routed
+        // streams; the relay also notifies both legs independently.
+        ERROR_LOG.log_debug(format!(
+            "[mux] relay teardown for unknown or closed stream {stream_id}; ignoring the race"
+        ));
+        return;
+    };
+    entry.reset.store(true, Ordering::SeqCst);
+    let waker = entry
+        .state
+        .lock()
+        .ok()
+        .and_then(|mut state| state.write_waker.take());
+    drop(entry);
+    if let Some(waker) = waker {
+        waker.wake();
     }
 }
+
+#[cfg(test)]
+mod node_tests;
+
+#[cfg(test)]
+mod relay_tests;

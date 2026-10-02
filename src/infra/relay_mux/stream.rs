@@ -53,6 +53,9 @@ pub struct MuxStream {
     state: Arc<Mutex<StreamState>>,
     inbound: mpsc::Receiver<Vec<u8>>,
     peer_fin: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when the relay tore the stream down (`CloseStream` / stream-scoped
+    /// `Error`): reads and writes fail instead of returning EOF / succeeding.
+    reset_by_peer: Arc<std::sync::atomic::AtomicBool>,
     /// Tail of the last popped chunk that did not fit the caller's buffer.
     read_leftover: Vec<u8>,
     read_offset: usize,
@@ -67,6 +70,15 @@ const _: () = {
     }
 };
 
+impl std::fmt::Debug for MuxStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MuxStream")
+            .field("id", &self.id)
+            .field("reset_by_peer", &self.reset_by_peer.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
 impl MuxStream {
     /// Builds the stream handle together with its table entry; the entry is
     /// what the reader task uses to reach this stream's queues.
@@ -79,12 +91,14 @@ impl MuxStream {
             write_waker: None,
         }));
         let peer_fin = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reset_by_peer = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stream = MuxStream {
             id,
             shared,
             state: state.clone(),
             inbound: inbound_rx,
             peer_fin: peer_fin.clone(),
+            reset_by_peer: reset_by_peer.clone(),
             read_leftover: Vec::new(),
             read_offset: 0,
         };
@@ -92,12 +106,16 @@ impl MuxStream {
             inbound: inbound_tx,
             state,
             peer_fin,
+            reset: reset_by_peer,
         };
         (stream, entry)
     }
 
     /// Returns the stream id (odd for client-initiated, even for
     /// server-initiated).
+    #[allow(dead_code)]
+    // Exercised by the unit and relay stream integration tests; the mux
+    // internals address streams through the table, not this accessor.
     pub fn id(&self) -> u32 {
         self.id
     }
@@ -118,7 +136,6 @@ impl MuxStream {
             .unwrap_or_else(|| "connection closed".to_string());
         MuxError::ConnectionClosed(reason).into()
     }
-
     /// Registers consumed bytes and, past the grant threshold, queues a
     /// `Window` frame granting the peer more credit.
     fn account_consumed(&self, consumed: u64) {
@@ -168,6 +185,24 @@ impl MuxStream {
     }
 }
 
+/// Error delivered to a stream the relay tore down (`CloseStream` or a
+/// stream-scoped `Error`): the full stream is gone, so reads and writes fail
+/// with `ConnectionReset` / `BrokenPipe` rather than EOF.
+fn reset_by_peer_error(stream_id: u32) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ConnectionReset,
+        format!("mux stream {stream_id} reset by the relay"),
+    )
+}
+
+/// The write-side counterpart of [`reset_by_peer_error`].
+fn reset_by_peer_write_error(stream_id: u32) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        format!("mux stream {stream_id} reset by the relay"),
+    )
+}
+
 impl AsyncRead for MuxStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -194,11 +229,14 @@ impl AsyncRead for MuxStream {
                 self.account_consumed(n as u64);
                 Poll::Ready(Ok(()))
             }
-            // The reader task dropped its sender half: the connection is
-            // gone. Deliver an error (reset) when a reason was recorded, and
-            // a clean EOF otherwise (peer shut the connection down).
+            // The reader task dropped its sender half: the stream is over.
+            // A relay teardown (CloseStream / stream-scoped Error) is a
+            // reset; a dead connection is an error; anything else is the
+            // peer's directional close (clean EOF).
             Poll::Ready(None) => {
-                if self.shared.dead.load(Ordering::Acquire) {
+                if self.reset_by_peer.load(Ordering::Acquire) {
+                    Poll::Ready(Err(reset_by_peer_error(self.id)))
+                } else if self.shared.dead.load(Ordering::Acquire) {
                     Poll::Ready(Err(self.connection_dead_error()))
                 } else {
                     Poll::Ready(Ok(()))
@@ -225,6 +263,9 @@ impl AsyncWrite for MuxStream {
     ) -> Poll<std::io::Result<usize>> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
+        }
+        if self.reset_by_peer.load(Ordering::Acquire) {
+            return Poll::Ready(Err(reset_by_peer_write_error(self.id)));
         }
         if self.shared.dead.load(Ordering::Acquire) {
             return Poll::Ready(Err(self.connection_dead_error()));

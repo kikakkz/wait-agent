@@ -11,14 +11,14 @@ use crate::infra::relay_client::{
 use crate::infra::relay_toml_store::RelayTomlConfig;
 use crate::platform::remote_ipc::RemoteControlAddr;
 
-fn fast_retry() -> RelayRetryPolicy {
+pub(super) fn fast_retry() -> RelayRetryPolicy {
     RelayRetryPolicy {
         initial_delay: Duration::from_millis(10),
         max_delay: Duration::from_millis(50),
     }
 }
 
-fn relay_client_config(
+pub(super) fn relay_client_config(
     addr: SocketAddr,
     relay_fingerprint: String,
     credentials: NodeCredentialPaths,
@@ -35,7 +35,7 @@ fn relay_client_config(
     }
 }
 
-fn node_credentials_in(dir: &std::path::Path, node: &TestNode) -> NodeCredentialPaths {
+pub(super) fn node_credentials_in(dir: &std::path::Path, node: &TestNode) -> NodeCredentialPaths {
     let credentials = NodeCredentialPaths {
         key_path: dir.join("node.key"),
         cert_path: dir.join("node.crt"),
@@ -44,12 +44,14 @@ fn node_credentials_in(dir: &std::path::Path, node: &TestNode) -> NodeCredential
     credentials
 }
 
-fn relay_fingerprint(server: &RunningServer) -> String {
+pub(super) fn relay_fingerprint(server: &RunningServer) -> String {
     let server_der = server_cert_der(&server.config);
     node_credentials::cert_fingerprint_from_der(&server_der).expect("relay fingerprint")
 }
 
-async fn next_client_event(rx: &mut mpsc::Receiver<RelayClientEvent>) -> RelayClientEvent {
+pub(super) async fn next_client_event(
+    rx: &mut mpsc::Receiver<RelayClientEvent>,
+) -> RelayClientEvent {
     timeout(NO_DEADLOCK, rx.recv())
         .await
         .expect("client event should arrive within the deadline")
@@ -58,7 +60,9 @@ async fn next_client_event(rx: &mut mpsc::Receiver<RelayClientEvent>) -> RelayCl
 
 /// Skips `Connecting`/`Disconnected` retry cycles until `Connected` arrives;
 /// a client that never connects fails the deadline in `next_client_event`.
-async fn expect_connected(rx: &mut mpsc::Receiver<RelayClientEvent>) -> RelayClientEvent {
+pub(super) async fn expect_connected(
+    rx: &mut mpsc::Receiver<RelayClientEvent>,
+) -> RelayClientEvent {
     loop {
         match next_client_event(rx).await {
             event @ RelayClientEvent::Connected { .. } => return event,
@@ -67,7 +71,7 @@ async fn expect_connected(rx: &mut mpsc::Receiver<RelayClientEvent>) -> RelayCli
     }
 }
 
-async fn expect_disconnected(rx: &mut mpsc::Receiver<RelayClientEvent>) -> String {
+pub(super) async fn expect_disconnected(rx: &mut mpsc::Receiver<RelayClientEvent>) -> String {
     loop {
         match next_client_event(rx).await {
             RelayClientEvent::Disconnected { reason, .. } => return reason,
@@ -79,7 +83,7 @@ async fn expect_disconnected(rx: &mut mpsc::Receiver<RelayClientEvent>) -> Strin
 
 /// After `cancel` the client thread has exited, so the event stream must
 /// close; a trailing `Disconnected` queued before the stop is also fine.
-async fn expect_clean_stop(mut rx: mpsc::Receiver<RelayClientEvent>) {
+pub(super) async fn expect_clean_stop(mut rx: mpsc::Receiver<RelayClientEvent>) {
     loop {
         match timeout(NO_DEADLOCK, rx.recv()).await {
             Ok(Some(RelayClientEvent::Disconnected { .. })) => continue,
@@ -103,7 +107,7 @@ async fn admin_lists_node(admin_addr: &RemoteControlAddr, fingerprint: &str) -> 
         .unwrap_or(false)
 }
 
-async fn wait_admin_lists_node(admin_addr: &RemoteControlAddr, fingerprint: &str) {
+pub(super) async fn wait_admin_lists_node(admin_addr: &RemoteControlAddr, fingerprint: &str) {
     let deadline = std::time::Instant::now() + NO_DEADLOCK;
     while !admin_lists_node(admin_addr, fingerprint).await {
         assert!(
@@ -138,7 +142,7 @@ async fn expect_evicted(events: &mut mpsc::Receiver<RelayLifecycleEvent>, finger
     }
 }
 
-fn long_lived_lifecycle() -> RelayLifecycleConfig {
+pub(super) fn long_lived_lifecycle() -> RelayLifecycleConfig {
     RelayLifecycleConfig {
         offline_after: Duration::from_secs(300),
         ..RelayLifecycleConfig::default()
