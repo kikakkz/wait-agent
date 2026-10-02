@@ -301,3 +301,49 @@ async fn dropping_connection_unblocks_peer_streams() {
         );
     }
 }
+
+#[tokio::test]
+async fn relay_presence_and_watch_frames_fail_node_to_node_connection() {
+    // Presence and Watch are relay-link control frames; on a
+    // node-to-node connection they are protocol violations.
+    let (raw, mux_io) = tokio::io::duplex(4096);
+    let mut mux = MuxConnection::spawn(mux_io, MuxRole::Client);
+    let mut raw = raw;
+    write_frame(
+        &mut raw,
+        &Frame::Presence {
+            node_id: "node-a".to_string(),
+            online: true,
+        },
+    )
+    .await
+    .expect("raw presence");
+    let accepted = timeout(NO_DEADLOCK, mux.accept())
+        .await
+        .expect("accept should not hang");
+    assert!(
+        accepted.is_none(),
+        "Presence on a node-to-node link must fail the connection"
+    );
+    assert!(mux.is_closed());
+
+    let (raw, mux_io) = tokio::io::duplex(4096);
+    let mut mux = MuxConnection::spawn(mux_io, MuxRole::Client);
+    let mut raw = raw;
+    write_frame(
+        &mut raw,
+        &Frame::Watch {
+            node_id: "node-b".to_string(),
+        },
+    )
+    .await
+    .expect("raw watch");
+    let accepted = timeout(NO_DEADLOCK, mux.accept())
+        .await
+        .expect("accept should not hang");
+    assert!(
+        accepted.is_none(),
+        "Watch on a node-to-node link must fail the connection"
+    );
+    assert!(mux.is_closed());
+}

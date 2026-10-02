@@ -180,9 +180,10 @@ impl MuxConnection {
     /// Spawns the loops over a node-to-relay link: `Client` parity (node
     /// streams are odd, relay-routed inbound streams even) and the relay
     /// control-frame dispatch. Connection-level `Error` frames (stream id 0)
-    /// are forwarded to `control_tx`; the stream-scoped relay frames
-    /// (`OpenStream` even / `CloseStream` / `Error`) are dispatched onto
-    /// streams without involving the control channel.
+    /// and `Presence` transitions are forwarded to `control_tx`; the
+    /// stream-scoped relay frames (`OpenStream` even / `CloseStream` /
+    /// `Error`) are dispatched onto streams without involving the control
+    /// channel.
     pub fn spawn_relay_link(
         io: impl AsyncRead + AsyncWrite + Send + Unpin + 'static,
         control_tx: mpsc::Sender<Frame>,
@@ -306,7 +307,8 @@ impl MuxConnection {
     }
 
     /// Sends a relay control frame on a relay-link connection (relay-link
-    /// mode only). Only `Register` / `Unregister` / `Heartbeat` are accepted.
+    /// mode only). Only `Register` / `Unregister` / `Heartbeat` / `Watch`
+    /// are accepted.
     #[allow(dead_code)]
     // See `open_stream_to` above: connection-owning callers and tests use
     // this wrapper; the relay client drives its `MuxOpener`.
@@ -385,22 +387,25 @@ impl MuxOpener {
     }
 
     /// Sends one relay control frame: only `Register` / `Unregister` /
-    /// `Heartbeat` are legal on a relay link, and only in relay-link mode.
-    /// Uses `try_send`; a full queue maps to an error (the caller decides
-    /// whether to retry — the heartbeat task skips a beat, the node client
-    /// reconnects).
+    /// `Heartbeat` / `Watch` are legal on a relay link, and only in
+    /// relay-link mode. Uses `try_send`; a full queue maps to an error (the
+    /// caller decides whether to retry — the heartbeat task skips a beat, the
+    /// node client reconnects).
     pub fn send_control(&self, frame: Frame) -> Result<(), MuxError> {
         if !self.shared.is_relay_link() {
             return Err(MuxError::NotRelayLink);
         }
         match &frame {
-            Frame::Register { node_id } if node_id.len() as u32 > MAX_NODE_ID_LEN => {
+            Frame::Register { node_id } | Frame::Watch { node_id }
+                if node_id.len() as u32 > MAX_NODE_ID_LEN =>
+            {
                 return Err(MuxError::ProtocolViolation(format!(
-                    "Register node id of {} bytes exceeds the {MAX_NODE_ID_LEN}-byte limit",
+                    "control frame node id of {} bytes exceeds the {MAX_NODE_ID_LEN}-byte limit",
                     node_id.len()
                 )));
             }
-            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat => {}
+            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat | Frame::Watch { .. } => {
+            }
             other => {
                 return Err(MuxError::ProtocolViolation(format!(
                     "{other:?} is not a relay control frame"
@@ -543,6 +548,34 @@ async fn reader_loop(
                     teardown_stream(&table, stream_id);
                 }
             }
+            // Presence transition of a watched node: forward to the control
+            // channel and stay alive — the client (not the mux) decides what
+            // the transition means.
+            Frame::Presence { node_id, online } => {
+                if !relay_link_or_fail(&shared, &table) {
+                    return;
+                }
+                let Some(control) = &control else {
+                    fail_connection(
+                        &shared,
+                        &table,
+                        "presence transition without a control channel",
+                    );
+                    return;
+                };
+                if control
+                    .send(Frame::Presence { node_id, online })
+                    .await
+                    .is_err()
+                {
+                    fail_connection(
+                        &shared,
+                        &table,
+                        "relay control receiver dropped while forwarding a presence transition",
+                    );
+                    return;
+                }
+            }
             Frame::Data { stream_id, payload } => {
                 let Some(entry) = lookup(&shared, &table, stream_id) else {
                     return;
@@ -630,7 +663,8 @@ async fn reader_loop(
             | Frame::Unregister
             | Frame::Heartbeat
             | Frame::Enroll { .. }
-            | Frame::EnrollResponse { .. } => {
+            | Frame::EnrollResponse { .. }
+            | Frame::Watch { .. } => {
                 fail_connection(
                     &shared,
                     &table,

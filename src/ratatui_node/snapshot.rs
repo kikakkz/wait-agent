@@ -131,6 +131,11 @@ pub struct SessionView {
     pub availability: String,
     pub attached_clients: usize,
     pub current_path: Option<String>,
+    /// Relay presence of the session's authority node ("online"/"offline")
+    /// when the node is watched on the relay; `None` for local sessions and
+    /// unwatched/unknown peers. Filled by `build_snapshot`.
+    #[serde(default)]
+    pub relay_presence: Option<String>,
 }
 
 impl SessionView {
@@ -161,6 +166,7 @@ impl SessionView {
                 .current_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            relay_presence: None,
         }
     }
 
@@ -209,6 +215,12 @@ pub struct FooterState {
     pub public_endpoint: Option<String>,
     pub connect_endpoint: Option<String>,
     pub remote_count: usize,
+    /// Relay-watched peers currently online.
+    #[serde(default)]
+    pub relay_peers_online: usize,
+    /// Relay-watched peers in total (online + offline).
+    #[serde(default)]
+    pub relay_watch_count: usize,
 }
 
 /// A single entry in the footer session list.
@@ -278,6 +290,34 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
     let main_cursor = session_snap.cursor;
     let main_cursor_visible = session_snap.cursor_visible;
 
+    // Relay presence: correlate each remote session's authority node with
+    // the watched-node map (matched on the peer's TLS pin = certificate
+    // fingerprint). `relay_presence` is a leaf lock, taken after the session
+    // locks above have been released.
+    let presence_guard = shared
+        .relay_presence
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for session in sessions.iter_mut() {
+        if session.transport != "remote" {
+            continue;
+        }
+        let state = shared
+            .remote_node_connection(&session.authority_node_id)
+            .map(|info| info.tls_pin_sha256.to_lowercase())
+            .and_then(|fingerprint| presence_guard.get(&fingerprint).copied());
+        session.relay_presence = state.map(|online| {
+            if online {
+                "online".to_string()
+            } else {
+                "offline".to_string()
+            }
+        });
+    }
+    let relay_watch_count = presence_guard.len();
+    let relay_peers_online = presence_guard.values().filter(|online| **online).count();
+    drop(presence_guard);
+
     RatatuiSnapshot {
         session_name: active_session_id.clone(),
         client_count,
@@ -297,6 +337,8 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                 .iter()
                 .filter(|session| session.transport == "remote")
                 .count(),
+            relay_peers_online,
+            relay_watch_count,
         },
         sessions,
         active_target,
@@ -349,6 +391,8 @@ mod snapshot_tests {
                 public_endpoint: Some("0.0.0.0:17474".to_string()),
                 connect_endpoint: None,
                 remote_count: 0,
+                relay_peers_online: 0,
+                relay_watch_count: 0,
             },
             sessions: vec![sample_session_view()],
             active_target: Some("local#17474:1".to_string()),
@@ -361,6 +405,26 @@ mod snapshot_tests {
         let json = serde_json::to_string(&snap).expect("serialize snapshot");
         let decoded: RatatuiSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
         assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn snapshot_presence_fields_round_trip() {
+        let mut snap = sample_snapshot();
+        snap.footer.relay_peers_online = 1;
+        snap.footer.relay_watch_count = 2;
+        let mut remote_view = sample_session_view();
+        remote_view.transport = "remote".to_string();
+        remote_view.relay_presence = Some("online".to_string());
+        snap.sessions.push(remote_view);
+        let json = serde_json::to_string(&snap).expect("serialize snapshot");
+        let decoded: RatatuiSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
+        assert_eq!(snap, decoded);
+        assert_eq!(decoded.footer.relay_peers_online, 1);
+        assert_eq!(decoded.footer.relay_watch_count, 2);
+        assert_eq!(
+            decoded.sessions[1].relay_presence.as_deref(),
+            Some("online")
+        );
     }
 
     #[test]

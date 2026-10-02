@@ -27,6 +27,7 @@ use crate::infra::relay_connection_table::{
     RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
 };
 use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
+use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::{error_code, CloseOutcome, Lookup, RouteKey, RoutingTable};
 
 /// Bounded outbound queue per link: frames waiting for the writer task.
@@ -37,7 +38,9 @@ pub(crate) type ServerTls = tokio_rustls::server::TlsStream<tokio::net::TcpStrea
 /// Runs one authenticated link to completion: registration deadline,
 /// fingerprint-checked register, then heartbeat/unregister/routing dispatch
 /// until either side ends it. All routing state touching this connection is
-/// torn down on exit and surviving peers receive `CloseStream`.
+/// torn down on exit and surviving peers receive `CloseStream`; the link's
+/// presence watch interests are purged and, when the link owned the table
+/// entry (loss, unregister), watchers are told it went offline.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_link(
     tls: ServerTls,
@@ -48,6 +51,7 @@ pub(crate) async fn run_link(
     lifecycle: RelayLifecycleConfig,
     capacity: RelayCapacityConfig,
     meter: SharedUsageMeter,
+    presence: Arc<PresenceHub>,
 ) {
     let peer_fingerprint = match peer_fingerprint(&tls, peer_addr) {
         Some(fingerprint) => fingerprint,
@@ -67,6 +71,7 @@ pub(crate) async fn run_link(
         &outbound_tx,
         &lifecycle,
         &capacity,
+        &presence,
     )
     .await
     {
@@ -89,12 +94,20 @@ pub(crate) async fn run_link(
         &outbound_tx,
         &capacity,
         &meter,
+        &presence,
     )
     .await;
 
     // Epilogue: drop this link's table entry and every route touching it;
-    // surviving peers get CloseStream for their side.
-    table.remove_if_current(&registered.node_id, registered.connection_id);
+    // surviving peers get CloseStream for their side. When this link still
+    // owned the table entry (link loss; unregister removes it in the dispatch
+    // arm) watchers learn the node went offline. Eviction and admin remove
+    // publish at their own sites; replacement publishes nothing (no churn).
+    // The watch purge is unconditional: every exit cause ends the interests.
+    if table.remove_if_current(&registered.node_id, registered.connection_id) {
+        presence.publish(&registered.node_id, false);
+    }
+    presence.unwatch_connection(registered.connection_id);
     for (peer_outbound, peer_stream_id) in routing.teardown_connection(registered.connection_id) {
         let _ = peer_outbound.try_send(Frame::CloseStream {
             stream_id: peer_stream_id,
@@ -151,6 +164,7 @@ async fn register_link(
     outbound_tx: &mpsc::Sender<Frame>,
     lifecycle: &RelayLifecycleConfig,
     capacity: &RelayCapacityConfig,
+    presence: &Arc<PresenceHub>,
 ) -> Option<RegisteredLink> {
     let first = tokio::time::timeout(lifecycle.register_timeout, read_frame(reader)).await;
     let node_id = match first {
@@ -199,6 +213,8 @@ async fn register_link(
     let registered = table.register(&node_id, outbound_tx.clone());
     match &registered.previous {
         Some(previous) => {
+            // Reconnect/re-register: the table entry moves to the new link
+            // without an offline/online churn — watchers keep their state.
             let _ = previous.retire_tx.send(true);
             let _ = events.try_send(RelayLifecycleEvent::Replaced {
                 node_id: node_id.clone(),
@@ -208,6 +224,7 @@ async fn register_link(
             let _ = events.try_send(RelayLifecycleEvent::Registered {
                 node_id: node_id.clone(),
             });
+            presence.publish(&node_id, true);
         }
     }
     Some(RegisteredLink {
@@ -228,6 +245,7 @@ async fn dispatch_loop(
     outbound_tx: &mpsc::Sender<Frame>,
     capacity: &RelayCapacityConfig,
     meter: &SharedUsageMeter,
+    presence: &Arc<PresenceHub>,
 ) {
     let node_id = &registered.node_id;
     let connection_id = registered.connection_id;
@@ -247,8 +265,24 @@ async fn dispatch_loop(
                             let _ = events.try_send(RelayLifecycleEvent::Unregistered {
                                 node_id: node_id.clone(),
                             });
+                            // Unregister removes the entry here, so the
+                            // epilogue's removal sees nothing; publish the
+                            // offline transition at the cause.
+                            presence.publish(node_id, false);
                         }
                         break;
+                    }
+                    Ok(Frame::Watch { node_id: target }) => {
+                        // Presence subscription: the hub answers with an
+                        // immediate replay on this link's queue. Watching an
+                        // unknown or offline target simply replays offline.
+                        let currently_online = table.lookup(&target).is_some();
+                        presence.watch(
+                            connection_id,
+                            &target,
+                            outbound_tx.clone(),
+                            currently_online,
+                        );
                     }
                     Ok(Frame::OpenStream { stream_id, target_node_id }) => {
                         if !handle_open_stream(

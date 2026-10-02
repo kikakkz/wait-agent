@@ -497,9 +497,8 @@ fn run_state_event_loop(
             }
 
             StateEvent::RelayLinkConnected { relay_address } => {
-                // Log-only: step 3 of issue #32 turns relay-link lifecycle
-                // into a real presence signal; until then there is no
-                // SharedState mutation to make.
+                // Log-only: peer presence arrives via RelayPeerOnline /
+                // RelayPeerOffline (relay Presence frames), not link state.
                 ERROR_LOG.log(format!(
                     "[ratatui-node] relay link connected: {relay_address}"
                 ));
@@ -513,6 +512,22 @@ fn run_state_event_loop(
                 ERROR_LOG.log(format!(
                     "[ratatui-node] relay link {relay_address} disconnected: {reason}"
                 ));
+            }
+
+            StateEvent::RelayPeerOnline { node_id } => {
+                if let Ok(mut presence) = shared.relay_presence.lock() {
+                    presence.insert(node_id, true);
+                }
+                // A redundant insert (replay duplicates) is fine: the map is
+                // idempotent and clients tolerate an extra snapshot.
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
+            StateEvent::RelayPeerOffline { node_id } => {
+                if let Ok(mut presence) = shared.relay_presence.lock() {
+                    presence.insert(node_id, false);
+                }
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::ReconnectSnapshotHosts => {
@@ -3156,6 +3171,62 @@ mod state_loop_tests {
         drop(tx);
         handle.join().expect("state loop should exit cleanly");
         crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn relay_peer_presence_updates_map_and_broadcasts() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (shared, tx, client_writer, handle) = start_test_loop();
+
+        // Attach a client so broadcast_snapshot actually broadcasts.
+        let (server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+        std::thread::sleep(Duration::from_millis(100));
+
+        TEST_BROADCAST_COUNT.store(0, Ordering::SeqCst);
+        let _ = tx.send(StateEvent::RelayPeerOnline {
+            node_id: "relay-peer-a".to_string(),
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            TEST_BROADCAST_COUNT.load(Ordering::SeqCst),
+            1,
+            "an online transition must broadcast exactly one snapshot"
+        );
+        let presence = shared
+            .relay_presence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            presence.get("relay-peer-a"),
+            Some(&true),
+            "the presence map must record the online transition"
+        );
+        drop(presence);
+
+        let _ = tx.send(StateEvent::RelayPeerOffline {
+            node_id: "relay-peer-a".to_string(),
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            TEST_BROADCAST_COUNT.load(Ordering::SeqCst),
+            2,
+            "an offline transition must broadcast exactly one snapshot"
+        );
+        let presence = shared
+            .relay_presence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(presence.get("relay-peer-a"), Some(&false));
+
+        drop(server);
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
     }
 
     #[test]

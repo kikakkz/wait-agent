@@ -25,6 +25,7 @@ mod capacity;
 mod client;
 mod enrollment;
 mod join;
+mod presence;
 mod routing;
 mod streams;
 

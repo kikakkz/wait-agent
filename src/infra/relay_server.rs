@@ -47,6 +47,7 @@ use crate::infra::relay_enrollment::{
     handle_enrollment_frame, pem_encode_cert, EnrollmentTokenStore,
 };
 use crate::infra::relay_mux::frame::{read_frame, write_frame};
+use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::RoutingTable;
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncListener};
 
@@ -425,6 +426,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
             EnrollmentTokenStore::new()
         }),
     );
+    let presence = Arc::new(PresenceHub::new());
 
     tokio::spawn(run_admin_listener(
         admin_listener,
@@ -438,6 +440,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
             tokens: tokens.clone(),
             tokens_path: tokens_path.clone(),
             whitelist_dir: config.authorized_nodes_dir.clone(),
+            presence: presence.clone(),
         },
         shutdown_tx.clone(),
     ));
@@ -446,6 +449,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let sweeper_lifecycle = lifecycle.clone();
     let mut sweeper_shutdown = shutdown_tx.subscribe();
     let sweeper_events = events_tx.clone();
+    let sweeper_presence = presence.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -453,7 +457,8 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                 _ = tokio::time::sleep(sweeper_lifecycle.sweep_interval) => {
                     for (node_id, entry) in sweeper_table.evict_idle(sweeper_lifecycle.offline_after) {
                         let _ = entry.retire_tx.send(true);
-                        let _ = sweeper_events.try_send(RelayLifecycleEvent::EvictedOffline { node_id });
+                        let _ = sweeper_events.try_send(RelayLifecycleEvent::EvictedOffline { node_id: node_id.clone() });
+                        sweeper_presence.publish(&node_id, false);
                     }
                 }
             }
@@ -466,6 +471,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let task_tokens = tokens.clone();
     let task_whitelist_dir = config.authorized_nodes_dir.clone();
     let task_relay_fingerprint = relay_fingerprint.clone();
+    let task_presence = presence.clone();
 
     let task = tokio::spawn(async move {
         loop {
@@ -483,6 +489,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                     let lifecycle = lifecycle.clone();
                     let capacity = capacity.clone();
                     let meter = meter.clone();
+                    let presence = task_presence.clone();
                     tokio::spawn(async move {
                         let handshake =
                             tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
@@ -503,6 +510,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                         };
                         crate::infra::relay_link::run_link(
                             tls, peer_addr, table, routing, events, lifecycle, capacity, meter,
+                            presence,
                         )
                         .await;
                     });

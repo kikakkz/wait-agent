@@ -268,6 +268,7 @@ mod tests {
                 availability: "available".to_string(),
                 attached_clients: 1,
                 current_path: None,
+                relay_presence: None,
             }],
             ..Default::default()
         }

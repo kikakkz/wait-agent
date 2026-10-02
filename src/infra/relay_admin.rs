@@ -25,6 +25,7 @@ use crate::infra::relay_connection_table::RelayConnectionTable;
 use crate::infra::relay_enrollment::{
     remove_authorized_node, EnrollmentTokenStore, DEFAULT_DEPLOY_TTL, DEFAULT_INVITE_TTL,
 };
+use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::RoutingTable;
 use crate::platform::remote_ipc::{
     cleanup_remote_listener, RemoteControlAddr, RemoteControlAsyncListener,
@@ -257,10 +258,14 @@ fn handle_remove(
     fingerprint: &str,
     whitelist_dir: &Path,
     table: &Arc<RelayConnectionTable>,
+    presence: &Arc<PresenceHub>,
 ) -> RelayAdminResponse {
     match remove_authorized_node(whitelist_dir, fingerprint) {
         Ok(removed_from_whitelist) => {
             let retired = table.retire(&fingerprint.to_lowercase());
+            if retired {
+                presence.publish(&fingerprint.to_lowercase(), false);
+            }
             let detail = match (removed_from_whitelist, retired) {
                 (true, true) => "whitelist entry removed; live link dropped",
                 (true, false) => "whitelist entry removed; no live link",
@@ -284,6 +289,7 @@ pub(crate) struct RelayAdminContext {
     pub(crate) tokens: Arc<EnrollmentTokenStore>,
     pub(crate) tokens_path: PathBuf,
     pub(crate) whitelist_dir: PathBuf,
+    pub(crate) presence: Arc<PresenceHub>,
 }
 
 /// Accept loop for the admin socket. `shutdown_tx` is the server-wide
@@ -317,6 +323,7 @@ pub(crate) async fn run_admin_listener(
                         tokens,
                         tokens_path,
                         whitelist_dir,
+                        presence,
                     } = context;
                     let mut bytes = Vec::new();
                     if let Err(error) = stream.read_to_end(&mut bytes).await {
@@ -369,7 +376,7 @@ pub(crate) async fn run_admin_listener(
                             handle_invite(ttl_secs, deploy, &tokens, &tokens_path)
                         }
                         Ok(RelayAdminCommand::Remove { fingerprint }) => {
-                            handle_remove(&fingerprint, &whitelist_dir, &table)
+                            handle_remove(&fingerprint, &whitelist_dir, &table, &presence)
                         }
                         Err(message) => RelayAdminResponse::error(message),
                     };
@@ -532,7 +539,7 @@ mod tests {
         std::fs::write(dir.join("deadbeef"), b"pem").expect("entry");
 
         let table = Arc::new(RelayConnectionTable::default());
-        let response = handle_remove("DeadBeef", &dir, &table);
+        let response = handle_remove("DeadBeef", &dir, &table, &Arc::new(PresenceHub::new()));
         assert!(response.ok);
         assert!(response
             .message
@@ -544,7 +551,7 @@ mod tests {
         );
 
         // Second remove: nothing left.
-        let response = handle_remove("deadbeef", &dir, &table);
+        let response = handle_remove("deadbeef", &dir, &table, &Arc::new(PresenceHub::new()));
         assert!(response.ok);
         assert!(response
             .message
