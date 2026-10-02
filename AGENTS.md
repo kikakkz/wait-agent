@@ -20,9 +20,11 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
 2. **CI-first.** Every code change lands in the same PR as the CI that
    checks it. Red CI never merges. Run `make ci-gate` locally before
    pushing.
-3. **Attribution.** Humans sign DCO (`git commit -s`); AI assistance is
-   disclosed with `Assisted-by:` / `Generated-by:` trailers.
-   `Co-Authored-By:` is banned for AI. AI never signs `Signed-off-by`.
+3. **Attribution.** Humans sign DCO (`git commit -s`) for everything they
+   commit, including AI-assisted code; AI assistance is disclosed with
+   `Assisted-by:` / `Generated-by:` trailers. `Co-Authored-By:` is banned
+   for AI. AI never signs `Signed-off-by` under its own name. CI enforces
+   `--dco` on every PR's commit range.
 4. **Never commit secrets.** Credentials, tokens, and private keys do not
    enter the repository, ever.
 5. **Generated artifacts are read-only.** Anything produced by codegen or
@@ -41,7 +43,8 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
   check prefix/title consistency.
 - `make test-tools` — unit tests for `.agents/tools/`.
 - `make check-trailers` — validate commit-message trailers on `HEAD`.
-  Humans add `--dco` to require `Signed-off-by` on their range.
+  Humans add `--dco` to require `Signed-off-by` on their range. CI runs
+  the check with `--dco` over every PR's commits (`base..head`).
 - One-time after clone: `git config core.hooksPath hooks` wires the
   committed `hooks/pre-commit` (governance checks + fmt/clippy/build) into
   every commit.
