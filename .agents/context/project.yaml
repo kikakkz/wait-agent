@@ -27,16 +27,17 @@ current_phase:
 current_focus:
   default_task_id: "#32"
   focus_statement: >
-    land the node relay client in small steps: (1) persistent outbound
-    TLS link to the configured relay (address + pinned fingerprint from
-    relay.toml) with reconnect/re-register on the existing reconnect
-    worker pattern; (2) open_stream(target_node_id) dialing remote
-    nodes through the relay as a PeerConnection so session protocols
-    run unmodified; (3) presence events (register/unregister/heartbeat
-    timeout) over a structured channel into the console — #36 extends
-    that channel for error semantics; SharedState single-writer and
-    broadcast_snapshot single-caller rules apply to presence handling
+    node relay client, step 2 of 3: open_stream(target_node_id) dialing
+    remote nodes through the persistent relay link as a PeerConnection
+    (MuxStream over the link's stream frames) so existing session
+    protocols run unmodified on the seam — this consumes the
+    relay_mux dead-code allow; step 1 (persistent link + reconnect +
+    re-register, pinned-fingerprint TLS, 10s heartbeat, runtime
+    wiring behind relay.toml with log-only RelayLink state events)
+    landed in PR #90; step 3 wires the presence channel into the
+    console, and #36 extends it for error semantics
 upcoming_focus:
+  - presence event channel into the console (#32 step 3; #36 extends)
   - config surface relay.toml loading and remote-hosts `via` selector
     (issue #35, unblocked once #32 lands)
   - per-stream window backpressure and fair scheduling (issue #33)

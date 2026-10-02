@@ -83,11 +83,21 @@ module_map:
         enrollment session to listen port + 1 accepting any server cert,
         pins the learned relay fingerprint; typed TokenInvalid/
         TokenExpired errors from the wire codes
+    - path: src/infra/relay_client.rs
+      responsibility: >
+        node relay client (issue #32 step 1, PR #90): persistent
+        outbound TLS link pinned by relay.toml fingerprint with
+        client-auth node cert; Register on connect (silent ack), writer
+        task over a bounded queue, 10s heartbeat, unbounded backoff
+        reconnect/re-register on its own tokio runtime in a std thread;
+        Connected/Disconnected events bridge into StateEventLoop as
+        log-only RelayLink state events; stream frames land in step 2
     - path: src/infra/relay_toml_store.rs
       responsibility: >
-        ~/.waitagent/relay.toml store (issue #31 write side; #35 owns
-        load+validate wiring): address + relay_fingerprint, hand-rolled
-        two-key parser per the settings_store idiom
+        ~/.waitagent/relay.toml store (issue #31 write side, #32 step 1
+        read side; #35 owns validation): address + relay_fingerprint,
+        hand-rolled two-key parser per the settings_store idiom; loaded
+        by the node runtime to decide whether to spawn the relay client
     - path: src/infra/relay_admin.rs
       responsibility: >
         relay local admin socket (issues #55, #31): owner-only channel
