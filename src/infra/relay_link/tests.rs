@@ -22,6 +22,8 @@ use crate::infra::relay_server::{start, RelayServeConfig, RelayServerHandle};
 
 mod admin;
 mod capacity;
+mod enrollment;
+mod join;
 mod routing;
 
 const NO_DEADLOCK: Duration = Duration::from_secs(10);
@@ -47,6 +49,8 @@ fn temp_dir(name: &str) -> PathBuf {
 pub(super) struct TestNode {
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
+    cert_pem: String,
+    key_pem: String,
 }
 
 impl TestNode {
@@ -57,12 +61,23 @@ impl TestNode {
         Self {
             cert_der: cert.serialize_der().expect("cert should serialize"),
             key_der: cert.serialize_private_key_der(),
+            cert_pem: cert.serialize_pem().expect("cert pem should serialize"),
+            key_pem: cert.serialize_private_key_pem(),
         }
     }
 
     fn fingerprint(&self) -> String {
         node_credentials::cert_fingerprint_from_der(&self.cert_der)
             .expect("fingerprint should compute")
+    }
+
+    /// Writes the node identity in the PEM layout `join_relay` reads back.
+    pub(super) fn write_pem_files(&self, paths: &NodeCredentialPaths) {
+        if let Some(parent) = paths.key_path.parent() {
+            fs::create_dir_all(parent).expect("parent dir should create");
+        }
+        fs::write(&paths.cert_path, &self.cert_pem).expect("cert pem should write");
+        fs::write(&paths.key_path, &self.key_pem).expect("key pem should write");
     }
 }
 
@@ -135,7 +150,7 @@ pub(super) fn server_cert_der(config: &RelayServeConfig) -> Vec<u8> {
     cert.as_ref().to_vec()
 }
 
-async fn connect_client(
+pub(super) async fn connect_client(
     addr: SocketAddr,
     client: Option<&TestNode>,
     server_der: &[u8],
@@ -214,6 +229,7 @@ pub(super) async fn start_test_server_with_capacity(
         },
         lifecycle,
         capacity,
+        tokens_path: dir.join("relay-enroll-tokens.json"),
     };
     let started = start(config.clone()).await.expect("server should start");
     RunningServer {
@@ -248,7 +264,7 @@ async fn next_event(rx: &mut mpsc::Receiver<RelayLifecycleEvent>) -> RelayLifecy
 
 pub(super) type ClientTls = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
 
-async fn open_node_link(
+pub(super) async fn open_node_link(
     addr: SocketAddr,
     client: &TestNode,
     server_der: &[u8],

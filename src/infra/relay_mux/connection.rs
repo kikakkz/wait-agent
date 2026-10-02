@@ -366,15 +366,18 @@ async fn reader_loop(
                 }
             }
             // Relay control frames (register / unregister / heartbeat /
-            // open_stream / error / close_stream) belong on the node-to-relay
-            // link, which the daemon reads directly — never on a node-to-node
+            // open_stream / error / close_stream) and the enrollment pair
+            // (enroll / enroll_response) belong on the node-to-relay link,
+            // which the daemon reads directly — never on a node-to-node
             // mux connection.
             Frame::Register { .. }
             | Frame::Unregister
             | Frame::Heartbeat
             | Frame::OpenStream { .. }
             | Frame::Error { .. }
-            | Frame::CloseStream { .. } => {
+            | Frame::CloseStream { .. }
+            | Frame::Enroll { .. }
+            | Frame::EnrollResponse { .. } => {
                 fail_connection(
                     &shared,
                     &table,

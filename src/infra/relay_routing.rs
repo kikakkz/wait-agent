@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::infra::relay_mux::frame::Frame;
 
 /// Structured relay error codes carried by `Frame::Error` (docs: 错误语义
-/// work lands later; these three are what routing needs today).
+/// work lands later; these are what routing and enrollment need today).
 pub mod error_code {
     /// The target node id is not in the connection table (unknown or
     /// offline — the table evicts offline nodes).
@@ -44,6 +44,10 @@ pub mod error_code {
     pub const STREAM_CAPACITY: u16 = 0x0005;
     /// OpenStream refused: the forwarded-bytes/s threshold is exceeded.
     pub const THROUGHPUT_EXCEEDED: u16 = 0x0006;
+    /// Enrollment refused: the token is unknown or already consumed.
+    pub const TOKEN_INVALID: u16 = 0x0007;
+    /// Enrollment refused: the token is past its expiry.
+    pub const TOKEN_EXPIRED: u16 = 0x0008;
 }
 
 /// One endpoint of a routed stream: a link (by connection id) plus the

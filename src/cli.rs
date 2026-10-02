@@ -3,6 +3,13 @@ use std::ffi::OsString;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+pub mod relay;
+
+pub use relay::{
+    RelayInviteCommand, RelayJoinCommand, RelayRemoveCommand, RelayServeCommand,
+    RelayShutdownCommand, RelayStatusCommand,
+};
+
 #[allow(dead_code)]
 pub const DEFAULT_REMOTE_NODE_PORT: u16 = 7474;
 
@@ -176,6 +183,9 @@ pub enum Command {
     RelayServe(RelayServeCommand),
     RelayStatus(RelayStatusCommand),
     RelayShutdown(RelayShutdownCommand),
+    RelayInvite(RelayInviteCommand),
+    RelayJoin(RelayJoinCommand),
+    RelayRemove(RelayRemoveCommand),
     GenerateNodeCredentials,
     ProvisionMsys,
     Help(String),
@@ -206,26 +216,6 @@ pub struct RatatuiClientCommand;
 #[derive(Debug, Clone, Default)]
 pub struct RatatuiListSessionsCommand {
     pub target: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RelayServeCommand {
-    /// Listen address override, e.g. `0.0.0.0:7475`.
-    pub listen: Option<String>,
-    /// authorized_nodes whitelist directory override.
-    pub authorized_nodes_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RelayStatusCommand {
-    /// Listen address the relay was started with (derives the admin socket).
-    pub listen: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RelayShutdownCommand {
-    /// Listen address the relay was started with (derives the admin socket).
-    pub listen: Option<String>,
 }
 
 /// Used directly by ratatui runtime code; not parsed from the CLI.
@@ -326,7 +316,7 @@ impl Cli {
             }
             "relay" => {
                 args.remove(0);
-                parse_relay(args)?
+                relay::parse_relay(args)?
             }
             "__ratatui-node-server" => {
                 args.remove(0);
@@ -565,96 +555,6 @@ fn parse_no_args(args: Vec<String>) -> Result<(), CliError> {
     Ok(())
 }
 
-fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
-    let Some(subcommand) = args.first().cloned() else {
-        return Err(CliError::MissingValue(
-            "relay subcommand (serve | status | shutdown)".to_string(),
-        ));
-    };
-    match subcommand.as_str() {
-        "serve" => {
-            args.remove(0);
-            Ok(Command::RelayServe(parse_relay_serve(args)?))
-        }
-        "status" => {
-            args.remove(0);
-            Ok(Command::RelayStatus(parse_relay_listen_flag(args)?))
-        }
-        "shutdown" => {
-            args.remove(0);
-            Ok(Command::RelayShutdown(parse_relay_listen_flag(args)?))
-        }
-        other => Err(CliError::UnknownSubcommand(format!("relay {other}"))),
-    }
-}
-
-fn parse_relay_listen_flag<T: Default + HasListenFlag>(
-    mut args: Vec<String>,
-) -> Result<T, CliError> {
-    let mut command = T::default();
-    while let Some(flag) = args.first().cloned() {
-        match flag.as_str() {
-            "--listen" => {
-                args.remove(0);
-                let value = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| CliError::MissingValue("--listen".to_string()))?;
-                args.remove(0);
-                command.set_listen(value);
-            }
-            "--help" | "-h" => return Ok(command),
-            _ => return Err(CliError::UnexpectedArgument(flag)),
-        }
-    }
-    Ok(command)
-}
-
-pub trait HasListenFlag {
-    fn set_listen(&mut self, value: String);
-}
-
-impl HasListenFlag for RelayStatusCommand {
-    fn set_listen(&mut self, value: String) {
-        self.listen = Some(value);
-    }
-}
-
-impl HasListenFlag for RelayShutdownCommand {
-    fn set_listen(&mut self, value: String) {
-        self.listen = Some(value);
-    }
-}
-
-fn parse_relay_serve(mut args: Vec<String>) -> Result<RelayServeCommand, CliError> {
-    let mut command = RelayServeCommand::default();
-    while let Some(flag) = args.first().cloned() {
-        match flag.as_str() {
-            "--listen" => {
-                args.remove(0);
-                let value = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| CliError::MissingValue("--listen".to_string()))?;
-                args.remove(0);
-                command.listen = Some(value);
-            }
-            "--authorized-nodes" => {
-                args.remove(0);
-                let value = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| CliError::MissingValue("--authorized-nodes".to_string()))?;
-                args.remove(0);
-                command.authorized_nodes_dir = Some(value);
-            }
-            "--help" | "-h" => return Ok(command),
-            _ => return Err(CliError::UnexpectedArgument(flag)),
-        }
-    }
-    Ok(command)
-}
-
 fn help_text() -> String {
     [
         "WaitAgent",
@@ -668,6 +568,9 @@ fn help_text() -> String {
         "  waitagent detach [<index>]",
         "  waitagent stop [<index>]",
         "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>]",
+        "  waitagent relay invite [--ttl <secs>] [--deploy] [--listen <addr>]",
+        "  waitagent relay join <address> <token>",
+        "  waitagent relay remove <fingerprint> [--listen <addr>]",
         "  waitagent relay status [--listen <addr>]",
         "  waitagent relay shutdown [--listen <addr>]",
         "  waitagent version",
@@ -927,67 +830,6 @@ mod tests {
         match parse(&["waitagent", "detach", "waitagent-1"]).command {
             Command::Detach(command) => {
                 assert_eq!(command.target.as_deref(), Some("waitagent-1"));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_relay_serve_command_with_defaults() {
-        match parse(&["waitagent", "relay", "serve"]).command {
-            Command::RelayServe(command) => {
-                assert_eq!(command.listen, None);
-                assert_eq!(command.authorized_nodes_dir, None);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_relay_serve_command_flags() {
-        match parse(&[
-            "waitagent",
-            "relay",
-            "serve",
-            "--listen",
-            "0.0.0.0:7475",
-            "--authorized-nodes",
-            "/tmp/authorized_nodes",
-        ])
-        .command
-        {
-            Command::RelayServe(command) => {
-                assert_eq!(command.listen.as_deref(), Some("0.0.0.0:7475"));
-                assert_eq!(
-                    command.authorized_nodes_dir.as_deref(),
-                    Some("/tmp/authorized_nodes")
-                );
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_unknown_relay_subcommand() {
-        let argv = ["waitagent", "relay", "invite"]
-            .iter()
-            .map(|arg| (*arg).into())
-            .collect::<Vec<_>>();
-        let error = Cli::parse(argv).expect_err("relay invite is not implemented yet");
-        assert_eq!(error.to_string(), "unknown subcommand: relay invite");
-    }
-
-    #[test]
-    fn parses_relay_status_and_shutdown_with_listen_flag() {
-        match parse(&["waitagent", "relay", "status"]).command {
-            Command::RelayStatus(command) => {
-                assert_eq!(command.listen, None);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-        match parse(&["waitagent", "relay", "shutdown", "--listen", "0.0.0.0:9999"]).command {
-            Command::RelayShutdown(command) => {
-                assert_eq!(command.listen.as_deref(), Some("0.0.0.0:9999"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

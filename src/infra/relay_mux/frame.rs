@@ -9,6 +9,7 @@
 //! +0  type       u8    0x01 Open | 0x02 Close | 0x03 Data | 0x04 Window
 //!                    | 0x05 Register | 0x06 Unregister | 0x07 Heartbeat
 //!                    | 0x08 OpenStream | 0x09 Error | 0x0A CloseStream
+//!                    | 0x0B Enroll | 0x0C EnrollResponse
 //! +1  flags      u8    reserved, must be zero
 //! +2  stream_id  u32   stream frames: odd = client-initiated, even =
 //!                    server-initiated; control frames on relay links:
@@ -38,6 +39,11 @@
 //!                            (structured reason, see relay_routing)
 //!                CloseStream: empty — full teardown of the routed stream
 //!                            `stream_id`, both directions
+//!                Enroll:       UTF-8 enrollment token (issued by
+//!                            `relay invite`); first frame on the
+//!                            enrollment listener connection only
+//!                EnrollResponse: UTF-8 relay certificate fingerprint the
+//!                            joining node pins into relay.toml
 //! ```
 //!
 //! `Close` is the half-close: the sender will send no more `Data` on this
@@ -64,6 +70,8 @@ const TYPE_HEARTBEAT: u8 = 0x07;
 const TYPE_OPEN_STREAM: u8 = 0x08;
 const TYPE_ERROR: u8 = 0x09;
 const TYPE_CLOSE_STREAM: u8 = 0x0A;
+const TYPE_ENROLL: u8 = 0x0B;
+const TYPE_ENROLL_RESPONSE: u8 = 0x0C;
 
 /// Frame type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +86,8 @@ pub enum FrameType {
     OpenStream,
     Error,
     CloseStream,
+    Enroll,
+    EnrollResponse,
 }
 
 impl FrameType {
@@ -93,6 +103,8 @@ impl FrameType {
             FrameType::OpenStream => TYPE_OPEN_STREAM,
             FrameType::Error => TYPE_ERROR,
             FrameType::CloseStream => TYPE_CLOSE_STREAM,
+            FrameType::Enroll => TYPE_ENROLL,
+            FrameType::EnrollResponse => TYPE_ENROLL_RESPONSE,
         }
     }
 
@@ -108,6 +120,8 @@ impl FrameType {
             TYPE_OPEN_STREAM => Ok(FrameType::OpenStream),
             TYPE_ERROR => Ok(FrameType::Error),
             TYPE_CLOSE_STREAM => Ok(FrameType::CloseStream),
+            TYPE_ENROLL => Ok(FrameType::Enroll),
+            TYPE_ENROLL_RESPONSE => Ok(FrameType::EnrollResponse),
             other => Err(MuxError::InvalidFrameType(other)),
         }
     }
@@ -147,6 +161,12 @@ pub enum Frame {
     },
     /// Relay control: full teardown of the routed stream `stream_id`.
     CloseStream { stream_id: u32 },
+    /// Enrollment: first frame on an enrollment-listener connection; carries
+    /// the invite/deploy token issued by `relay invite`.
+    Enroll { token: String },
+    /// Enrollment: the relay's certificate fingerprint, delivered over the
+    /// token-authenticated enrollment session for the node to pin.
+    EnrollResponse { fingerprint: String },
 }
 
 impl Frame {
@@ -161,7 +181,11 @@ impl Frame {
             | Frame::OpenStream { stream_id, .. }
             | Frame::Error { stream_id, .. }
             | Frame::CloseStream { stream_id } => *stream_id,
-            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat => 0,
+            Frame::Register { .. }
+            | Frame::Unregister
+            | Frame::Heartbeat
+            | Frame::Enroll { .. }
+            | Frame::EnrollResponse { .. } => 0,
         }
     }
 
@@ -177,6 +201,8 @@ impl Frame {
             Frame::OpenStream { .. } => FrameType::OpenStream,
             Frame::Error { .. } => FrameType::Error,
             Frame::CloseStream { .. } => FrameType::CloseStream,
+            Frame::Enroll { .. } => FrameType::Enroll,
+            Frame::EnrollResponse { .. } => FrameType::EnrollResponse,
         }
     }
 
@@ -192,6 +218,8 @@ impl Frame {
             } => node_id.len(),
             Frame::Error { message, .. } => 2 + message.len(),
             Frame::Unregister | Frame::Heartbeat | Frame::CloseStream { .. } => 0,
+            Frame::Enroll { token } => token.len(),
+            Frame::EnrollResponse { fingerprint } => fingerprint.len(),
         }
     }
 
@@ -208,6 +236,8 @@ impl Frame {
                 out.extend_from_slice(&code.to_be_bytes());
                 out.extend_from_slice(message.as_bytes());
             }
+            Frame::Enroll { token } => out.extend_from_slice(token.as_bytes()),
+            Frame::EnrollResponse { fingerprint } => out.extend_from_slice(fingerprint.as_bytes()),
             Frame::Open { .. }
             | Frame::Close { .. }
             | Frame::Unregister
@@ -295,6 +325,25 @@ impl Frame {
                 })
             }
             FrameType::CloseStream if payload.is_empty() => Ok(Frame::CloseStream { stream_id }),
+            FrameType::Enroll => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(FrameType::Enroll, stream_id));
+                }
+                let token = String::from_utf8(payload.to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::Enroll, length))?;
+                Ok(Frame::Enroll { token })
+            }
+            FrameType::EnrollResponse => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(
+                        FrameType::EnrollResponse,
+                        stream_id,
+                    ));
+                }
+                let fingerprint = String::from_utf8(payload.to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::EnrollResponse, length))?;
+                Ok(Frame::EnrollResponse { fingerprint })
+            }
             other => Err(MuxError::InvalidPayload(other, length)),
         }
     }
@@ -429,10 +478,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_frame_type() {
-        // 0x0B is unallocated; 0x01..=0x0A are all assigned frame types.
-        let header = [0x0bu8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
-        let error = Frame::decode(&header, &[]).expect_err("type 0x0B should be rejected");
-        assert!(matches!(error, MuxError::InvalidFrameType(0x0b)));
+        // 0x0D is unallocated; 0x01..=0x0C are all assigned frame types.
+        let header = [0x0du8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("type 0x0D should be rejected");
+        assert!(matches!(error, MuxError::InvalidFrameType(0x0d)));
     }
 
     #[test]
@@ -645,6 +694,75 @@ mod tests {
         assert!(matches!(
             error,
             MuxError::InvalidPayload(FrameType::Error, 1)
+        ));
+    }
+
+    #[test]
+    fn enroll_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::Enroll {
+            token: "tok-1".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, b't', b'o', b'k', b'-',
+                b'1'
+            ]
+        );
+    }
+
+    #[test]
+    fn enroll_response_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::EnrollResponse {
+            fingerprint: "7c857a".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, b'7', b'c', b'8', b'5',
+                b'7', b'a'
+            ]
+        );
+    }
+
+    #[test]
+    fn enrollment_frames_round_trip() {
+        let frames = vec![
+            Frame::Enroll {
+                token: "inv-A9_b".to_string(),
+            },
+            Frame::EnrollResponse {
+                fingerprint: "7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4"
+                    .to_string(),
+            },
+        ];
+        for frame in frames {
+            let bytes = encoded(&frame);
+            let mut slice = bytes.as_slice();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let decoded = runtime
+                .block_on(read_frame(&mut slice))
+                .expect("frame should decode");
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_enrollment_frames_with_nonzero_stream_id() {
+        let header = [0x0bu8, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("stream id must be zero");
+        assert!(matches!(
+            error,
+            MuxError::InvalidStreamId(FrameType::Enroll, 7)
+        ));
+        let header = [0x0cu8, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("stream id must be zero");
+        assert!(matches!(
+            error,
+            MuxError::InvalidStreamId(FrameType::EnrollResponse, 7)
         ));
     }
 }

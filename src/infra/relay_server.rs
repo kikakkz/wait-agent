@@ -12,6 +12,12 @@
 //! layer — the same layer where revoked nodes fail on their next handshake
 //! after their whitelist entry is removed.
 //!
+//! A second listener on `port + 1` runs the enrollment session
+//! (docs/relay-design.md 身份认证与入网): any client certificate (no
+//! whitelist check) authenticates the transport, the first frame must be
+//! `Enroll` carrying an invite/deploy token, and a valid token gets the peer
+//! whitelisted and the relay fingerprint delivered over the same session.
+//!
 //! The connection table is memory-only (数据策略): the relay persists no
 //! session or traffic data. Stream routing between registered nodes lives
 //! in `relay_routing` (the leg table) and `relay_link` (the per-link
@@ -37,6 +43,10 @@ use crate::infra::relay_capacity::{RelayCapacityConfig, SharedUsageMeter, UsageM
 use crate::infra::relay_connection_table::{
     RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
 };
+use crate::infra::relay_enrollment::{
+    handle_enrollment_frame, pem_encode_cert, EnrollmentTokenStore,
+};
+use crate::infra::relay_mux::frame::{read_frame, write_frame};
 use crate::infra::relay_routing::RoutingTable;
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncListener};
 
@@ -47,6 +57,11 @@ use rustls::client::danger::HandshakeSignatureValid;
 /// Default relay listen port. Provisional until the relay.toml config slice;
 /// the node side uses 7474.
 pub const DEFAULT_RELAY_LISTEN_PORT: u16 = 7475;
+
+/// The enrollment listener binds at `listen port + 1` (docs/relay-design.md
+/// 身份认证与入网): the joining node derives the same address in
+/// `relay_join`.
+pub const RELAY_ENROLL_PORT_OFFSET: u16 = 1;
 
 /// Upper bound on a single mTLS handshake before the connection is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,6 +98,9 @@ pub struct RelayServeConfig {
     pub lifecycle: RelayLifecycleConfig,
     /// Capacity knobs for admission control (容量评估与准入控制).
     pub capacity: RelayCapacityConfig,
+    /// Enrollment token store persistence path (invite tokens survive
+    /// restarts). Defaults to `waitagent_home()/relay-enroll-tokens.json`.
+    pub tokens_path: PathBuf,
 }
 
 impl RelayServeConfig {
@@ -97,6 +115,7 @@ impl RelayServeConfig {
             credentials: NodeCredentialPaths::default_paths(),
             lifecycle: RelayLifecycleConfig::default(),
             capacity: RelayCapacityConfig::default(),
+            tokens_path: crate::infra::relay_enrollment::default_token_store_path(),
         }
     }
 }
@@ -222,9 +241,73 @@ impl rustls::server::danger::ClientCertVerifier for WhitelistedClientCertVerifie
     }
 }
 
+/// rustls client-certificate verifier for the enrollment listener: requires
+/// a client certificate and delegates the TLS 1.2/1.3 signature checks to
+/// ring so the client must prove possession of the private key, but performs
+/// NO whitelist check — the token inside the authenticated session is the
+/// authorization (docs/relay-design.md 身份认证与入网: 无 token 者无法建立
+/// 会话, and the whitelist write happens only after token redemption).
+#[derive(Debug)]
+struct AnyClientCertVerifier;
+
+impl rustls::server::danger::ClientCertVerifier for AnyClientCertVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        // Any parseable identity is accepted at the transport layer; only
+        // the fingerprint needs to be computable for the whitelist write.
+        node_credentials::cert_fingerprint_from_der(end_entity.as_ref()).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// Handle to a running relay transport gate.
 pub struct RelayServerHandle {
     local_addr: SocketAddr,
+    enroll_local_addr: SocketAddr,
     admin_addr: RemoteControlAddr,
     table: Arc<RelayConnectionTable>,
     shutdown_tx: watch::Sender<bool>,
@@ -235,6 +318,11 @@ impl RelayServerHandle {
     /// Returns the address the listener actually bound to (port 0 resolves).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Returns the enrollment listener address (`local_addr` port + 1).
+    pub fn enroll_local_addr(&self) -> SocketAddr {
+        self.enroll_local_addr
     }
 
     /// Returns the address of the local admin socket.
@@ -276,13 +364,14 @@ pub struct StartedRelay {
 
 const EVENT_QUEUE: usize = 128;
 
-/// Starts the relay transport gate: binds the TLS listener and the local
-/// admin socket, ensures the relay's own credentials, and spawns the accept
-/// loop, the eviction sweeper, and the admin listener. Every authenticated
-/// link runs the register/heartbeat lifecycle and owns its connection-table
-/// entry until unregister, loss, replacement, or eviction.
+/// Starts the relay transport gate: binds the TLS listener (plus the
+/// enrollment listener at `port + 1`) and the local admin socket, ensures
+/// the relay's own credentials, and spawns the accept loop, the eviction
+/// sweeper, and the admin listener. Every authenticated link runs the
+/// register/heartbeat lifecycle and owns its connection-table entry until
+/// unregister, loss, replacement, or eviction.
 pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServerError> {
-    node_credentials::ensure_credentials(&config.credentials)?;
+    let relay_fingerprint = node_credentials::ensure_credentials(&config.credentials)?;
     let cert_pem = fs::read_to_string(&config.credentials.cert_path)?;
     let key_pem = fs::read_to_string(&config.credentials.key_path)?;
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
@@ -299,9 +388,18 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
             config.authorized_nodes_dir.clone(),
         )))
         .with_single_cert(certs, key)?;
+    let enroll_server_config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(Arc::new(AnyClientCertVerifier))
+        .with_single_cert(
+            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?,
+            rustls_pemfile::private_key(&mut key_pem.as_bytes())?.ok_or_else(|| {
+                RelayServerError::MissingPrivateKey(config.credentials.key_path.clone())
+            })?,
+        )?;
 
-    let listener = TcpListener::bind(config.listen).await?;
+    let (listener, enroll_listener) = bind_gate_pair(config.listen).await?;
     let local_addr = listener.local_addr()?;
+    let enroll_local_addr = enroll_listener.local_addr()?;
     // The admin socket is the bootstrap/emergency channel: a relay that
     // cannot bind it must not start half-managed.
     let admin_addr = relay_admin_addr(local_addr);
@@ -309,6 +407,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
         .await
         .map_err(|error| RelayServerError::AdminIo(admin_addr.to_arg_string(), error))?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let enroll_acceptor = TlsAcceptor::from(Arc::new(enroll_server_config));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let table = Arc::new(RelayConnectionTable::default());
     let routing = Arc::new(RoutingTable::default());
@@ -316,6 +415,16 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let lifecycle = config.lifecycle.clone();
     let capacity = config.capacity.clone();
     let meter: SharedUsageMeter = std::sync::Arc::new(UsageMeter::new());
+    let tokens_path = config.tokens_path.clone();
+    let tokens = Arc::new(
+        EnrollmentTokenStore::load(&tokens_path).unwrap_or_else(|error| {
+            ERROR_LOG.log_error(format!(
+                "[relay] token store {} unreadable ({error}); starting empty",
+                tokens_path.display()
+            ));
+            EnrollmentTokenStore::new()
+        }),
+    );
 
     tokio::spawn(run_admin_listener(
         admin_listener,
@@ -326,6 +435,9 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
             listen: local_addr,
             capacity: capacity.clone(),
             meter: meter.clone(),
+            tokens: tokens.clone(),
+            tokens_path: tokens_path.clone(),
+            whitelist_dir: config.authorized_nodes_dir.clone(),
         },
         shutdown_tx.clone(),
     ));
@@ -351,6 +463,9 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let task_table = table.clone();
     let task_routing = routing.clone();
     let task_events = events_tx;
+    let task_tokens = tokens.clone();
+    let task_whitelist_dir = config.authorized_nodes_dir.clone();
+    let task_relay_fingerprint = relay_fingerprint.clone();
 
     let task = tokio::spawn(async move {
         loop {
@@ -392,6 +507,47 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                         .await;
                     });
                 }
+                accepted = enroll_listener.accept() => {
+                    let Ok((tcp, peer_addr)) = accepted else {
+                        ERROR_LOG.log_error(
+                            "[relay] enrollment listener accept failed; stopping".to_string(),
+                        );
+                        break;
+                    };
+                    let acceptor = enroll_acceptor.clone();
+                    let tokens = task_tokens.clone();
+                    let whitelist_dir = task_whitelist_dir.clone();
+                    let relay_fingerprint = task_relay_fingerprint.clone();
+                    let register_timeout = lifecycle.register_timeout;
+                    tokio::spawn(async move {
+                        let handshake =
+                            tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
+                        let tls = match handshake {
+                            Err(_) => {
+                                ERROR_LOG.log_error(format!(
+                                    "[relay-enroll] {peer_addr}: handshake timed out"
+                                ));
+                                return;
+                            }
+                            Ok(Err(error)) => {
+                                ERROR_LOG.log_error(format!(
+                                    "[relay-enroll] {peer_addr}: handshake rejected: {error}"
+                                ));
+                                return;
+                            }
+                            Ok(Ok(tls)) => tls,
+                        };
+                        run_enrollment_connection(
+                            tls,
+                            peer_addr,
+                            tokens,
+                            whitelist_dir,
+                            relay_fingerprint,
+                            register_timeout,
+                        )
+                        .await;
+                    });
+                }
             }
         }
     });
@@ -399,6 +555,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     Ok(StartedRelay {
         server: RelayServerHandle {
             local_addr,
+            enroll_local_addr,
             admin_addr,
             table,
             shutdown_tx,
@@ -406,6 +563,112 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
         },
         events: events_rx,
     })
+}
+
+/// Binds the main TLS listener and the enrollment listener (`port + 1`).
+///
+/// With an explicit `listen` port a failed enrollment bind aborts the start
+/// (the join side derives the address from the main port, so the pair must
+/// exist). With port 0 (tests) the main bind resolves to an ephemeral port
+/// whose `+1` may race a concurrent test, so the pair is re-rolled a few
+/// times before giving up.
+async fn bind_gate_pair(
+    listen: SocketAddr,
+) -> Result<(TcpListener, TcpListener), RelayServerError> {
+    const EPHEMERAL_BIND_ATTEMPTS: usize = 8;
+    let mut attempts = 0usize;
+    loop {
+        let listener = TcpListener::bind(listen).await?;
+        let local_addr = listener.local_addr()?;
+        let enroll_addr = SocketAddr::new(
+            local_addr.ip(),
+            local_addr.port() + RELAY_ENROLL_PORT_OFFSET,
+        );
+        match TcpListener::bind(enroll_addr).await {
+            Ok(enroll_listener) => return Ok((listener, enroll_listener)),
+            Err(error) => {
+                drop(listener);
+                attempts += 1;
+                if listen.port() != 0 || attempts == EPHEMERAL_BIND_ATTEMPTS {
+                    return Err(error.into());
+                }
+                ERROR_LOG.log_error(format!(
+                    "[relay] enrollment bind at {enroll_addr} raced ({error}); retrying"
+                ));
+            }
+        }
+    }
+}
+
+/// Runs one enrollment session to completion: the TLS handshake already
+/// happened (any client cert accepted — the whitelist is the token's job),
+/// so read the single first frame under the register deadline, let
+/// `handle_enrollment_frame` redeem the token / whitelist the peer / build
+/// the answer, write it, and close.
+async fn run_enrollment_connection(
+    tls: crate::infra::relay_link::ServerTls,
+    peer_addr: SocketAddr,
+    tokens: Arc<EnrollmentTokenStore>,
+    whitelist_dir: PathBuf,
+    relay_fingerprint: String,
+    register_timeout: Duration,
+) {
+    let Some(peer_fingerprint) = crate::infra::relay_link::peer_fingerprint(&tls, peer_addr) else {
+        return;
+    };
+    let Some(peer_cert_pem) = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|cert| pem_encode_cert(cert.as_ref()))
+    else {
+        // Mandatory client auth makes this an invariant; a missing peer
+        // certificate means the rustls contract broke.
+        ERROR_LOG.log_error(format!(
+            "[relay-enroll] {peer_addr}: no peer certificate after mandatory client auth"
+        ));
+        return;
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let (mut reader, mut writer) = tokio::io::split(tls);
+    let first = tokio::time::timeout(register_timeout, read_frame(&mut reader)).await;
+    let frame = match first {
+        Err(_) => {
+            ERROR_LOG.log_error(format!(
+                "[relay-enroll] {peer_addr}: enrollment deadline exceeded"
+            ));
+            return;
+        }
+        Ok(Err(error)) => {
+            ERROR_LOG.log_error(format!(
+                "[relay-enroll] {peer_addr}: link closed before Enroll: {error}"
+            ));
+            return;
+        }
+        Ok(Ok(frame)) => frame,
+    };
+    let Some(response) = handle_enrollment_frame(
+        frame,
+        &peer_fingerprint,
+        &peer_cert_pem,
+        &tokens,
+        &whitelist_dir,
+        &relay_fingerprint,
+        now_unix,
+    ) else {
+        return;
+    };
+    if let Err(error) = write_frame(&mut writer, &response).await {
+        ERROR_LOG.log_error(format!(
+            "[relay-enroll] {peer_addr}: enrollment response write failed: {error}"
+        ));
+    }
+    // Graceful close: flush happened inside `write_frame`; dropping the
+    // halves here sends close_notify and ends the session.
 }
 
 #[cfg(test)]
