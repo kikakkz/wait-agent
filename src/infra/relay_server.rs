@@ -32,7 +32,8 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
-use crate::infra::relay_admin::{relay_admin_addr, run_admin_listener};
+use crate::infra::relay_admin::{relay_admin_addr, run_admin_listener, RelayAdminContext};
+use crate::infra::relay_capacity::{RelayCapacityConfig, SharedUsageMeter, UsageMeter};
 use crate::infra::relay_connection_table::{
     RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
 };
@@ -80,6 +81,8 @@ pub struct RelayServeConfig {
     /// Connection-table lifecycle timing (heartbeat eviction and the
     /// register deadline).
     pub lifecycle: RelayLifecycleConfig,
+    /// Capacity knobs for admission control (容量评估与准入控制).
+    pub capacity: RelayCapacityConfig,
 }
 
 impl RelayServeConfig {
@@ -93,6 +96,7 @@ impl RelayServeConfig {
                 .join("authorized_nodes"),
             credentials: NodeCredentialPaths::default_paths(),
             lifecycle: RelayLifecycleConfig::default(),
+            capacity: RelayCapacityConfig::default(),
         }
     }
 }
@@ -310,12 +314,19 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let routing = Arc::new(RoutingTable::default());
     let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
     let lifecycle = config.lifecycle.clone();
+    let capacity = config.capacity.clone();
+    let meter: SharedUsageMeter = std::sync::Arc::new(UsageMeter::new());
 
     tokio::spawn(run_admin_listener(
         admin_listener,
         admin_addr.clone(),
-        table.clone(),
-        local_addr,
+        RelayAdminContext {
+            table: table.clone(),
+            routing: routing.clone(),
+            listen: local_addr,
+            capacity: capacity.clone(),
+            meter: meter.clone(),
+        },
         shutdown_tx.clone(),
     ));
 
@@ -355,6 +366,8 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                     let routing = task_routing.clone();
                     let events = task_events.clone();
                     let lifecycle = lifecycle.clone();
+                    let capacity = capacity.clone();
+                    let meter = meter.clone();
                     tokio::spawn(async move {
                         let handshake =
                             tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
@@ -374,7 +387,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                             Ok(Ok(tls)) => tls,
                         };
                         crate::infra::relay_link::run_link(
-                            tls, peer_addr, table, routing, events, lifecycle,
+                            tls, peer_addr, table, routing, events, lifecycle, capacity, meter,
                         )
                         .await;
                     });

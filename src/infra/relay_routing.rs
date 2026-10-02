@@ -38,6 +38,12 @@ pub mod error_code {
     pub const STREAM_UNKNOWN: u16 = 0x0002;
     /// The stream id is routed but this direction is already closed.
     pub const STREAM_CLOSED: u16 = 0x0003;
+    /// Register refused: the connection table is at max_nodes.
+    pub const NODE_CAPACITY: u16 = 0x0004;
+    /// OpenStream refused: the routing table is at max_streams.
+    pub const STREAM_CAPACITY: u16 = 0x0005;
+    /// OpenStream refused: the forwarded-bytes/s threshold is exceeded.
+    pub const THROUGHPUT_EXCEEDED: u16 = 0x0006;
 }
 
 /// One endpoint of a routed stream: a link (by connection id) plus the
@@ -157,6 +163,11 @@ impl RoutingTable {
         let leg = legs.remove(&key)?;
         legs.remove(&leg.peer);
         Some(leg)
+    }
+
+    /// Returns the number of routed streams (two legs per stream).
+    pub(crate) fn stream_count(&self) -> usize {
+        self.legs.lock().map(|legs| legs.len() / 2).unwrap_or(0)
     }
 
     /// Tears down every route touching `connection_id`. Returns one entry

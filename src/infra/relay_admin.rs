@@ -17,7 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::relay_capacity::{RelayCapacityConfig, RelayUsage, SharedUsageMeter};
 use crate::infra::relay_connection_table::RelayConnectionTable;
+use crate::infra::relay_routing::RoutingTable;
 use crate::platform::remote_ipc::{
     cleanup_remote_listener, RemoteControlAddr, RemoteControlAsyncListener,
 };
@@ -66,17 +68,19 @@ pub(crate) enum RelayAdminCommand {
 }
 
 /// One registered node as exposed over the admin socket.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AdminNodeEntry {
     pub(crate) node_id: String,
     pub(crate) idle_ms: u128,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct RelayAdminStatus {
     pub(crate) listen: SocketAddr,
     pub(crate) registered_nodes: usize,
     pub(crate) nodes: Vec<AdminNodeEntry>,
+    pub(crate) capacity: RelayCapacityConfig,
+    pub(crate) usage: RelayUsage,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -88,6 +92,10 @@ pub(crate) struct RelayAdminResponse {
     pub(crate) registered_nodes: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) nodes: Option<Vec<AdminNodeEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) capacity: Option<RelayCapacityConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) usage: Option<RelayUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +109,8 @@ impl RelayAdminResponse {
             listen: Some(snapshot.listen),
             registered_nodes: Some(snapshot.registered_nodes),
             nodes: Some(snapshot.nodes),
+            capacity: Some(snapshot.capacity),
+            usage: Some(snapshot.usage),
             message: None,
             error: None,
         }
@@ -112,6 +122,8 @@ impl RelayAdminResponse {
             listen: None,
             registered_nodes: None,
             nodes: None,
+            capacity: None,
+            usage: None,
             message: Some("shutting down".to_string()),
             error: None,
         }
@@ -123,6 +135,8 @@ impl RelayAdminResponse {
             listen: None,
             registered_nodes: None,
             nodes: None,
+            capacity: None,
+            usage: None,
             message: None,
             error: Some(message.into()),
         }
@@ -152,6 +166,16 @@ pub(crate) fn handle_relay_admin_command(
     }
 }
 
+/// Shared state the admin listener needs for one status answer.
+#[derive(Clone)]
+pub(crate) struct RelayAdminContext {
+    pub(crate) table: Arc<RelayConnectionTable>,
+    pub(crate) routing: Arc<RoutingTable>,
+    pub(crate) listen: SocketAddr,
+    pub(crate) capacity: RelayCapacityConfig,
+    pub(crate) meter: SharedUsageMeter,
+}
+
 /// Accept loop for the admin socket. `shutdown_tx` is the server-wide
 /// shutdown channel: the `shutdown` command fires it after answering, and
 /// the loop also exits when it observes the signal, cleaning up the socket
@@ -159,8 +183,7 @@ pub(crate) fn handle_relay_admin_command(
 pub(crate) async fn run_admin_listener(
     listener: RemoteControlAsyncListener,
     addr: RemoteControlAddr,
-    table: Arc<RelayConnectionTable>,
-    listen: SocketAddr,
+    context: RelayAdminContext,
     shutdown_tx: watch::Sender<bool>,
 ) {
     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -172,9 +195,16 @@ pub(crate) async fn run_admin_listener(
                     ERROR_LOG.log_error("[relay-admin] accept failed; stopping".to_string());
                     break;
                 };
-                let table = table.clone();
+                let context = context.clone();
                 let shutdown_tx = shutdown_tx.clone();
                 tokio::spawn(async move {
+                    let RelayAdminContext {
+                        table,
+                        routing,
+                        listen,
+                        capacity,
+                        meter,
+                    } = context;
                     let mut bytes = Vec::new();
                     if let Err(error) = stream.read_to_end(&mut bytes).await {
                         ERROR_LOG.log_error(format!("[relay-admin] read failed: {error}"));
@@ -194,6 +224,12 @@ pub(crate) async fn run_admin_listener(
                                         idle_ms,
                                     })
                                     .collect(),
+                                capacity: capacity.clone(),
+                                usage: RelayUsage {
+                                    registered_nodes: table.len(),
+                                    active_streams: routing.stream_count(),
+                                    forwarded_bytes_per_sec: meter.bytes_this_window(),
+                                },
                             };
                             handle_relay_admin_command(RelayAdminCommand::Status, snapshot)
                         }
@@ -204,6 +240,12 @@ pub(crate) async fn run_admin_listener(
                                     listen,
                                     registered_nodes: 0,
                                     nodes: Vec::new(),
+                                    capacity: capacity.clone(),
+                                    usage: RelayUsage {
+                                        registered_nodes: 0,
+                                        active_streams: 0,
+                                        forwarded_bytes_per_sec: 0,
+                                    },
                                 },
                             );
                             // Answer first, then stop the relay.
@@ -257,6 +299,16 @@ mod tests {
                 node_id: "node-a".to_string(),
                 idle_ms: 12,
             }],
+            capacity: RelayCapacityConfig {
+                max_nodes: 8,
+                max_streams: 16,
+                max_throughput_bytes_per_sec: 1024,
+            },
+            usage: RelayUsage {
+                registered_nodes: 1,
+                active_streams: 2,
+                forwarded_bytes_per_sec: 512,
+            },
         }
     }
 
@@ -296,6 +348,14 @@ mod tests {
                 idle_ms: 12,
             }])
         );
+    }
+
+    #[test]
+    fn status_response_carries_capacity_and_usage() {
+        let snapshot = snapshot();
+        let response = handle_relay_admin_command(RelayAdminCommand::Status, snapshot.clone());
+        assert_eq!(response.capacity, Some(snapshot.capacity));
+        assert_eq!(response.usage, Some(snapshot.usage));
     }
 
     #[test]
