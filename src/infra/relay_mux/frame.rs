@@ -242,7 +242,9 @@ impl Frame {
         }
     }
 
-    fn payload_len(&self) -> usize {
+    /// Byte length of the encoded payload (header excluded). Used by the
+    /// relay scheduler's per-stream accounting.
+    pub(crate) fn payload_len(&self) -> usize {
         match self {
             Frame::Open { .. } | Frame::Close { .. } => 0,
             Frame::Data { payload, .. } => payload.len(),

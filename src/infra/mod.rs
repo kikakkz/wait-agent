@@ -13,6 +13,7 @@ pub mod relay_link;
 pub mod relay_mux;
 pub mod relay_presence;
 pub mod relay_routing;
+pub mod relay_scheduler;
 pub mod relay_server;
 pub mod relay_toml_store;
 pub mod remote_grpc_proto;

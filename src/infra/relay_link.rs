@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::ReadHalf;
 use tokio::sync::mpsc;
 
 use crate::infra::error_log::ERROR_LOG;
@@ -26,9 +26,10 @@ use crate::infra::relay_capacity::{OpenAdmission, RelayCapacityConfig, SharedUsa
 use crate::infra::relay_connection_table::{
     RelayConnectionTable, RelayLifecycleConfig, RelayLifecycleEvent,
 };
-use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
+use crate::infra::relay_mux::frame::{read_frame, Frame};
 use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::{error_code, CloseOutcome, Lookup, RouteKey, RoutingTable};
+use crate::infra::relay_scheduler::{LinkScheduler, SchedulerConfig};
 
 /// Bounded outbound queue per link: frames waiting for the writer task.
 pub(crate) const LINK_OUTBOUND_QUEUE: usize = 256;
@@ -59,8 +60,16 @@ pub(crate) async fn run_link(
     };
 
     let (mut reader, writer) = tokio::io::split(tls);
-    let (outbound_tx, outbound_rx) = mpsc::channel(LINK_OUTBOUND_QUEUE);
-    let writer_task = tokio::spawn(link_writer_loop(writer, outbound_rx));
+    // Egress scheduling: the ingress sender keeps the mTLS-era type every
+    // producer (connection entry, routing legs, presence hub) clones today;
+    // the scheduler adds per-stream bounds and fairness between streams.
+    let (outbound_tx, scheduler) = LinkScheduler::spawn(
+        SchedulerConfig {
+            ingress_capacity: LINK_OUTBOUND_QUEUE,
+            ..SchedulerConfig::default()
+        },
+        writer,
+    );
 
     let registered = match register_link(
         &mut reader,
@@ -79,7 +88,7 @@ pub(crate) async fn run_link(
         None => {
             drop(outbound_tx);
             drop(reader);
-            let _ = writer_task.await;
+            scheduler.shutdown().await;
             return;
         }
     };
@@ -115,7 +124,7 @@ pub(crate) async fn run_link(
     }
     drop(outbound_tx);
     drop(reader);
-    let _ = writer_task.await;
+    scheduler.shutdown().await;
 }
 
 struct RegisteredLink {
@@ -439,8 +448,6 @@ async fn handle_open_stream(
 }
 
 /// Forwards a `Data`/`Window` frame along its route. Unknown or closed
-/// streams get a structured error and the link stays up.
-/// Forwards a `Data`/`Window` frame along its route. Unknown or closed
 /// streams get a structured error and the link stays up. `forwarded_bytes`
 /// feeds the throughput meter after a successful enqueue (zero for
 /// non-Data frames).
@@ -511,17 +518,6 @@ async fn send_stream_error(
             message: message.to_string(),
         })
         .await;
-}
-
-/// Drains the outbound queue into the link's write half. Exits when every
-/// sender dropped (link teardown) or the write fails (peer gone).
-async fn link_writer_loop(mut writer: WriteHalf<ServerTls>, mut outbound: mpsc::Receiver<Frame>) {
-    while let Some(frame) = outbound.recv().await {
-        if let Err(error) = write_frame(&mut writer, &frame).await {
-            ERROR_LOG.log_error(format!("[relay] link writer failed: {error}"));
-            return;
-        }
-    }
 }
 
 #[cfg(test)]
