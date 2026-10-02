@@ -45,14 +45,16 @@ module_map:
         relay mux frame layer (issue #51): deterministic frame codec plus
         per-connection stream state machine (open/close/data/window,
         per-stream credit); MuxStream is a PeerConnection via blanket impl;
+        enrollment control frames Enroll/EnrollResponse landed with #31;
         lands ahead of its first consumer (node relay client), so
         infra/mod.rs carries a transitional #[allow(dead_code)]
     - path: src/infra/relay_server.rs
       responsibility: >
         relay listener/handle/config (issue #52): mTLS whitelist gate,
-        accept loop, eviction sweeper, lifecycle events; per-link protocol
-        and routing live in relay_link/relay_routing (files split to stay
-        under the 1000-line cap)
+        accept loop, eviction sweeper, lifecycle events; enrollment
+        listener on listen port + 1 with any-client-cert verifier (#31);
+        per-link protocol and routing live in relay_link/relay_routing
+        (files split to stay under the 1000-line cap)
     - path: src/infra/relay_link.rs
       responsibility: >
         per-link relay protocol loop (issues #53-#54, capacity admission
@@ -64,16 +66,37 @@ module_map:
       responsibility: >
         stream routing table (issue #54): directional legs per routed
         stream with half-close bookkeeping, structured error codes
-        (TARGET_UNKNOWN/STREAM_UNKNOWN/STREAM_CLOSED), teardown that
-        notifies surviving peers with CloseStream
+        (TARGET_UNKNOWN/STREAM_UNKNOWN/STREAM_CLOSED, plus
+        TOKEN_INVALID/TOKEN_EXPIRED enrollment codes from #31), teardown
+        that notifies surviving peers with CloseStream
+    - path: src/infra/relay_enrollment.rs
+      responsibility: >
+        invite/join enrollment (issue #31): EnrollmentTokenStore
+        (SHA-256-keyed, one-time fail-closed redeem, deploy tokens
+        persisted to relay-enroll-tokens.json with expired sweep),
+        authorized_nodes add/remove, handle_enrollment_frame protocol
+        core; default TTLs are constants pending the #35 relay.toml
+        surface
+    - path: src/infra/relay_join.rs
+      responsibility: >
+        node-side join client (issue #31): token-authenticated
+        enrollment session to listen port + 1 accepting any server cert,
+        pins the learned relay fingerprint; typed TokenInvalid/
+        TokenExpired errors from the wire codes
+    - path: src/infra/relay_toml_store.rs
+      responsibility: >
+        ~/.waitagent/relay.toml store (issue #31 write side; #35 owns
+        load+validate wiring): address + relay_fingerprint, hand-rolled
+        two-key parser per the settings_store idiom
     - path: src/infra/relay_admin.rs
       responsibility: >
-        relay local admin socket (issue #55): owner-only channel per the
-        remote_ipc owner-control pattern; one-JSON-request protocol over
-        RelayAdminContext (table + routing + listener + capacity + meter)
-        with connection-table status, capacity/usage fields (#34), and
-        graceful shutdown today; invite/remove land with the enrollment
-        slice
+        relay local admin socket (issues #55, #31): owner-only channel
+        per the remote_ipc owner-control pattern; one-JSON-request
+        protocol over RelayAdminContext (table + routing + listener +
+        capacity + meter + token store + whitelist dir) with
+        connection-table status, capacity/usage fields (#34), invite
+        (token mint with ttl/deploy options) and remove (whitelist
+        delete + live-link retire), plus graceful shutdown
     - path: src/infra/relay_capacity.rs
       responsibility: >
         single-relay capacity model (issue #34): RelayCapacityConfig
@@ -87,13 +110,25 @@ module_map:
         memory-only node_id -> connection registry (issue #53):
         identity-guarded register/replace/touch/remove, heartbeat-timeout
         eviction (10s beats, 30s offline), lifecycle event channel
-        (Registered/Replaced/Unregistered/EvictedOffline) as the test hook
+        (Registered/Replaced/Unregistered/EvictedOffline) as the test
+        hook; retire() (#31) drops a live link for relay remove
   command_layer:
     - path: src/command/relay_serve.rs
       responsibility: >
         `waitagent relay serve` runtime: builds the gate config, runs it on
-        a multi-thread runtime until killed; graceful signal shutdown lands
-        with the admin socket slice (#55)
+        a multi-thread runtime until killed; prints listen, identity,
+        whitelist, admin, and enrollment addresses; pub(crate)
+        parse_listen/admin_request helpers shared with the enroll commands
+    - path: src/command/relay_enroll.rs
+      responsibility: >
+        `waitagent relay invite` (token mint via admin socket, clipboard
+        copy best-effort), `relay remove` (revoke + live-link drop), and
+        `relay join` (node-side enrollment, writes relay.toml) runtimes
+    - path: src/cli/relay.rs
+      responsibility: >
+        relay CLI parsing extracted from cli.rs (#31, cap split):
+        serve/status/shutdown/invite/join/remove structs, parsers, help,
+        and parse tests
     - path: src/infra/node_credentials.rs
       responsibility: node device identity — self-signed cert + SPKI fingerprint
     - path: src/infra/operator_auth.rs
