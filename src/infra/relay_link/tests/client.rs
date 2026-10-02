@@ -66,7 +66,9 @@ pub(super) async fn expect_connected(
     loop {
         match next_client_event(rx).await {
             event @ RelayClientEvent::Connected { .. } => return event,
-            RelayClientEvent::Connecting { .. } | RelayClientEvent::Disconnected { .. } => continue,
+            RelayClientEvent::Connecting { .. }
+            | RelayClientEvent::Disconnected { .. }
+            | RelayClientEvent::Presence { .. } => continue,
         }
     }
 }
@@ -75,7 +77,7 @@ pub(super) async fn expect_disconnected(rx: &mut mpsc::Receiver<RelayClientEvent
     loop {
         match next_client_event(rx).await {
             RelayClientEvent::Disconnected { reason, .. } => return reason,
-            RelayClientEvent::Connecting { .. } => continue,
+            RelayClientEvent::Connecting { .. } | RelayClientEvent::Presence { .. } => continue,
             other => panic!("expected Disconnected, got {other:?}"),
         }
     }

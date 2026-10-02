@@ -10,12 +10,14 @@
 //!                    | 0x05 Register | 0x06 Unregister | 0x07 Heartbeat
 //!                    | 0x08 OpenStream | 0x09 Error | 0x0A CloseStream
 //!                    | 0x0B Enroll | 0x0C EnrollResponse
+//!                    | 0x0D Presence | 0x0E Watch
 //! +1  flags      u8    reserved, must be zero
 //! +2  stream_id  u32   stream frames: odd = client-initiated, even =
 //!                    server-initiated; control frames on relay links:
 //!                    Register/Unregister/Heartbeat reserved 0; OpenStream:
 //!                    the routed stream id; Error/CloseStream: the stream
-//!                    the frame concerns (0 = none)
+//!                    the frame concerns (0 = none); Presence/Watch
+//!                    reserved 0
 //! +6  length     u32   payload length in bytes (<= MAX_FRAME_PAYLOAD)
 //! +10 payload    type-specific:
 //!                Open:       empty
@@ -44,6 +46,13 @@
 //!                            enrollment listener connection only
 //!                EnrollResponse: UTF-8 relay certificate fingerprint the
 //!                            joining node pins into relay.toml
+//!                Presence:   UTF-8 node id (<= MAX_NODE_ID_LEN) + 1 byte
+//!                            bool (0 = offline, nonzero = online);
+//!                            relay→node only: a watched node's presence
+//!                            transition
+//!                Watch:      UTF-8 node id (<= MAX_NODE_ID_LEN);
+//!                            node→relay only: subscribe to presence
+//!                            transitions of the node
 //! ```
 //!
 //! `Close` is the half-close: the sender will send no more `Data` on this
@@ -72,6 +81,8 @@ const TYPE_ERROR: u8 = 0x09;
 const TYPE_CLOSE_STREAM: u8 = 0x0A;
 const TYPE_ENROLL: u8 = 0x0B;
 const TYPE_ENROLL_RESPONSE: u8 = 0x0C;
+const TYPE_PRESENCE: u8 = 0x0D;
+const TYPE_WATCH: u8 = 0x0E;
 
 /// Frame type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +99,8 @@ pub enum FrameType {
     CloseStream,
     Enroll,
     EnrollResponse,
+    Presence,
+    Watch,
 }
 
 impl FrameType {
@@ -105,6 +118,8 @@ impl FrameType {
             FrameType::CloseStream => TYPE_CLOSE_STREAM,
             FrameType::Enroll => TYPE_ENROLL,
             FrameType::EnrollResponse => TYPE_ENROLL_RESPONSE,
+            FrameType::Presence => TYPE_PRESENCE,
+            FrameType::Watch => TYPE_WATCH,
         }
     }
 
@@ -122,6 +137,8 @@ impl FrameType {
             TYPE_CLOSE_STREAM => Ok(FrameType::CloseStream),
             TYPE_ENROLL => Ok(FrameType::Enroll),
             TYPE_ENROLL_RESPONSE => Ok(FrameType::EnrollResponse),
+            TYPE_PRESENCE => Ok(FrameType::Presence),
+            TYPE_WATCH => Ok(FrameType::Watch),
             other => Err(MuxError::InvalidFrameType(other)),
         }
     }
@@ -167,6 +184,21 @@ pub enum Frame {
     /// Enrollment: the relay's certificate fingerprint, delivered over the
     /// token-authenticated enrollment session for the node to pin.
     EnrollResponse { fingerprint: String },
+    /// Presence: relay→node only; a watched node's presence transitioned.
+    /// Payload: node id + 1 byte bool (see the module header table).
+    Presence {
+        /// The node whose presence changed (its certificate fingerprint).
+        node_id: String,
+        /// `true` when the node came online, `false` when it went offline.
+        online: bool,
+    },
+    /// Watch: node→relay only; subscribe to presence transitions of the
+    /// node. The relay answers immediately with a `Presence` replay frame
+    /// and then on every transition.
+    Watch {
+        /// The node to watch (its certificate fingerprint).
+        node_id: String,
+    },
 }
 
 impl Frame {
@@ -185,7 +217,9 @@ impl Frame {
             | Frame::Unregister
             | Frame::Heartbeat
             | Frame::Enroll { .. }
-            | Frame::EnrollResponse { .. } => 0,
+            | Frame::EnrollResponse { .. }
+            | Frame::Presence { .. }
+            | Frame::Watch { .. } => 0,
         }
     }
 
@@ -203,6 +237,8 @@ impl Frame {
             Frame::CloseStream { .. } => FrameType::CloseStream,
             Frame::Enroll { .. } => FrameType::Enroll,
             Frame::EnrollResponse { .. } => FrameType::EnrollResponse,
+            Frame::Presence { .. } => FrameType::Presence,
+            Frame::Watch { .. } => FrameType::Watch,
         }
     }
 
@@ -220,6 +256,8 @@ impl Frame {
             Frame::Unregister | Frame::Heartbeat | Frame::CloseStream { .. } => 0,
             Frame::Enroll { token } => token.len(),
             Frame::EnrollResponse { fingerprint } => fingerprint.len(),
+            Frame::Presence { node_id, .. } => node_id.len() + 1,
+            Frame::Watch { node_id } => node_id.len(),
         }
     }
 
@@ -238,6 +276,11 @@ impl Frame {
             }
             Frame::Enroll { token } => out.extend_from_slice(token.as_bytes()),
             Frame::EnrollResponse { fingerprint } => out.extend_from_slice(fingerprint.as_bytes()),
+            Frame::Presence { node_id, online } => {
+                out.extend_from_slice(node_id.as_bytes());
+                out.push(u8::from(*online));
+            }
+            Frame::Watch { node_id } => out.extend_from_slice(node_id.as_bytes()),
             Frame::Open { .. }
             | Frame::Close { .. }
             | Frame::Unregister
@@ -343,6 +386,34 @@ impl Frame {
                 let fingerprint = String::from_utf8(payload.to_vec())
                     .map_err(|_| MuxError::InvalidPayload(FrameType::EnrollResponse, length))?;
                 Ok(Frame::EnrollResponse { fingerprint })
+            }
+            FrameType::Presence => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(FrameType::Presence, stream_id));
+                }
+                let Some((&online_byte, id_bytes)) = payload.split_last() else {
+                    return Err(MuxError::InvalidPayload(FrameType::Presence, length));
+                };
+                if id_bytes.len() as u32 > MAX_NODE_ID_LEN {
+                    return Err(MuxError::InvalidPayload(FrameType::Presence, length));
+                }
+                let node_id = String::from_utf8(id_bytes.to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::Presence, length))?;
+                Ok(Frame::Presence {
+                    node_id,
+                    online: online_byte != 0,
+                })
+            }
+            FrameType::Watch => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(FrameType::Watch, stream_id));
+                }
+                if length > MAX_NODE_ID_LEN {
+                    return Err(MuxError::InvalidPayload(FrameType::Watch, length));
+                }
+                let node_id = String::from_utf8(payload.to_vec())
+                    .map_err(|_| MuxError::InvalidPayload(FrameType::Watch, length))?;
+                Ok(Frame::Watch { node_id })
             }
             other => Err(MuxError::InvalidPayload(other, length)),
         }
@@ -478,10 +549,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_frame_type() {
-        // 0x0D is unallocated; 0x01..=0x0C are all assigned frame types.
-        let header = [0x0du8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
-        let error = Frame::decode(&header, &[]).expect_err("type 0x0D should be rejected");
-        assert!(matches!(error, MuxError::InvalidFrameType(0x0d)));
+        // 0x0F is unallocated; 0x01..=0x0E are all assigned frame types.
+        let header = [0x0fu8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("type 0x0F should be rejected");
+        assert!(matches!(error, MuxError::InvalidFrameType(0x0f)));
     }
 
     #[test]
@@ -763,6 +834,104 @@ mod tests {
         assert!(matches!(
             error,
             MuxError::InvalidStreamId(FrameType::EnrollResponse, 7)
+        ));
+    }
+
+    #[test]
+    fn presence_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::Presence {
+            node_id: "node-a".to_string(),
+            online: true,
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'n', b'o', b'd', b'e',
+                b'-', b'a', 0x01
+            ]
+        );
+        let bytes = encoded(&Frame::Presence {
+            node_id: "node-a".to_string(),
+            online: false,
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'n', b'o', b'd', b'e',
+                b'-', b'a', 0x00
+            ]
+        );
+    }
+
+    #[test]
+    fn watch_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::Watch {
+            node_id: "node-b".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, b'n', b'o', b'd', b'e',
+                b'-', b'b'
+            ]
+        );
+    }
+
+    #[test]
+    fn presence_and_watch_round_trip() {
+        let frames = vec![
+            Frame::Presence {
+                node_id: "7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4"
+                    .to_string(),
+                online: true,
+            },
+            Frame::Presence {
+                node_id: "node-x".to_string(),
+                online: false,
+            },
+            Frame::Watch {
+                node_id: "node-y".to_string(),
+            },
+        ];
+        for frame in frames {
+            let bytes = encoded(&frame);
+            let mut slice = bytes.as_slice();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let decoded = runtime
+                .block_on(read_frame(&mut slice))
+                .expect("frame should decode");
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_presence_and_watch_with_nonzero_stream_id() {
+        let header = [0x0du8, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x02];
+        let error = Frame::decode(&header, &[b'a', 0x01]).expect_err("stream id must be zero");
+        assert!(matches!(
+            error,
+            MuxError::InvalidStreamId(FrameType::Presence, 7)
+        ));
+        let header = [0x0eu8, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x01];
+        let error = Frame::decode(&header, b"a").expect_err("stream id must be zero");
+        assert!(matches!(
+            error,
+            MuxError::InvalidStreamId(FrameType::Watch, 7)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_empty_presence_payload() {
+        // Presence needs at least the bool byte; an empty payload cannot
+        // carry it.
+        let header = [0x0du8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("empty presence payload must fail");
+        assert!(matches!(
+            error,
+            MuxError::InvalidPayload(FrameType::Presence, 0)
         ));
     }
 }

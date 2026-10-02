@@ -2289,8 +2289,13 @@ fn selected_detail_text(session: &SessionView, width: usize) -> String {
     } else {
         session.task_state.to_uppercase()
     };
+    let relay = session
+        .relay_presence
+        .as_ref()
+        .map(|state| format!(" relay:{state}"))
+        .unwrap_or_default();
     let full_label = session.display_label();
-    let full_detail = format!("{full_label} {suffix}");
+    let full_detail = format!("{full_label} {suffix}{relay}");
     if display_width(&full_detail) <= width {
         return full_detail;
     }
@@ -2298,12 +2303,12 @@ fn selected_detail_text(session: &SessionView, width: usize) -> String {
     if session.transport != "local" {
         let command_host_label =
             format!("{}@{}", session.command_name, session.display_authority_id);
-        let command_host_detail = format!("{command_host_label} {suffix}");
+        let command_host_detail = format!("{command_host_label} {suffix}{relay}");
         if display_width(&command_host_detail) <= width {
             return command_host_detail;
         }
 
-        let host_only_detail = format!("{} {suffix}", session.display_authority_id);
+        let host_only_detail = format!("{} {suffix}{relay}", session.display_authority_id);
         if display_width(&host_only_detail) <= width {
             return host_only_detail;
         }
@@ -2417,6 +2422,16 @@ fn render_footer_line(
         left_spans.push(Span::styled("· ", muted_style));
         left_spans.push(Span::styled(
             format!("{} remote ", snapshot.footer.remote_count),
+            muted_style,
+        ));
+    }
+    if snapshot.footer.relay_watch_count > 0 {
+        left_spans.push(Span::styled("· ", muted_style));
+        left_spans.push(Span::styled(
+            format!(
+                "relay peers {}/{} ",
+                snapshot.footer.relay_peers_online, snapshot.footer.relay_watch_count
+            ),
             muted_style,
         ));
     }

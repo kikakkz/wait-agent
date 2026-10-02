@@ -14,6 +14,7 @@
 //! the supervisor through the mux control channel and are fatal for the link
 //! (the retry loop re-registers), matching the server-side link loop.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -55,8 +56,9 @@ pub enum RelayClientError {
     /// No relay link is currently established (still connecting, between
     /// retries, or after a connection-level refusal).
     #[allow(dead_code)]
-    // Constructed by `open_stream`, consumed by the relay stream integration
-    // tests; the runtime caller lands with step 3 of issue #32.
+    // Constructed by `open_stream`/`watch`, consumed by the relay
+    // stream/presence integration tests; the runtime caller lands with the
+    // relay session-sync wiring.
     #[error("no relay link is currently established")]
     NotConnected,
     /// The underlying mux rejected the operation.
@@ -134,6 +136,15 @@ pub enum RelayClientEvent {
         /// violation, dial/handshake failure).
         reason: String,
     },
+    /// A watched node's presence transitioned on the relay. Emitted only for
+    /// nodes registered as watch interests via [`RelayClientHandle::watch`]
+    /// or an implicit `open_stream` watch.
+    Presence {
+        /// The watched node's certificate fingerprint (lowercase).
+        node_id: String,
+        /// `true` when the node came online, `false` when it went offline.
+        online: bool,
+    },
 }
 
 /// Spawned relay client (issue #32). All connection state lives on the client
@@ -155,6 +166,7 @@ impl RelayClient {
         let link_state = Arc::new(ClientLinkState {
             opener_slot: Mutex::new(None),
             inbound_tx,
+            watch_interests: Mutex::new(HashSet::new()),
         });
         let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
         let worker_state = link_state.clone();
@@ -201,6 +213,10 @@ struct ClientLinkState {
     /// Client-wide inbound stream queue; survives reconnects so a consumer
     /// never has to re-arm its accept loop.
     inbound_tx: mpsc::Sender<MuxStream>,
+    /// Watch interests (lowercase node fingerprints). The relay forgets
+    /// watches per connection, so `serve_registered` re-declares every
+    /// interest after each `Register`.
+    watch_interests: Mutex<HashSet<String>>,
 }
 
 /// Handle to a running [`RelayClient`] thread. Dropping it (or calling
@@ -210,9 +226,9 @@ struct ClientLinkState {
 pub struct RelayClientHandle {
     stop_tx: watch::Sender<bool>,
     worker: Option<JoinHandle<()>>,
-    // Consumed by `open_stream`/`accept_inbound`: the relay stream
-    // integration tests exercise them end-to-end; the runtime consumer
-    // lands with step 3 of issue #32.
+    // Consumed by `open_stream`/`accept_inbound`/`watch`: the relay
+    // stream/presence integration tests exercise them end-to-end; the
+    // runtime consumer lands with the relay session-sync wiring.
     #[allow(dead_code)]
     link_state: Arc<ClientLinkState>,
     #[allow(dead_code)]
@@ -229,16 +245,23 @@ impl RelayClientHandle {
     /// surfaces later as an error on stream use, while the link itself stays
     /// up.
     ///
+    /// Opening a stream also establishes a presence watch for the target, so
+    /// later presence transitions of the target are delivered as
+    /// [`RelayClientEvent::Presence`]; the watch persists across reconnects.
+    ///
     /// Returns [`RelayClientError::NotConnected`] when no link is established.
     /// Blocks the calling thread until the open is queued; must not be called
     /// from an asynchronous execution context.
     #[allow(dead_code)]
-    // Consumed by the relay stream integration tests; the runtime consumer
-    // lands with step 3 of issue #32.
+    // Consumed by the relay stream/presence integration tests; the runtime
+    // consumer lands with the console wiring of issue #32.
     pub fn open_stream(
         &self,
         target_node_id: &str,
     ) -> Result<Box<dyn PeerConnection>, RelayClientError> {
+        let target = target_node_id.to_lowercase();
+        self.record_watch_interest(&target);
+        self.declare_watch_now(&target);
         let opener = {
             let slot = self
                 .link_state
@@ -251,8 +274,59 @@ impl RelayClientHandle {
             .runtime
             .as_ref()
             .ok_or(RelayClientError::NotConnected)?;
-        let stream = runtime.block_on(opener.open_stream_to(target_node_id))?;
+        let stream = runtime.block_on(opener.open_stream_to(&target))?;
         Ok(Box::new(stream))
+    }
+
+    /// Watches a node's presence on the relay: records the interest and, when
+    /// a link is current, declares the `Watch` on it. The interest persists
+    /// across reconnects (re-declared after every `Register`), so calling
+    /// `watch` while offline is fine. Repeated watches of the same target
+    /// are no-ops. `send_control` is synchronous — no runtime is needed.
+    ///
+    /// Must not be called from an asynchronous execution context.
+    #[allow(dead_code)]
+    // Consumed by the relay presence integration tests; the runtime
+    // caller lands with the relay session-sync wiring.
+    pub fn watch(&self, target_node_id: &str) -> Result<(), RelayClientError> {
+        let target = target_node_id.to_lowercase();
+        let is_new = {
+            let mut interests = self
+                .link_state
+                .watch_interests
+                .lock()
+                .map_err(|_| RelayClientError::NotConnected)?;
+            interests.insert(target.clone())
+        };
+        if is_new {
+            self.declare_watch_now(&target);
+        }
+        Ok(())
+    }
+
+    /// Records a watch interest (lowercase target) for re-declaration on
+    /// reconnect. Lock is held only for the set insert.
+    fn record_watch_interest(&self, target: &str) {
+        if let Ok(mut interests) = self.link_state.watch_interests.lock() {
+            interests.insert(target.to_string());
+        }
+    }
+
+    /// Best-effort `Watch` on the current link; absence of a link is not an
+    /// error (the interest is declared once a link registers).
+    fn declare_watch_now(&self, target: &str) {
+        let Ok(slot) = self.link_state.opener_slot.lock() else {
+            return;
+        };
+        if let Some(opener) = slot.as_ref() {
+            if let Err(error) = opener.send_control(Frame::Watch {
+                node_id: target.to_string(),
+            }) {
+                ERROR_LOG.log_debug(format!(
+                    "[relay-client] watch declaration for {target} not sent ({error})"
+                ));
+            }
+        }
     }
 
     /// Blocks until the next relay-routed inbound stream arrives, returning it
@@ -261,8 +335,8 @@ impl RelayClientHandle {
     /// The queue is client-wide and survives reconnects. Must not be called
     /// from an asynchronous execution context.
     #[allow(dead_code)]
-    // Consumed by the relay stream integration tests; the runtime consumer
-    // lands with step 3 of issue #32.
+    // Consumed by the relay stream/presence integration tests; the
+    // runtime consumer lands with the relay session-sync wiring.
     pub fn accept_inbound(&self) -> Option<Box<dyn PeerConnection>> {
         let mut inbound = self.inbound.lock().ok()?;
         inbound
@@ -458,6 +532,19 @@ async fn serve_registered(
     if let Ok(mut slot) = link_state.opener_slot.lock() {
         *slot = Some(opener.clone());
     }
+    // The relay forgets watches per connection: re-declare every persisted
+    // interest now that Register is queued (the queue is FIFO, so the
+    // watches follow the register on the wire).
+    let interests: Vec<String> = link_state
+        .watch_interests
+        .lock()
+        .map(|interests| interests.iter().cloned().collect())
+        .unwrap_or_default();
+    for target in interests {
+        if let Err(error) = opener.send_control(Frame::Watch { node_id: target }) {
+            ERROR_LOG.log_debug(format!("[relay-client] watch re-declare failed: {error}"));
+        }
+    }
     emit(
         event_tx,
         RelayClientEvent::Connected {
@@ -486,6 +573,11 @@ async fn serve_registered(
                         "[relay-client] relay error: code 0x{code:04x}: {message}"
                     ));
                     break Some(format!("relay error 0x{code:04x}: {message}"));
+                }
+                Some(Frame::Presence { node_id, online }) => {
+                    // A watched node's presence transitioned; forward to the
+                    // consumer (the link itself stays up).
+                    emit(event_tx, RelayClientEvent::Presence { node_id, online });
                 }
                 Some(other) => {
                     ERROR_LOG.log_debug(format!(

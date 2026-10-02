@@ -257,6 +257,79 @@ async fn open_stream_to_rejects_oversize_target() {
 }
 
 #[tokio::test]
+async fn relay_presence_forwards_to_control_and_stays_alive() {
+    let (mux, mut raw, mut control_rx) = raw_pair(4096);
+    write_frame(
+        &mut raw,
+        &Frame::Presence {
+            node_id: "node-a".to_string(),
+            online: true,
+        },
+    )
+    .await
+    .expect("raw presence");
+    let frame = timeout(NO_DEADLOCK, control_rx.recv())
+        .await
+        .expect("control frame should arrive")
+        .expect("control channel should stay open");
+    assert!(
+        matches!(
+            frame,
+            Frame::Presence { ref node_id, online: true } if node_id == "node-a"
+        ),
+        "presence transitions go to the control channel: {frame:?}"
+    );
+    assert!(
+        !mux.is_closed(),
+        "presence transitions never kill the mux; the client decides"
+    );
+
+    write_frame(
+        &mut raw,
+        &Frame::Presence {
+            node_id: "node-a".to_string(),
+            online: false,
+        },
+    )
+    .await
+    .expect("raw presence");
+    let frame = timeout(NO_DEADLOCK, control_rx.recv())
+        .await
+        .expect("second control frame should arrive")
+        .expect("control channel should stay open");
+    assert!(
+        matches!(frame, Frame::Presence { online: false, .. }),
+        "later transitions keep flowing: {frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn relay_watch_from_relay_fails_connection() {
+    let (mut mux, mut raw, mut control_rx) = raw_pair(4096);
+    write_frame(
+        &mut raw,
+        &Frame::Watch {
+            node_id: "node-b".to_string(),
+        },
+    )
+    .await
+    .expect("raw watch");
+
+    let accepted = timeout(NO_DEADLOCK, mux.accept())
+        .await
+        .expect("accept should not hang");
+    assert!(
+        accepted.is_none(),
+        "Watch from the relay is an unexpected-direction frame and must fail the link"
+    );
+    assert!(mux.is_closed());
+    assert!(
+        control_rx.try_recv().is_err(),
+        "nothing is forwarded for a violating frame"
+    );
+}
+
+#[tokio::test]
 async fn relay_helpers_fail_on_node_to_node_connections() {
     let (a, _b) = tokio::io::duplex(4096);
     let client = MuxConnection::spawn(a, MuxRole::Client);

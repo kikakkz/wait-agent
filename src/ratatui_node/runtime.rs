@@ -154,6 +154,10 @@ pub(crate) struct SharedState {
     /// `StateEventLoop`; read by the remote host connect flow to refuse the
     /// SSH bootstrap fallback. Cleared when the node later comes online.
     pub(crate) remote_node_auth_rejections: Mutex<HashMap<String, String>>,
+    /// Presence of relay-watched nodes (node fingerprint → online), learned
+    /// from relay `Presence` transitions. Written only by `StateEventLoop`;
+    /// a leaf lock (no ordering constraints against other SharedState locks).
+    pub(crate) relay_presence: Mutex<HashMap<String, bool>>,
 }
 
 /// Runtime configuration for agent lifecycle signals.
@@ -237,6 +241,7 @@ impl SharedState {
             process_monitor: Mutex::new(None),
             remote_node_connections: Mutex::new(HashMap::new()),
             remote_node_auth_rejections: Mutex::new(HashMap::new()),
+            relay_presence: Mutex::new(HashMap::new()),
         }))
     }
 }
@@ -1428,9 +1433,88 @@ fn forward_relay_link_events(
                 relay_address,
                 reason,
             },
+            RelayClientEvent::Presence { node_id, online } => {
+                if online {
+                    StateEvent::RelayPeerOnline { node_id }
+                } else {
+                    StateEvent::RelayPeerOffline { node_id }
+                }
+            }
             RelayClientEvent::Connecting { .. } => continue,
         };
         let _ = state_tx.send(state_event);
+    }
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// The forwarder thread maps relay client events onto state events 1:1
+    /// (presence transitions become RelayPeerOnline/Offline) and drops
+    /// `Connecting`; it exits when the client event channel closes.
+    #[test]
+    fn forwarder_maps_presence_and_lifecycle_events() {
+        let (relay_tx, relay_rx) = tokio::sync::mpsc::channel::<RelayClientEvent>(16);
+        let (state_tx, state_rx) = std::sync::mpsc::channel::<StateEvent>();
+        let forwarder = std::thread::spawn(move || forward_relay_link_events(relay_rx, state_tx));
+
+        relay_tx
+            .try_send(RelayClientEvent::Presence {
+                node_id: "peer-a".to_string(),
+                online: true,
+            })
+            .expect("send presence online");
+        relay_tx
+            .try_send(RelayClientEvent::Presence {
+                node_id: "peer-a".to_string(),
+                online: false,
+            })
+            .expect("send presence offline");
+        relay_tx
+            .try_send(RelayClientEvent::Connected {
+                relay_address: "relay.example:7475".to_string(),
+            })
+            .expect("send connected");
+        relay_tx
+            .try_send(RelayClientEvent::Connecting {
+                relay_address: "relay.example:7475".to_string(),
+            })
+            .expect("send connecting (dropped by the forwarder)");
+        drop(relay_tx);
+
+        let first = state_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first mapped event");
+        assert!(
+            matches!(first, StateEvent::RelayPeerOnline { ref node_id } if node_id == "peer-a"),
+            "unexpected mapping: {first:?}"
+        );
+        let second = state_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second mapped event");
+        assert!(
+            matches!(second, StateEvent::RelayPeerOffline { ref node_id } if node_id == "peer-a"),
+            "unexpected mapping: {second:?}"
+        );
+        let third = state_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("third mapped event");
+        assert!(
+            matches!(
+                third,
+                StateEvent::RelayLinkConnected { ref relay_address } if relay_address == "relay.example:7475"
+            ),
+            "unexpected mapping: {third:?}"
+        );
+        forwarder
+            .join()
+            .expect("forwarder should exit when the channel closes");
+        assert!(
+            state_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no further events expected"
+        );
     }
 }
 
