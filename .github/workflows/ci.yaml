@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0 # trailer checks walk commit ranges
 
       - name: Install system deps
         run: |
@@ -37,6 +38,12 @@ jobs:
 
       - name: cargo fmt --check
         run: cargo fmt --check
+
+      - name: DCO + trailer check on PR commits
+        # Check the branch commits (base..head), NOT the checked-out merge
+        # commit — GitHub's ephemeral test merge never carries trailers.
+        if: github.event_name == 'pull_request'
+        run: bash .agents/tools/check-trailers.sh --dco "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   build:
     runs-on: ubuntu-latest
