@@ -42,12 +42,16 @@ module_map:
         with the relay mux stream impl landed in relay_mux/ (#51)
     - path: src/infra/relay_mux/
       responsibility: >
-        relay mux frame layer (issue #51): deterministic frame codec plus
-        per-connection stream state machine (open/close/data/window,
-        per-stream credit); MuxStream is a PeerConnection via blanket impl;
-        enrollment control frames Enroll/EnrollResponse landed with #31;
-        lands ahead of its first consumer (node relay client), so
-        infra/mod.rs carries a transitional #[allow(dead_code)]
+        relay mux frame layer (issue #51) with a relay-link mode
+        (issue #32 step 2, PR #93): node-to-node mode keeps rejecting
+        control frames, relay-link mode accepts even OpenStream as
+        inbound dials, routes Error{stream_id:0} to a control channel,
+        and tears down individual streams on Error{n}/CloseStream via
+        a reset flag (reads ConnectionReset, writes BrokenPipe);
+        MuxOpener exposes open_stream_to (odd id, immediate return,
+        async refusal) and send_control (Register/Heartbeat/
+        Unregister); consumed by the node relay client — no
+        dead-code allow
     - path: src/infra/relay_server.rs
       responsibility: >
         relay listener/handle/config (issue #52): mTLS whitelist gate,
@@ -85,13 +89,16 @@ module_map:
         TokenExpired errors from the wire codes
     - path: src/infra/relay_client.rs
       responsibility: >
-        node relay client (issue #32 step 1, PR #90): persistent
-        outbound TLS link pinned by relay.toml fingerprint with
-        client-auth node cert; Register on connect (silent ack), writer
-        task over a bounded queue, 10s heartbeat, unbounded backoff
-        reconnect/re-register on its own tokio runtime in a std thread;
-        Connected/Disconnected events bridge into StateEventLoop as
-        log-only RelayLink state events; stream frames land in step 2
+        node relay client (issue #32): persistent outbound TLS link
+        pinned by relay.toml fingerprint with client-auth node cert;
+        Register on connect (silent ack), heartbeat via send_control,
+        unbounded backoff reconnect/re-register on its own tokio
+        runtime in a std thread; the handle exposes
+        open_stream(target)/accept_inbound() returning boxed
+        PeerConnections over the relay-link-mode mux (client-wide
+        inbound queue survives reconnects); Connected/Disconnected
+        events bridge into StateEventLoop as log-only RelayLink state
+        events until step 3 gives them presence semantics
     - path: src/infra/relay_toml_store.rs
       responsibility: >
         ~/.waitagent/relay.toml store (issue #31 write side, #32 step 1
