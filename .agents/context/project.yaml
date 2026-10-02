@@ -22,18 +22,21 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-capacity
-  stage_title: capacity model and admission control (issue #56)
+  stage_id: relay-1-config
+  stage_title: config surface — relay.toml and remote-hosts via (issue #35)
 current_focus:
-  default_task_id: "#56"
+  default_task_id: "#35"
   focus_statement: >
-    build the calibrated single-relay capacity model that feeds the phase-2
-    cluster scheduler: usage metering, max_nodes/max_streams admission,
-    throughput protection threshold, structured rejections; then the config
-    surface (#57: relay.toml, remote-hosts `via`) and the node relay client
-    slice
+    land the relay config surface: node relay.toml (address,
+    relay_fingerprint, heartbeat) and relay relay.toml (listen, admin
+    socket, whitelist dir, token params, heartbeat, capacity limits) with
+    validation, remote-hosts `via = "relay" | "direct"` selector (no
+    implicit fallback), and Ctrl-W connect-path integration through the
+    PeerConnection seam; depends on #31, #32, #34 — #34 (capacity model)
+    is landed, #31 (enrollment invite) and #32 (node relay client) are
+    still open
 upcoming_focus:
-  - config surface relay.toml and remote-hosts `via` (issue #57)
+  - structured error semantics (issue #36)
   - node relay client slice (long-lived link, on-demand streams,
     re-register on reconnect, presence events)
 source_of_truth:
