@@ -29,7 +29,7 @@ use crate::infra::relay_connection_table::{
 use crate::infra::relay_mux::frame::{read_frame, Frame};
 use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::{error_code, CloseOutcome, Lookup, RouteKey, RoutingTable};
-use crate::infra::relay_scheduler::{LinkScheduler, SchedulerConfig};
+use crate::infra::relay_scheduler::{LinkScheduler, SchedulerConfig, SchedulerIngress};
 
 /// Bounded outbound queue per link: frames waiting for the writer task.
 pub(crate) const LINK_OUTBOUND_QUEUE: usize = 256;
@@ -60,9 +60,10 @@ pub(crate) async fn run_link(
     };
 
     let (mut reader, writer) = tokio::io::split(tls);
-    // Egress scheduling: the ingress sender keeps the mTLS-era type every
-    // producer (connection entry, routing legs, presence hub) clones today;
-    // the scheduler adds per-stream bounds and fairness between streams.
+    // Egress scheduling: every producer (connection entry, routing legs,
+    // presence hub) clones this handle; the scheduler classifies frames
+    // onto its bulk/control ingress channels and adds per-stream bounds and
+    // fairness between streams.
     let (outbound_tx, scheduler) = LinkScheduler::spawn(
         SchedulerConfig {
             ingress_capacity: LINK_OUTBOUND_QUEUE,
@@ -170,7 +171,7 @@ async fn register_link(
     peer_fingerprint: &str,
     table: &Arc<RelayConnectionTable>,
     events: &mpsc::Sender<RelayLifecycleEvent>,
-    outbound_tx: &mpsc::Sender<Frame>,
+    outbound_tx: &SchedulerIngress,
     lifecycle: &RelayLifecycleConfig,
     capacity: &RelayCapacityConfig,
     presence: &Arc<PresenceHub>,
@@ -251,7 +252,7 @@ async fn dispatch_loop(
     routing: &Arc<RoutingTable>,
     events: &mpsc::Sender<RelayLifecycleEvent>,
     registered: &RegisteredLink,
-    outbound_tx: &mpsc::Sender<Frame>,
+    outbound_tx: &SchedulerIngress,
     capacity: &RelayCapacityConfig,
     meter: &SharedUsageMeter,
     presence: &Arc<PresenceHub>,
@@ -365,7 +366,7 @@ async fn handle_open_stream(
     connection_id: u64,
     table: &Arc<RelayConnectionTable>,
     routing: &Arc<RoutingTable>,
-    outbound_tx: &mpsc::Sender<Frame>,
+    outbound_tx: &SchedulerIngress,
     capacity: &RelayCapacityConfig,
     meter: &SharedUsageMeter,
 ) -> bool {
@@ -455,7 +456,7 @@ async fn forward_routed(
     routing: &Arc<RoutingTable>,
     connection_id: u64,
     stream_id: u32,
-    outbound_tx: &mpsc::Sender<Frame>,
+    outbound_tx: &SchedulerIngress,
     meter: &SharedUsageMeter,
     forwarded_bytes: usize,
     build: impl FnOnce(u32) -> Frame,
@@ -506,7 +507,7 @@ async fn forward_routed(
 }
 
 async fn send_stream_error(
-    outbound_tx: &mpsc::Sender<Frame>,
+    outbound_tx: &SchedulerIngress,
     stream_id: u32,
     code: u16,
     message: &str,

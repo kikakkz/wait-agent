@@ -1,29 +1,39 @@
 //! Per-link egress scheduler: stream isolation (per-stream byte bounds) and
 //! fair scheduling (deficit round robin) between the routed streams of one
-//! relay link (issue #33).
+//! relay link (issue #33), with dual-channel ingress so control frames
+//! bypass a backpressured bulk queue (issue #105).
 //!
-//! Today every frame bound for a link — routed stream data from any number of
-//! sources plus control frames — lands in one FIFO (`mpsc::Sender<Frame>`),
-//! and a writer task pumps it in arrival order. One stream with a slow or
-//! absent receiver fills that FIFO and stalls every other stream to the same
-//! target (head-of-line blocking), with no bound on how much memory a single
-//! stream can occupy.
+//! Frames bound for a link — routed stream data from any number of sources
+//! plus control frames — arrive over two bounded FIFOs, each sized
+//! `SchedulerConfig.ingress_capacity`:
 //!
-//! `LinkScheduler` keeps the producers' ingress type unchanged — it IS the
-//! `mpsc::Sender<Frame>` cloned into connection entries and routing legs —
-//! and interposes two tasks between that FIFO and the socket:
+//! - bulk: `Data`, `Window`, and `Close`. These must keep per-stream FIFO
+//!   order: a `Close` must never overtake its own stream's `Data`, because
+//!   the mux consumer fails the whole connection on `Data` after `peer_fin`
+//!   (`relay_mux/connection.rs`) and the wire format promises EOF only once
+//!   buffered data drains (`Frame::is_bulk_ordered`).
+//! - control: every other variant — register/unregister/heartbeat,
+//!   `OpenStream`/`Error`/`CloseStream`, presence, enrollment. These are
+//!   resets and lifecycle frames; a stream parked at its byte cap must not
+//!   delay them.
 //!
-//! - an ingress consumer that classifies frames: `Data`/`Window` go to a
-//!   per-stream bucket keyed by the frame's stream id (already the
-//!   target-side id from the route rewrite); everything else (heartbeat,
-//!   register, errors, `CloseStream`, presence, ...) goes to a priority
-//!   queue;
+//! Producers hold a [`SchedulerIngress`], which routes each frame to one of
+//! the two FIFOs by kind. Two tasks sit between the FIFOs and the socket:
+//!
+//! - an ingress consumer that moves frames into the scheduling queues:
+//!   `Data`/`Window`/`Close` go to a per-stream bucket keyed by the frame's
+//!   stream id (already the target-side id from the route rewrite);
+//!   everything else goes to a priority queue. A frame whose bucket is full
+//!   parks the consumer's bulk arm only; the control arm keeps dequeuing, so
+//!   a teardown behind a stalled stream still classifies (issue #105). The
+//!   consumer is the only bucket enqueuer — that invariant is what makes the
+//!   check-then-enqueue race-free.
 //! - a writer task that drains the priority queue fully first, then serves
 //!   live buckets with one deficit-round-robin pass per loop iteration.
 //!
 //! Backpressure is end-to-end: a bucket at its byte cap, or a link at its
-//! total budget, parks the ingress consumer (await on a `Notify`); the
-//! ingress FIFO (256 frames) fills next; and the source link's
+//! total budget, parks the consumer's bulk arm (await on a `Notify`); the
+//! bulk FIFO (256 frames) fills next; and the source link's
 //! `forward_routed` await parks at the same point it does today — the relay
 //! adds its own bounds between end-to-end stream credit, it never replaces
 //! it.
@@ -41,22 +51,25 @@
 //!
 //! One mutex, `Shared`, and it is a leaf: it is never held across an await,
 //! across a channel send that can park, or across any I/O. The ingress
-//! consumer takes it to classify and enqueue (waiting for budget happens
-//! outside it, via `space_notify`); the writer takes it to take batches out
-//! (priority drain, RR selection, accounting) and writes to the socket only
-//! after releasing it. Wake-ups (`Notify`) are issued after the lock is
-//! dropped. No other lock is ever acquired while holding it, so there is no
-//! lock ordering beyond this leaf.
+//! consumer takes it to enqueue (waiting for budget happens outside it, via
+//! `space_freed`); the writer takes it to take batches out (priority drain,
+//! RR selection, accounting) and writes to the socket only after releasing
+//! it. Wake-ups (`Notify`) are issued after the lock is dropped. No other
+//! lock is ever acquired while holding it, so there is no lock ordering
+//! beyond this leaf. The consumer's parked-frame slot lives in its own task
+//! state rather than in the mutex, so retrying a parked enqueue needs no
+//! extra lock.
 //!
 //! # Idle behavior and shutdown
 //!
 //! When no queue holds anything and the ingress is open, the writer parks on
 //! a `Notify` signaled by the consumer — no busy poll. Buckets emptied and
 //! not re-fed for `IDLE_REAP_PASSES` rounds are reaped (the stream ended).
-//! When the ingress channel closes (every producer dropped, i.e. link
-//! teardown), the consumer sets `ingress_open = false`; the writer finishes
-//! draining the priority queue and the buckets, then exits — the flush
-//! semantics the raw FIFO writer had.
+//! When both ingress channels close (every producer dropped, i.e. link
+//! teardown) and no bulk frame is parked, the consumer sets
+//! `ingress_open = false`; the writer finishes draining the priority queue
+//! and the buckets, then exits — the flush semantics the raw FIFO writer
+//! had.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -85,8 +98,8 @@ pub(crate) struct SchedulerConfig {
     /// rounds as credit, so an idle stream's burst is bounded by one round,
     /// not by how long it was silent.
     pub(crate) round_budget_bytes: usize,
-    /// Capacity of the shared ingress FIFO — the producers' backpressure
-    /// horizon (`LINK_OUTBOUND_QUEUE` at the call site).
+    /// Capacity of each ingress FIFO (bulk and control) — the producers'
+    /// backpressure horizon (`LINK_OUTBOUND_QUEUE` at the call site).
     pub(crate) ingress_capacity: usize,
 }
 
@@ -175,20 +188,76 @@ impl SchedulerHandle {
 
 pub(crate) struct LinkScheduler;
 
+/// Producers' handle into a link's egress scheduler. It owns the two ingress
+/// FIFOs (bulk and control, see the module doc) and routes each frame to the
+/// right one by [`Frame::is_bulk_ordered`], so a frame that must bypass a
+/// backpressured bulk queue never queues behind bulk data in the first place
+/// (issue #105). Call sites keep the raw-sender syntax: `send`, `try_send`,
+/// and `clone`.
+#[derive(Clone)]
+pub(crate) struct SchedulerIngress {
+    bulk: mpsc::Sender<Frame>,
+    control: mpsc::Sender<Frame>,
+}
+
+impl SchedulerIngress {
+    /// Queues `frame` on its classified channel, parking when that channel
+    /// is full. An error means every scheduler handle is gone (link
+    /// teardown).
+    pub(crate) async fn send(&self, frame: Frame) -> Result<(), mpsc::error::SendError<Frame>> {
+        if frame.is_bulk_ordered() {
+            self.bulk.send(frame).await
+        } else {
+            self.control.send(frame).await
+        }
+    }
+
+    /// Non-blocking variant of [`SchedulerIngress::send`]: `Full` carries
+    /// the frame back on a full channel.
+    pub(crate) fn try_send(&self, frame: Frame) -> Result<(), mpsc::error::TrySendError<Frame>> {
+        if frame.is_bulk_ordered() {
+            self.bulk.try_send(frame)
+        } else {
+            self.control.try_send(frame)
+        }
+    }
+
+    /// Test-only constructor over fresh channels; returns both receivers so
+    /// assertions can observe what was sent (bulk frames arrive on the
+    /// first, control frames on the second).
+    #[cfg(test)]
+    pub(crate) fn test_channels(
+        capacity: usize,
+    ) -> (Self, mpsc::Receiver<Frame>, mpsc::Receiver<Frame>) {
+        let (bulk_tx, bulk_rx) = mpsc::channel(capacity);
+        let (control_tx, control_rx) = mpsc::channel(capacity);
+        (
+            Self {
+                bulk: bulk_tx,
+                control: control_tx,
+            },
+            bulk_rx,
+            control_rx,
+        )
+    }
+}
+
 impl LinkScheduler {
     /// Spawns the ingress consumer and the writer task over `writer`.
-    /// Returns the ingress sender (clone it into connection entries and
+    /// Returns the ingress handle (clone it into connection entries and
     /// routing legs exactly like the raw channel before) and the handle.
     pub(crate) fn spawn<W: AsyncWrite + Unpin + Send + 'static>(
         config: SchedulerConfig,
         writer: W,
-    ) -> (mpsc::Sender<Frame>, SchedulerHandle) {
+    ) -> (SchedulerIngress, SchedulerHandle) {
         // Floors keep invariants: an empty bucket always accepts one
         // max-size frame, and a round always sends at least one frame.
         let bucket_capacity = config.bucket_capacity_bytes.max(MAX_FRAME_PAYLOAD as usize);
         let link_budget = config.link_budget_bytes.max(bucket_capacity);
         let round_budget = config.round_budget_bytes.max(1);
-        let (ingress_tx, ingress_rx) = mpsc::channel(config.ingress_capacity.max(1));
+        let capacity = config.ingress_capacity.max(1);
+        let (bulk_tx, bulk_rx) = mpsc::channel(capacity);
+        let (control_tx, control_rx) = mpsc::channel(capacity);
         let state = Arc::new(SchedulerState {
             shared: Mutex::new(Shared {
                 priority: VecDeque::new(),
@@ -204,12 +273,16 @@ impl LinkScheduler {
         let consumer = tokio::spawn(ingress_consumer_loop(
             bucket_capacity,
             link_budget,
-            ingress_rx,
+            bulk_rx,
+            control_rx,
             state.clone(),
         ));
         let writer = tokio::spawn(writer_loop(round_budget, writer, state.clone()));
         (
-            ingress_tx,
+            SchedulerIngress {
+                bulk: bulk_tx,
+                control: control_tx,
+            },
             SchedulerHandle {
                 state,
                 consumer,
@@ -219,77 +292,122 @@ impl LinkScheduler {
     }
 }
 
+/// Outcome of fitting one bulk-ordered frame into its per-stream bucket.
+/// `Park` hands the frame back: the caller parks it and retries once the
+/// writer frees budget.
+enum BucketEnqueue {
+    Fits,
+    Park(Frame),
+    Drop,
+}
+
+/// Capacity check and enqueue are one critical section: the consumer is the
+/// only bucket enqueuer, and the writer only removes frames and sets
+/// `writer_done`, so nothing can interleave between the check and the push.
+/// `Shared` stays a leaf: no await inside the lock.
+fn enqueue_bucket(
+    state: &SchedulerState,
+    bucket_capacity: usize,
+    link_budget: usize,
+    frame: Frame,
+) -> BucketEnqueue {
+    let stream_id = frame.stream_id();
+    let len = frame.payload_len();
+    let mut guard = lock(&state.shared);
+    if guard.writer_done {
+        // The writer is gone (socket error): the link is dying, drop the
+        // frame.
+        return BucketEnqueue::Drop;
+    }
+    let total = guard.total_bucket_bytes;
+    let bucket = guard.buckets.entry(stream_id).or_insert_with(Bucket::new);
+    if bucket.queued_bytes + len <= bucket_capacity && total + len <= link_budget {
+        bucket.queue.push_back(frame);
+        bucket.queued_bytes += len;
+        bucket.idle_passes = 0;
+        guard.total_bucket_bytes += len;
+        guard.classified_frames += 1;
+        BucketEnqueue::Fits
+    } else {
+        BucketEnqueue::Park(frame)
+    }
+}
+
+/// Moves every ingress frame into the scheduling queues (per-stream buckets
+/// for bulk, the priority queue for control). Single consumer task: it is
+/// the only bucket enqueuer, which is what makes `enqueue_bucket` race-free.
+///
+/// The bulk and control FIFOs are consumed by separate `select!` arms so a
+/// control frame classifies even while a bulk frame parks the bulk arm on a
+/// full bucket (issue #105). The parked frame lives in `parked` (task state,
+/// not the mutex) and retries its enqueue on every `space_freed` signal.
 async fn ingress_consumer_loop(
     bucket_capacity: usize,
     link_budget: usize,
-    mut ingress: mpsc::Receiver<Frame>,
+    mut bulk_rx: mpsc::Receiver<Frame>,
+    mut control_rx: mpsc::Receiver<Frame>,
     state: Arc<SchedulerState>,
 ) {
-    while let Some(frame) = ingress.recv().await {
-        match frame {
-            Frame::Data { .. } | Frame::Window { .. } => {
-                let stream_id = frame.stream_id();
-                let len = frame.payload_len();
-                loop {
-                    enum Outcome {
-                        Fits,
-                        Park,
-                        Drop,
-                    }
-                    // Capacity check and enqueue are separate lock sections;
-                    // this is the only task that enqueues, so no race.
-                    let outcome = {
+    let mut parked: Option<Frame> = None;
+    let mut bulk_closed = false;
+    let mut control_closed = false;
+    loop {
+        if bulk_closed && control_closed && parked.is_none() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            // A parked bulk frame retries its enqueue first: a fresh budget
+            // permit must not wait behind new arrivals.
+            _ = state.space_freed.notified(), if parked.is_some() => {
+                let Some(frame) = parked.take() else {
+                    continue;
+                };
+                match enqueue_bucket(&state, bucket_capacity, link_budget, frame) {
+                    BucketEnqueue::Fits => state.work_available.notify_one(),
+                    // Still at cap: stay parked; the control arm above keeps
+                    // this task responsive to control frames regardless.
+                    BucketEnqueue::Park(frame) => parked = Some(frame),
+                    BucketEnqueue::Drop => {}
+                }
+            }
+            frame = control_rx.recv(), if !control_closed => match frame {
+                Some(frame) => {
+                    {
                         let mut guard = lock(&state.shared);
-                        if guard.writer_done {
-                            // The writer is gone (socket error): the link is
-                            // dying, drop the frame.
-                            Outcome::Drop
-                        } else {
-                            let total = guard.total_bucket_bytes;
-                            let bucket = guard.buckets.entry(stream_id).or_insert_with(Bucket::new);
-                            if bucket.queued_bytes + len <= bucket_capacity
-                                && total + len <= link_budget
-                            {
-                                Outcome::Fits
-                            } else {
-                                Outcome::Park
-                            }
-                        }
-                    };
-                    match outcome {
-                        Outcome::Fits => {
-                            {
-                                let mut guard = lock(&state.shared);
-                                if let Some(bucket) = guard.buckets.get_mut(&stream_id) {
-                                    bucket.queue.push_back(frame);
-                                    bucket.queued_bytes += len;
-                                    bucket.idle_passes = 0;
-                                    guard.total_bucket_bytes += len;
-                                    guard.classified_frames += 1;
-                                }
-                            }
-                            state.work_available.notify_one();
-                            break;
-                        }
-                        Outcome::Park => {
+                        guard.priority.push_back(frame);
+                        guard.classified_frames += 1;
+                    }
+                    state.work_available.notify_one();
+                }
+                None => control_closed = true,
+            },
+            frame = bulk_rx.recv(), if !bulk_closed && parked.is_none() => match frame {
+                Some(frame) => {
+                    if frame.is_bulk_ordered() {
+                        match enqueue_bucket(&state, bucket_capacity, link_budget, frame) {
+                            BucketEnqueue::Fits => state.work_available.notify_one(),
                             // Bucket at cap or link budget exhausted: park
-                            // until the writer frees budget or dies. The FIFO
-                            // upstream fills next and `forward_routed` parks
-                            // behind it — the end-to-end backpressure point.
-                            state.space_freed.notified().await;
+                            // the bulk arm until the writer frees budget or
+                            // dies. The bulk FIFO fills next and
+                            // `forward_routed` parks behind it — the
+                            // end-to-end backpressure point. Control frames
+                            // keep flowing past this park (issue #105).
+                            BucketEnqueue::Park(frame) => parked = Some(frame),
+                            BucketEnqueue::Drop => {}
                         }
-                        Outcome::Drop => break,
+                    } else {
+                        // Defense in depth: `SchedulerIngress` already routes
+                        // non-bulk frames to the control channel.
+                        let mut guard = lock(&state.shared);
+                        guard.priority.push_back(frame);
+                        guard.classified_frames += 1;
+                        drop(guard);
+                        state.work_available.notify_one();
                     }
                 }
-            }
-            priority_frame => {
-                {
-                    let mut guard = lock(&state.shared);
-                    guard.priority.push_back(priority_frame);
-                    guard.classified_frames += 1;
-                }
-                state.work_available.notify_one();
-            }
+                None => bulk_closed = true,
+            },
         }
     }
     {
@@ -426,7 +544,7 @@ mod tests {
         }
     }
 
-    fn spawn_test(config: SchedulerConfig) -> (mpsc::Sender<Frame>, DuplexStream, SchedulerHandle) {
+    fn spawn_test(config: SchedulerConfig) -> (SchedulerIngress, DuplexStream, SchedulerHandle) {
         let (read_half, write_half) = tokio::io::duplex(1024);
         let (tx, handle) = LinkScheduler::spawn(config, write_half);
         (tx, read_half, handle)
@@ -607,6 +725,129 @@ mod tests {
         .expect("send succeeds once budget frees");
 
         drop(tx);
+        drop(rx);
+        timeout(NO_DEADLOCK, handle.shutdown())
+            .await
+            .expect("shutdown within deadline");
+    }
+
+    #[tokio::test]
+    async fn control_frames_bypass_a_parked_bulk_consumer() {
+        let (ingress, mut rx, handle) = spawn_test(tiny_config());
+        // Park the consumer's bulk arm exactly like
+        // `bucket_cap_backpressures_the_producer_then_unblocks`: the first
+        // max-size frame fills the bucket, the second frame classified
+        // against the full bucket parks the bulk arm, and the writer blocks
+        // mid-frame on the unread duplex.
+        ingress
+            .send(Frame::Data {
+                stream_id: 1,
+                payload: vec![0u8; MAX_FRAME_PAYLOAD as usize],
+            })
+            .await
+            .expect("big frame");
+        ingress
+            .send(Frame::Data {
+                stream_id: 1,
+                payload: vec![0u8; MAX_FRAME_PAYLOAD as usize],
+            })
+            .await
+            .expect("second frame");
+        while handle.debug_classified_frames().await < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // One more bulk frame lands on the full bucket: the bulk arm parks
+        // on it (it cannot classify until the writer frees budget). Settle
+        // so the park — not merely classification of the backlog — is the
+        // state under test.
+        ingress
+            .send(Frame::Data {
+                stream_id: 1,
+                payload: vec![1],
+            })
+            .await
+            .expect("frame behind the full bucket");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A control frame must still classify promptly instead of queueing
+        // behind the stalled bulk stream — without reading the socket.
+        ingress
+            .send(Frame::CloseStream { stream_id: 2 })
+            .await
+            .expect("control frame");
+        timeout(Duration::from_millis(500), async {
+            while handle.debug_classified_frames().await < 3 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("control frame classified despite the parked bulk arm");
+
+        // Wire order: the socket write blocked mid-frame finishes first,
+        // then the teardown egresses before the parked stream's backlog.
+        let first = read_one(&mut rx).await;
+        assert!(
+            matches!(first, Frame::Data { stream_id: 1, .. }),
+            "the blocked socket write finishes first: {first:?}"
+        );
+        let second = read_one(&mut rx).await;
+        assert!(
+            matches!(second, Frame::CloseStream { stream_id: 2 }),
+            "the control frame egresses before the parked stream's backlog: {second:?}"
+        );
+
+        drop(ingress);
+        drop(rx);
+        timeout(NO_DEADLOCK, handle.shutdown())
+            .await
+            .expect("shutdown within deadline");
+    }
+
+    #[tokio::test]
+    async fn same_stream_close_stays_behind_its_data() {
+        let (ingress, mut rx, handle) = spawn_test(tiny_config());
+        // Payloads sized so the second frame's write blocks on the 1024-byte
+        // duplex: until the test reads, wire order is frozen and the only
+        // ordering source is the scheduler's queues.
+        const FRAMES: usize = 4;
+        for seq in 0..FRAMES {
+            ingress
+                .send(Frame::Data {
+                    stream_id: 5,
+                    payload: vec![seq as u8; 400],
+                })
+                .await
+                .expect("data frame");
+        }
+        ingress
+            .send(Frame::Close { stream_id: 5 })
+            .await
+            .expect("half-close");
+        while handle.debug_classified_frames().await < FRAMES as u64 + 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        for seq in 0..FRAMES {
+            let frame = read_one(&mut rx).await;
+            match frame {
+                Frame::Data { stream_id, payload } => {
+                    assert_eq!(stream_id, 5, "every data frame belongs to the stream");
+                    assert_eq!(
+                        payload,
+                        vec![seq as u8; 400],
+                        "per-stream FIFO order is preserved"
+                    );
+                }
+                other => panic!("data frame {seq} must precede the half-close: {other:?}"),
+            }
+        }
+        let last = read_one(&mut rx).await;
+        assert!(
+            matches!(last, Frame::Close { stream_id: 5 }),
+            "the half-close follows its own stream's data: {last:?}"
+        );
+
+        drop(ingress);
         drop(rx);
         timeout(NO_DEADLOCK, handle.shutdown())
             .await

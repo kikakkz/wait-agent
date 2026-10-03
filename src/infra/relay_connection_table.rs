@@ -18,9 +18,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
-use crate::infra::relay_mux::frame::Frame;
+use crate::infra::relay_scheduler::SchedulerIngress;
 
 /// Default eviction deadline: three missed 10s beats = 30s of silence.
 pub const DEFAULT_OFFLINE_AFTER: Duration = Duration::from_secs(30);
@@ -93,7 +93,7 @@ pub(crate) struct ConnectionEntry {
     pub(crate) retire_tx: watch::Sender<bool>,
     pub(crate) last_seen: Arc<Mutex<Instant>>,
     /// The link's outbound frame queue (its writer task drains this).
-    pub(crate) outbound: mpsc::Sender<Frame>,
+    pub(crate) outbound: SchedulerIngress,
     /// Allocator for relay-initiated (even) stream ids on this link.
     pub(crate) next_relay_stream: Arc<AtomicU32>,
 }
@@ -102,7 +102,7 @@ pub(crate) struct ConnectionEntry {
 /// toward a registered node.
 pub(crate) struct RoutingTarget {
     pub(crate) connection_id: u64,
-    pub(crate) outbound: mpsc::Sender<Frame>,
+    pub(crate) outbound: SchedulerIngress,
     pub(crate) next_relay_stream: Arc<AtomicU32>,
 }
 
@@ -122,7 +122,7 @@ impl RelayConnectionTable {
     /// Inserts (or replaces) the node. Returns the fresh entry's handle
     /// plus the previous entry when this was a replacement — the caller
     /// retires the stale link and emits `Replaced`.
-    pub(crate) fn register(&self, node_id: &str, outbound: mpsc::Sender<Frame>) -> RegisteredEntry {
+    pub(crate) fn register(&self, node_id: &str, outbound: SchedulerIngress) -> RegisteredEntry {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::SeqCst);
         let (retire_tx, retire_rx) = watch::channel(false);
         let entry = ConnectionEntry {
@@ -280,9 +280,9 @@ pub(crate) struct RegisteredEntry {
 mod tests {
     use super::*;
 
-    fn dummy_outbound() -> mpsc::Sender<Frame> {
-        let (tx, _rx) = mpsc::channel(8);
-        tx
+    fn dummy_outbound() -> SchedulerIngress {
+        let (ingress, _bulk_rx, _control_rx) = SchedulerIngress::test_channels(8);
+        ingress
     }
 
     fn node_id(name: &str) -> String {

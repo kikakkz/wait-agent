@@ -15,15 +15,14 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tokio::sync::mpsc;
-
 use crate::infra::relay_mux::frame::Frame;
+use crate::infra::relay_scheduler::SchedulerIngress;
 
 /// Target node id → the connections watching it, each with its link's
 /// outbound queue. Node ids are stored lowercase (fingerprints compare
 /// case-insensitively across the relay protocol).
 pub struct PresenceHub {
-    watchers: Mutex<HashMap<String, HashMap<u64, mpsc::Sender<Frame>>>>,
+    watchers: Mutex<HashMap<String, HashMap<u64, SchedulerIngress>>>,
 }
 
 impl PresenceHub {
@@ -40,7 +39,7 @@ impl PresenceHub {
         &self,
         connection_id: u64,
         target: &str,
-        outbound: mpsc::Sender<Frame>,
+        outbound: SchedulerIngress,
         currently_online: bool,
     ) {
         let target = target.to_lowercase();
@@ -76,7 +75,7 @@ impl PresenceHub {
     /// Fans a presence transition out to every watcher of `node_id`.
     /// Transitions are best-effort: a full watcher queue drops the frame.
     pub fn publish(&self, node_id: &str, online: bool) {
-        let senders: Vec<mpsc::Sender<Frame>> = {
+        let senders: Vec<SchedulerIngress> = {
             let Ok(watchers) = self.watchers.lock() else {
                 return;
             };
@@ -97,9 +96,13 @@ impl PresenceHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
-    fn channel() -> (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) {
-        mpsc::channel(8)
+    /// Presence frames ride the scheduler's control channel; the helper
+    /// returns that receiver (the unused bulk receiver is dropped).
+    fn channel() -> (SchedulerIngress, mpsc::Receiver<Frame>) {
+        let (ingress, _bulk_rx, control_rx) = SchedulerIngress::test_channels(8);
+        (ingress, control_rx)
     }
 
     #[test]
