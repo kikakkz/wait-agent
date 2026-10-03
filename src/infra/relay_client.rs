@@ -526,6 +526,70 @@ async fn run_once(
     serve_registered(tls, config, event_tx, stop_rx, link_state, own_fingerprint).await
 }
 
+/// What the supervisor does with one mux control frame.
+#[derive(Debug)]
+enum ControlOutcome {
+    /// Frame handled; keep supervising the link.
+    Continue,
+    /// The frame tore the link down; the string is the `Disconnected` reason.
+    Break(String),
+}
+
+/// Handles one connection-level mux control frame, shared by the live select
+/// arm and the connection-death drain: a connection-level `Error` emits
+/// `RelayError` first and folds the reason; `Presence` is forwarded; anything
+/// else is logged and ignored.
+fn handle_control_frame(event_tx: &mpsc::Sender<RelayClientEvent>, frame: Frame) -> ControlOutcome {
+    match frame {
+        Frame::Error { code, message, .. } => {
+            ERROR_LOG.log_error(format!(
+                "[relay-client] relay error: code 0x{code:04x}: {message}"
+            ));
+            // Structured first: consumers see the code+message before
+            // the disconnect reason folds them into a string.
+            emit(
+                event_tx,
+                RelayClientEvent::RelayError {
+                    code,
+                    message: message.clone(),
+                },
+            );
+            ControlOutcome::Break(format!("relay error 0x{code:04x}: {message}"))
+        }
+        Frame::Presence { node_id, online } => {
+            // A watched node's presence transitioned; forward to the
+            // consumer (the link itself stays up).
+            emit(event_tx, RelayClientEvent::Presence { node_id, online });
+            ControlOutcome::Continue
+        }
+        other => {
+            ERROR_LOG.log_debug(format!(
+                "[relay-client] ignoring unexpected control frame: {other:?}"
+            ));
+            ControlOutcome::Continue
+        }
+    }
+}
+
+/// Death path of the registered loop: surface the control frames the mux
+/// queued before it died, then describe the death. An evicting relay sends
+/// `Error` and closes in the same breath, so the mux queues the frame and
+/// dies together; tearing down on connection death alone would drop the
+/// frame and skip the `RelayError` event (issue #114). Pending control
+/// frames must not be lost to that race.
+fn pending_control_or_dead_reason(
+    control_rx: &mut mpsc::Receiver<Frame>,
+    conn: &MuxConnection,
+    event_tx: &mpsc::Sender<RelayClientEvent>,
+) -> String {
+    while let Ok(frame) = control_rx.try_recv() {
+        if let ControlOutcome::Break(reason) = handle_control_frame(event_tx, frame) {
+            return reason;
+        }
+    }
+    format!("relay link closed: {}", conn.dead_reason())
+}
+
 /// The registered phase: the TLS link runs as a relay-mode mux connection.
 /// This task supervises: connection death (→ reconnect), connection-level
 /// relay `Error` frames forwarded by the mux (→ log + reconnect), inbound
@@ -585,37 +649,24 @@ async fn serve_registered(
             break None;
         }
         if conn.is_closed() {
-            break Some(format!("relay link closed: {}", conn.dead_reason()));
+            break Some(pending_control_or_dead_reason(
+                &mut control_rx,
+                &conn,
+                event_tx,
+            ));
         }
         tokio::select! {
             _ = stop_rx.changed() => break None,
             frame = control_rx.recv() => match frame {
-                Some(Frame::Error { code, message, .. }) => {
-                    ERROR_LOG.log_error(format!(
-                        "[relay-client] relay error: code 0x{code:04x}: {message}"
-                    ));
-                    // Structured first: consumers see the code+message before
-                    // the disconnect reason folds them into a string.
-                    emit(
-                        event_tx,
-                        RelayClientEvent::RelayError {
-                            code,
-                            message: message.clone(),
-                        },
-                    );
-                    break Some(format!("relay error 0x{code:04x}: {message}"));
-                }
-                Some(Frame::Presence { node_id, online }) => {
-                    // A watched node's presence transitioned; forward to the
-                    // consumer (the link itself stays up).
-                    emit(event_tx, RelayClientEvent::Presence { node_id, online });
-                }
-                Some(other) => {
-                    ERROR_LOG.log_debug(format!(
-                        "[relay-client] ignoring unexpected control frame: {other:?}"
-                    ));
-                }
-                None => break Some(format!("relay link closed: {}", conn.dead_reason())),
+                Some(frame) => match handle_control_frame(event_tx, frame) {
+                    ControlOutcome::Continue => {}
+                    ControlOutcome::Break(reason) => break Some(reason),
+                },
+                None => break Some(pending_control_or_dead_reason(
+                    &mut control_rx,
+                    &conn,
+                    event_tx,
+                )),
             },
             accepted = conn.accept() => match accepted {
                 Some(stream) => {
@@ -633,7 +684,11 @@ async fn serve_registered(
                         }
                     }
                 }
-                None => break Some(format!("relay link closed: {}", conn.dead_reason())),
+                None => break Some(pending_control_or_dead_reason(
+                    &mut control_rx,
+                    &conn,
+                    event_tx,
+                )),
             },
         }
     };
@@ -916,6 +971,106 @@ mod tests {
         assert!(matches!(
             parse_relay_address("host:notaport"),
             Err(RelayClientConnectError::Address(..))
+        ));
+    }
+
+    #[test]
+    fn control_frame_handler_folds_error_into_teardown_reason() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let outcome = handle_control_frame(
+            &event_tx,
+            Frame::Error {
+                stream_id: 0,
+                code: 0x000a,
+                message: "relay heartbeat timed out; the link was evicted".to_string(),
+            },
+        );
+        assert!(
+            matches!(outcome, ControlOutcome::Break(ref reason) if reason == "relay error 0x000a: relay heartbeat timed out; the link was evicted"),
+            "an error frame must tear the link down with the folded reason: {outcome:?}"
+        );
+        assert!(
+            matches!(
+                event_rx.try_recv(),
+                Ok(RelayClientEvent::RelayError { code: 0x000a, .. })
+            ),
+            "the structured relay error must be emitted before the teardown"
+        );
+    }
+
+    #[test]
+    fn control_frame_handler_forwards_presence_and_keeps_supervising() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let outcome = handle_control_frame(
+            &event_tx,
+            Frame::Presence {
+                node_id: "peer".to_string(),
+                online: false,
+            },
+        );
+        assert!(
+            matches!(outcome, ControlOutcome::Continue),
+            "presence keeps the link up: {outcome:?}"
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(RelayClientEvent::Presence { node_id, online: false }) if node_id == "peer"
+        ));
+    }
+
+    #[test]
+    fn control_frame_handler_ignores_unexpected_frames() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let outcome = handle_control_frame(&event_tx, Frame::Heartbeat);
+        assert!(matches!(outcome, ControlOutcome::Continue));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an unexpected control frame emits no event"
+        );
+    }
+
+    #[tokio::test]
+    async fn death_reason_surfaces_control_frames_queued_before_link_death() {
+        // The eviction race (issue #114): the mux reader queues the relay's
+        // `Error` frame and dies on the close that follows it, both before
+        // the supervisor observes the death. The drain must emit the queued
+        // frames and fold the reason instead of reporting a bare teardown.
+        let (client_io, server_io) = tokio::io::duplex(1024);
+        let (control_tx, mut control_rx) = mpsc::channel(16);
+        let conn = MuxConnection::spawn_relay_link(client_io, control_tx.clone());
+        drop(server_io);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !conn.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection should die when the peer half closes");
+
+        control_tx
+            .try_send(Frame::Presence {
+                node_id: "peer".to_string(),
+                online: true,
+            })
+            .expect("queue presence");
+        control_tx
+            .try_send(Frame::Error {
+                stream_id: 0,
+                code: 0x000a,
+                message: "evicted".to_string(),
+            })
+            .expect("queue eviction error");
+
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let reason = pending_control_or_dead_reason(&mut control_rx, &conn, &event_tx);
+        assert_eq!(reason, "relay error 0x000a: evicted");
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(RelayClientEvent::Presence { node_id, online: true }) if node_id == "peer"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(RelayClientEvent::RelayError { code: 0x000a, .. })
         ));
     }
 
