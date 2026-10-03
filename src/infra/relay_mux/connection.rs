@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use crate::infra::error_log::ERROR_LOG;
 
 use super::frame::{read_frame, write_frame, Frame, MAX_NODE_ID_LEN};
-use super::stream::{MuxStream, StreamState};
+use super::stream::{MuxResetError, MuxStream, StreamState};
 use super::{first_stream_id, owns_stream_id, MuxError, ACCEPT_QUEUE, OUTBOUND_QUEUE};
 
 /// Which side of the connection this handle is. The client allocates odd
@@ -55,6 +55,11 @@ pub(crate) struct StreamEntry {
     /// Full teardown by the relay (`CloseStream` / stream-scoped `Error`):
     /// pending and future reads/writes must fail with an error, not EOF.
     pub(crate) reset: Arc<AtomicBool>,
+    /// Relay `Error` frame payload for the teardown, when the teardown was an
+    /// `Error` frame (not `CloseStream`): the code+message surfaced to the
+    /// stream user. Stored before `reset` is set so a reader woken by the
+    /// inbound-sender drop never observes a payload-less reset.
+    pub(crate) reset_detail: Arc<Mutex<Option<MuxResetError>>>,
 }
 
 pub(crate) type StreamTable = HashMap<u32, StreamEntry>;
@@ -504,7 +509,7 @@ async fn reader_loop(
                 if !relay_link_or_fail(&shared, &table) {
                     return;
                 }
-                teardown_stream(&table, stream_id);
+                teardown_stream(&table, stream_id, None);
             }
             Frame::Error {
                 stream_id,
@@ -544,8 +549,9 @@ async fn reader_loop(
                     }
                 } else {
                     // Stream-scoped error (OpenStream refusal, leg-closed
-                    // race): reset exactly that stream; the link stays up.
-                    teardown_stream(&table, stream_id);
+                    // race): reset exactly that stream with the relay's
+                    // code+message attached; the link stays up.
+                    teardown_stream(&table, stream_id, Some(MuxResetError { code, message }));
                 }
             }
             // Presence transition of a watched node: forward to the control
@@ -777,11 +783,13 @@ async fn push_inbound_stream(
 }
 
 /// Full teardown of one stream on a relay link (`CloseStream` or a
-/// stream-scoped `Error`): the reset flag is stored first so a reader woken
-/// by the inbound-sender drop never observes a clean EOF, the entry is
-/// removed (dropping the sender closes the reader's queue), and a parked
-/// writer's waker is taken and woken only after the state lock is released.
-fn teardown_stream(table: &Mutex<StreamTable>, stream_id: u32) {
+/// stream-scoped `Error`): the teardown payload (a [`MuxResetError`] for
+/// `Error` frames, `None` for `CloseStream`) is stored first, then the reset
+/// flag is set so a reader woken by the inbound-sender drop never observes a
+/// clean EOF or a payload-less reset, the entry is removed (dropping the
+/// sender closes the reader's queue), and a parked writer's waker is taken
+/// and woken only after the state lock is released.
+fn teardown_stream(table: &Mutex<StreamTable>, stream_id: u32, detail: Option<MuxResetError>) {
     let entry = match lock_table(table) {
         Ok(mut table) => table.remove(&stream_id),
         Err(_) => None,
@@ -794,6 +802,11 @@ fn teardown_stream(table: &Mutex<StreamTable>, stream_id: u32) {
         ));
         return;
     };
+    if let Some(detail) = detail {
+        if let Ok(mut slot) = entry.reset_detail.lock() {
+            *slot = Some(detail);
+        }
+    }
     entry.reset.store(true, Ordering::SeqCst);
     let waker = entry
         .state

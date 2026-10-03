@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::infra::relay_mux::frame::write_frame;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
@@ -158,6 +159,69 @@ async fn relay_stream_error_resets_that_stream_only() {
     assert!(
         !mux.is_closed(),
         "a stream-scoped error must not kill the link"
+    );
+}
+
+#[tokio::test]
+async fn relay_stream_error_keeps_code_and_message() {
+    let (mux, mut raw, _control_rx) = raw_pair(4096);
+    let mut stream = mux.open_stream_to("node-b").await.expect("open");
+    let _raw_open = timeout(NO_DEADLOCK, read_frame(&mut raw))
+        .await
+        .expect("open frame within deadline")
+        .expect("open frame decodes");
+
+    write_frame(
+        &mut raw,
+        &Frame::Error {
+            stream_id: 1,
+            code: RelayErrorCode::TargetUnknown.wire_value(),
+            message: "target unknown".to_string(),
+        },
+    )
+    .await
+    .expect("raw stream error");
+
+    let mut buf = [0u8; 1];
+    let error = timeout(NO_DEADLOCK, stream.read(&mut buf))
+        .await
+        .expect("read should fail, not hang")
+        .expect_err("the refused stream must surface the reset");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    let reset = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<MuxResetError>())
+        .expect("the relay error code and message must ride the reset");
+    assert_eq!(reset.code, RelayErrorCode::TargetUnknown.wire_value());
+    assert_eq!(reset.message, "target unknown");
+    assert!(
+        !mux.is_closed(),
+        "a stream-scoped error must not kill the link"
+    );
+}
+
+#[tokio::test]
+async fn relay_close_stream_keeps_the_plain_reset_error() {
+    let (mux, mut raw, _control_rx) = raw_pair(4096);
+    let mut stream = mux.open_stream_to("node-b").await.expect("open");
+    let _raw_open = read_frame(&mut raw).await.expect("open frame decodes");
+
+    write_frame(&mut raw, &Frame::CloseStream { stream_id: 1 })
+        .await
+        .expect("raw close_stream");
+
+    let mut buf = [0u8; 1];
+    let error = timeout(NO_DEADLOCK, stream.read(&mut buf))
+        .await
+        .expect("read should fail, not hang")
+        .expect_err("CloseStream must reset the read leg");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    assert!(
+        error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<MuxResetError>())
+            .is_none(),
+        "a CloseStream teardown carries no relay error payload: {error}"
     );
 }
 

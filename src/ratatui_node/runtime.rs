@@ -135,6 +135,20 @@ pub(crate) fn probe_server_can_reach_peer(host: &str, port: u16) -> bool {
     false
 }
 
+/// Last connection-level relay error (`Frame::Error` on the persistent link):
+/// the wire code and the relay's message, stored for the console. Written
+/// only by `StateEventLoop` (each event replaces the prior snapshot).
+/// `dead_code`: read by the console rendering (issue #36 PR-3) and the
+/// state-loop test until then.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) struct RelayLinkErrorSnapshot {
+    /// The wire error code from `Frame::Error.code`.
+    pub(crate) code: u16,
+    /// The relay's human-readable explanation.
+    pub(crate) message: String,
+}
+
 pub(crate) struct SharedState {
     pub(crate) network: RemoteNetworkConfig,
     pub(crate) public_endpoint_override: Mutex<Option<String>>,
@@ -161,6 +175,10 @@ pub(crate) struct SharedState {
     /// from relay `Presence` transitions. Written only by `StateEventLoop`;
     /// a leaf lock (no ordering constraints against other SharedState locks).
     pub(crate) relay_presence: Mutex<HashMap<String, bool>>,
+    /// Last connection-level relay error on the persistent link. Written only
+    /// by `StateEventLoop`; a leaf lock (no ordering constraints against
+    /// other SharedState locks).
+    pub(crate) relay_error: Mutex<Option<RelayLinkErrorSnapshot>>,
     /// Relay client handle for `via = "relay"` dials. Installed once at
     /// startup (before the state loop and any dial can observe it) and only
     /// taken back at shutdown; a leaf lock, read-only afterwards.
@@ -249,6 +267,7 @@ impl SharedState {
             remote_node_connections: Mutex::new(HashMap::new()),
             remote_node_auth_rejections: Mutex::new(HashMap::new()),
             relay_presence: Mutex::new(HashMap::new()),
+            relay_error: Mutex::new(None),
             relay_client: Mutex::new(None),
         }))
     }
@@ -1467,6 +1486,9 @@ fn forward_relay_link_events(
                 relay_address,
                 reason,
             },
+            RelayClientEvent::RelayError { code, message } => {
+                StateEvent::RelayLinkError { code, message }
+            }
             RelayClientEvent::Presence { node_id, online } => {
                 if online {
                     StateEvent::RelayPeerOnline { node_id }
@@ -1549,6 +1571,56 @@ mod forwarder_tests {
             state_rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "no further events expected"
         );
+    }
+
+    /// `RelayError` maps 1:1 onto `StateEvent::RelayLinkError` (code and
+    /// message preserved) and still precedes the mapped `Disconnected` when
+    /// the relay errors the link.
+    #[test]
+    fn forwarder_maps_relay_error_before_disconnect() {
+        let (relay_tx, relay_rx) = tokio::sync::mpsc::channel::<RelayClientEvent>(16);
+        let (state_tx, state_rx) = std::sync::mpsc::channel::<StateEvent>();
+        let forwarder = std::thread::spawn(move || forward_relay_link_events(relay_rx, state_tx));
+
+        relay_tx
+            .try_send(RelayClientEvent::RelayError {
+                code: 0x0009,
+                message: "node access revoked by the relay operator".to_string(),
+            })
+            .expect("send relay error");
+        relay_tx
+            .try_send(RelayClientEvent::Disconnected {
+                relay_address: "relay.example:7475".to_string(),
+                reason: "relay error 0x0009: node access revoked by the relay operator".to_string(),
+            })
+            .expect("send disconnected");
+        drop(relay_tx);
+
+        let first = state_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first mapped event");
+        assert!(
+            matches!(
+                first,
+                StateEvent::RelayLinkError { code: 0x0009, ref message }
+                    if message == "node access revoked by the relay operator"
+            ),
+            "unexpected mapping: {first:?}"
+        );
+        let second = state_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second mapped event");
+        assert!(
+            matches!(
+                second,
+                StateEvent::RelayLinkDisconnected { ref relay_address, .. }
+                    if relay_address == "relay.example:7475"
+            ),
+            "unexpected mapping: {second:?}"
+        );
+        forwarder
+            .join()
+            .expect("forwarder should exit when the channel closes");
     }
 }
 

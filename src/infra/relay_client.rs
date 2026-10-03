@@ -156,6 +156,17 @@ pub enum RelayClientEvent {
         /// `true` when the node came online, `false` when it went offline.
         online: bool,
     },
+    /// The relay sent a connection-level `Error` frame on the link (register
+    /// refusal, revocation, eviction). Emitted immediately before the
+    /// `Disconnected` that tears the link down. The raw wire code is
+    /// preserved — type it via
+    /// [`crate::infra::relay_routing::error_code::RelayErrorCode::from_wire`].
+    RelayError {
+        /// The wire error code from `Frame::Error.code`.
+        code: u16,
+        /// The relay's human-readable explanation.
+        message: String,
+    },
 }
 
 /// Spawned relay client (issue #32). All connection state lives on the client
@@ -583,6 +594,15 @@ async fn serve_registered(
                     ERROR_LOG.log_error(format!(
                         "[relay-client] relay error: code 0x{code:04x}: {message}"
                     ));
+                    // Structured first: consumers see the code+message before
+                    // the disconnect reason folds them into a string.
+                    emit(
+                        event_tx,
+                        RelayClientEvent::RelayError {
+                            code,
+                            message: message.clone(),
+                        },
+                    );
                     break Some(format!("relay error 0x{code:04x}: {message}"));
                 }
                 Some(Frame::Presence { node_id, online }) => {
