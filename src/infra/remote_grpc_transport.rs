@@ -38,11 +38,66 @@ const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const OPERATOR_AUTH_CHALLENGE_SIZE: usize = 32;
 
+/// How an outbound node session reaches its peer (issue #35 PR-B).
+///
+/// `Direct` dials the peer's listening TCP port as before. `Relay` routes the
+/// inner-TLS connection through the pinned relay as a routed stream opened by
+/// the peer's certificate fingerprint (the same `tls_pin_sha256` the direct
+/// dial pins). Profiles store the choice as the `via` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteNodeVia {
+    /// Dial the peer directly over TCP (today's behavior).
+    Direct,
+    /// Reach the peer through the pinned relay's routed streams.
+    Relay,
+}
+
+impl RemoteNodeVia {
+    /// Parses a profile `via` value. The store validates with this at load
+    /// time; consumers of already-validated profiles may use the `Ok` arm.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "direct" => Ok(Self::Direct),
+            "relay" => Ok(Self::Relay),
+            other => Err(format!(
+                "unknown via value {other:?}; expected \"relay\" or \"direct\""
+            )),
+        }
+    }
+
+    /// The profile-file spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+        }
+    }
+}
+
+/// How the inner-TLS peer connection of a pinned dial is established.
+/// `pub(crate)` for the test dial seam in `via_connect`.
+#[derive(Clone)]
+pub(crate) enum PeerDialer {
+    /// Direct TCP dial (the pre-relay behavior).
+    Direct,
+    /// Open a relay-routed stream toward the peer's certificate fingerprint.
+    /// The blocking handle call is driven via `spawn_blocking` inside the
+    /// connector future (tonic polls it in async context).
+    Relay(std::sync::Arc<crate::infra::relay_client::RelayClientHandle>),
+}
+
+/// Error message for a relay-via dial when this node never enrolled a relay
+/// (kept verbatim: the connect UI surfaces it to the operator).
+const NO_RELAY_CONFIGURED: &str = "via = \"relay\" but no relay is configured — run waitagent relay join <address> <token> or set via = \"direct\"";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNodeSessionRequest {
     pub node_id: String,
     pub endpoint_uri: String,
     pub tls_pin_sha256: Option<String>,
+    /// Dial path for the inner-TLS connection; `None` means direct. Carried
+    /// through reconnects so a relay-via peer never falls back silently.
+    pub via: Option<RemoteNodeVia>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +142,7 @@ pub trait RemoteNodeTransport: Send + Sync {
     ) -> Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError>;
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct GrpcRemoteNodeTransport {
     /// Optional TLS certificate path for inbound listeners.
     tls_cert_path: Option<PathBuf>,
@@ -97,6 +152,9 @@ pub struct GrpcRemoteNodeTransport {
     /// When unset, the host default (`~/.waitagent/authorized_operators`) is
     /// used and inbound sessions skip operator authentication if it is empty.
     authorized_operators_dir: Option<PathBuf>,
+    /// Relay client for relay-via outbound dials. `None` makes a
+    /// `via = relay` request fail with the guiding enrollment error.
+    relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
 }
 
 pub struct GrpcRemoteNodeTransportGuard {
@@ -117,7 +175,18 @@ impl GrpcRemoteNodeTransport {
             tls_cert_path: None,
             tls_key_path: None,
             authorized_operators_dir: None,
+            relay_client: None,
         }
+    }
+
+    /// Attach the relay client used for `via = relay` outbound dials. Called
+    /// once at startup by the node runtime after the relay link spawns.
+    pub fn with_relay_client(
+        mut self,
+        relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
+    ) -> Self {
+        self.relay_client = relay_client;
+        self
     }
 
     /// Configure the transport to serve inbound connections over TLS using the
@@ -127,6 +196,7 @@ impl GrpcRemoteNodeTransport {
             tls_cert_path: Some(cert_path.into()),
             tls_key_path: Some(key_path.into()),
             authorized_operators_dir: None,
+            relay_client: None,
         }
     }
 
@@ -216,6 +286,18 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         request: OutboundNodeSessionRequest,
         event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
     ) -> Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError> {
+        let dialer = match request.via {
+            Some(RemoteNodeVia::Relay) => match &self.relay_client {
+                Some(handle) => PeerDialer::Relay(handle.clone()),
+                // Guiding error: fail before spawning the dial worker so the
+                // connect UI surfaces the enrollment hint immediately. The
+                // retry worker sees TransportFailed and keeps its cadence.
+                None => {
+                    return Err(RemoteNodeTransportError::new(NO_RELAY_CONFIGURED));
+                }
+            },
+            Some(RemoteNodeVia::Direct) | None => PeerDialer::Direct,
+        };
         let endpoint = self.endpoint(&tls_endpoint_uri(
             &request.endpoint_uri,
             &request.tls_pin_sha256,
@@ -254,7 +336,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
 
                 let tcp_start = Instant::now();
 
-                let channel = match connect_channel(&endpoint, &request.tls_pin_sha256).await {
+                let channel = match connect_channel(&endpoint, &request.tls_pin_sha256, &dialer).await {
                     Ok(channel) => {
                         let _t_tcp = tcp_start.elapsed();
                         channel
@@ -1037,10 +1119,11 @@ fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
 async fn connect_channel(
     endpoint: &Endpoint,
     tls_pin_sha256: &Option<String>,
+    dialer: &PeerDialer,
 ) -> Result<Channel, RemoteNodeTransportError> {
     match tls_pin_sha256 {
         Some(pin) => {
-            let connector = TlsPinConnector::new(pin.clone())?;
+            let connector = TlsPinConnector::new_with_dialer(pin.clone(), dialer.clone())?;
             endpoint
                 .connect_with_connector(connector)
                 .await
@@ -1066,11 +1149,16 @@ async fn connect_channel(
 struct TlsPinConnector {
     tls_connector: tokio_rustls::TlsConnector,
     server_name: rustls::pki_types::ServerName<'static>,
+    /// Peer connection dialer for the inner TLS: direct TCP or a relay-routed
+    /// stream (the routed target is the pinned fingerprint).
+    dialer: PeerDialer,
+    /// Target node fingerprint for relay-routed dials.
+    pin: String,
 }
 
 impl TlsPinConnector {
-    fn new(pin: String) -> Result<Self, RemoteNodeTransportError> {
-        let verifier = Arc::new(PinnedCertVerifier { pin });
+    fn new_with_dialer(pin: String, dialer: PeerDialer) -> Result<Self, RemoteNodeTransportError> {
+        let verifier = Arc::new(PinnedCertVerifier { pin: pin.clone() });
         let mut config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(verifier)
@@ -1081,6 +1169,8 @@ impl TlsPinConnector {
         Ok(Self {
             tls_connector: tokio_rustls::TlsConnector::from(Arc::new(config)),
             server_name,
+            dialer,
+            pin,
         })
     }
 }
@@ -1099,6 +1189,8 @@ impl Service<tonic::transport::Uri> for TlsPinConnector {
     fn call(&mut self, uri: tonic::transport::Uri) -> Self::Future {
         let connector = self.tls_connector.clone();
         let server_name = self.server_name.clone();
+        let dialer = self.dialer.clone();
+        let pin = self.pin.clone();
         Box::pin(async move {
             let authority = uri
                 .authority()
@@ -1113,7 +1205,31 @@ impl Service<tonic::transport::Uri> for TlsPinConnector {
                     (host.to_string(), port)
                 })
                 .unwrap_or_else(|| (authority.to_string(), 443));
-            let stream = peer_connection::dial_tcp_peer_connection(&host, port).await?;
+            let stream = match &dialer {
+                PeerDialer::Direct => {
+                    peer_connection::dial_tcp_peer_connection(&host, port).await?
+                }
+                PeerDialer::Relay(handle) => {
+                    // Tonic polls this future in async context; the handle
+                    // API blocks (its own runtime's block_on), so the dial
+                    // runs on the blocking thread pool.
+                    let handle = handle.clone();
+                    let target = pin.clone();
+                    let stream = tokio::task::spawn_blocking(move || {
+                        handle.open_stream(&target)
+                    })
+                    .await
+                    .map_err(|error| {
+                        std::io::Error::other(format!("relay dial task failed: {error}"))
+                    })?
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "relay dial to {pin} failed: {error}; the relay link reconnects and the dial retries"
+                        ))
+                    })?;
+                    stream
+                }
+            };
             let tls_stream =
                 match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, stream))
                     .await
@@ -1130,6 +1246,41 @@ impl Service<tonic::transport::Uri> for TlsPinConnector {
             Ok(hyper_util::rt::tokio::TokioIo::new(tls_stream))
         })
     }
+}
+
+/// Test-only seam for the relay E2E (issue #35): runs one pinned connector
+/// dial over the given dialer and returns the established inner-TLS stream.
+/// Exercising `Service::call` directly proves the dial works from the async
+/// context tonic polls it in (the relay branch bridges via `spawn_blocking`).
+/// The relay dialer ignores the URI host (it targets the pin); the direct
+/// dialer dials the URI authority as usual.
+#[cfg(test)]
+pub(crate) async fn test_dial_with_connector(
+    uri: &str,
+    pin: &str,
+    dialer: PeerDialer,
+) -> Result<tokio_rustls::client::TlsStream<Box<dyn peer_connection::PeerConnection>>, std::io::Error>
+{
+    use tower::Service;
+    let mut connector = TlsPinConnector::new_with_dialer(pin.to_string(), dialer)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let uri: tonic::transport::Uri = uri.parse().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{error}"))
+    })?;
+    let io = Service::call(&mut connector, uri).await?;
+    Ok(io.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn test_relay_dialer(
+    handle: std::sync::Arc<crate::infra::relay_client::RelayClientHandle>,
+) -> PeerDialer {
+    PeerDialer::Relay(handle)
+}
+
+#[cfg(test)]
+pub(crate) fn test_direct_dialer() -> PeerDialer {
+    PeerDialer::Direct
 }
 
 #[derive(Debug)]
@@ -1240,6 +1391,34 @@ mod tests {
     use tokio::sync::mpsc as tokio_mpsc;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::Request;
+
+    #[test]
+    fn via_relay_without_a_relay_handle_fails_with_the_guiding_error() {
+        let transport = GrpcRemoteNodeTransport::new();
+        let (event_tx, _event_rx) = mpsc::channel::<RemoteNodeTransportEvent>();
+        let result = transport.connect_outbound(
+            OutboundNodeSessionRequest {
+                node_id: "peer".to_string(),
+                endpoint_uri: "tls://127.0.0.1:7474".to_string(),
+                tls_pin_sha256: Some("deadbeef".to_string()),
+                via: Some(super::RemoteNodeVia::Relay),
+            },
+            event_tx,
+        );
+        let error = match result {
+            Ok(_guard) => panic!("a relay-via dial without a handle must fail before dialing"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("via = \"relay\"") && message.contains("relay join"),
+            "the error guides enrollment: {message}"
+        );
+        assert!(
+            message.contains("via = \"direct\""),
+            "the error names the escape hatch: {message}"
+        );
+    }
 
     #[test]
     fn inbound_listener_reports_session_events_and_forwards_outbound_envelopes() {
@@ -1538,6 +1717,7 @@ mod tests {
                     node_id: "peer-dial".to_string(),
                     endpoint_uri: format!("http://{bind_addr}"),
                     tls_pin_sha256: None,
+                    via: None,
                 },
                 event_tx,
             )
@@ -1579,6 +1759,7 @@ mod tests {
                 node_id: "peer-silent-hello".to_string(),
                 endpoint_uri: format!("http://{bind_addr}"),
                 tls_pin_sha256: None,
+                via: None,
             },
             event_tx,
         );

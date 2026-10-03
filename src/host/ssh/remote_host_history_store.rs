@@ -74,12 +74,25 @@ pub struct RemoteHostProfile {
     /// probed yet (profiles written before shell detection existed); the
     /// connect flow detects and caches it on the first SSH bootstrap.
     pub remote_shell: Option<RemoteShellKind>,
+    /// Dial path for the node-to-node inner TLS: "relay" routes through the
+    /// pinned relay, "direct" dials the peer's TCP port (the default when
+    /// absent). Validated at load.
+    pub via: Option<String>,
 }
 
 impl RemoteHostProfile {
     /// Port the remote `sshd` listens on; defaults to 22 when unset.
     pub fn ssh_port(&self) -> u16 {
         self.ssh_port.unwrap_or(22)
+    }
+
+    /// Dial path for the node-to-node inner TLS. The store validates the
+    /// `via` string at load time; a value that somehow bypasses validation
+    /// falls back to direct rather than failing the whole connect.
+    pub fn via(&self) -> Option<crate::infra::remote_grpc_transport::RemoteNodeVia> {
+        self.via
+            .as_deref()
+            .and_then(|value| crate::infra::remote_grpc_transport::RemoteNodeVia::parse(value).ok())
     }
 }
 
@@ -259,6 +272,9 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         if let Some(remote_shell) = &host.remote_shell {
             push_string(&mut out, "remote_shell", remote_shell.as_str());
         }
+        if let Some(via) = &host.via {
+            push_string(&mut out, "via", via);
+        }
         out.push('\n');
     }
     out
@@ -332,6 +348,7 @@ struct RawProfile {
     use_install_proxy: Option<String>,
     host_kind: Option<String>,
     remote_shell: Option<String>,
+    via: Option<String>,
 }
 
 impl RawProfile {
@@ -353,6 +370,7 @@ impl RawProfile {
             "use_install_proxy" => self.use_install_proxy = Some(value),
             "host_kind" => self.host_kind = Some(value),
             "remote_shell" => self.remote_shell = Some(value),
+            "via" => self.via = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -395,6 +413,7 @@ impl RawProfile {
                 .unwrap_or(true),
             host_kind: parse_host_kind(self.host_kind)?,
             remote_shell: parse_remote_shell(self.remote_shell)?,
+            via: parse_via(self.via)?,
         })
     }
 }
@@ -496,6 +515,18 @@ fn parse_remote_shell(
     value
         .parse::<RemoteShellKind>()
         .map(Some)
+        .map_err(RemoteHostHistoryStoreError::new)
+}
+
+/// Validates the `via` dial-path key: exactly `relay` or `direct`, absent by
+/// default. The guiding error names both legal values so a hand-edited file
+/// is fixable from the message alone.
+fn parse_via(value: Option<String>) -> Result<Option<String>, RemoteHostHistoryStoreError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    crate::infra::remote_grpc_transport::RemoteNodeVia::parse(&value)
+        .map(|via| Some(via.as_str().to_string()))
         .map_err(RemoteHostHistoryStoreError::new)
 }
 
@@ -686,6 +717,7 @@ mod tests {
                 tls_pin_sha256: None,
                 host_kind: RemoteHostKind::Cloud,
                 remote_shell: None,
+                via: None,
             })
             .unwrap();
         store
@@ -706,6 +738,7 @@ mod tests {
                 tls_pin_sha256: None,
                 host_kind: RemoteHostKind::Lan,
                 remote_shell: None,
+                via: None,
             })
             .unwrap();
 
@@ -745,6 +778,7 @@ mod tests {
                 tls_pin_sha256: None,
                 host_kind: RemoteHostKind::Lan,
                 remote_shell: None,
+                via: None,
             })
             .unwrap();
 
@@ -814,6 +848,93 @@ host_kind = "lan"
         assert_eq!(loaded.hosts.len(), 1);
         assert_eq!(loaded.hosts[0].name, "legacy");
         assert_eq!(loaded.hosts[0].remote_shell, None);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_via() {
+        let path = unique_path("remote-hosts-via.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        let mut relayed = profile("relayed", "10.1.29.140");
+        relayed.via = Some("relay".to_string());
+        let direct = profile("direct", "10.1.29.141");
+        store.upsert_profile(relayed).unwrap();
+        store.upsert_profile(direct).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("via = \"relay\""));
+        assert!(
+            !content.contains("via = \"direct\""),
+            "absent via is not written"
+        );
+
+        let loaded = store.load().unwrap();
+        let relayed = loaded.hosts.iter().find(|h| h.name == "relayed").unwrap();
+        let direct = loaded.hosts.iter().find(|h| h.name == "direct").unwrap();
+        assert_eq!(relayed.via, Some("relay".to_string()));
+        assert_eq!(
+            relayed.via(),
+            Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay)
+        );
+        assert_eq!(direct.via, None);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_without_via_field_loads_as_direct() {
+        let path = unique_path("remote-hosts-legacy-no-via.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "legacy"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+"#,
+        )
+        .unwrap();
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+
+        assert_eq!(loaded.hosts.len(), 1);
+        assert_eq!(loaded.hosts[0].via, None);
+        assert_eq!(loaded.hosts[0].via(), None);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_rejects_an_unknown_via_value() {
+        let path = unique_path("remote-hosts-bad-via.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "typo"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+via = "relays"
+"#,
+        )
+        .unwrap();
+
+        let error = RemoteHostHistoryStore::new(&path)
+            .load()
+            .expect_err("an unknown via value must fail the load");
+        let message = error.to_string();
+        assert!(
+            message.contains("\"relay\"") && message.contains("\"direct\""),
+            "the error names both legal values: {message}"
+        );
 
         crate::infra::best_effort::remove_file(path);
     }

@@ -659,6 +659,9 @@ fn connect_grpc_node_session(
                 node_id: node_id.to_string(),
                 endpoint_uri: endpoint_uri.to_string(),
                 tls_pin_sha256: None,
+                // Legacy helper: the relay handle is not threaded here; the
+                // modern ingress path carries via from the host profile.
+                via: None,
             },
             event_tx,
         )

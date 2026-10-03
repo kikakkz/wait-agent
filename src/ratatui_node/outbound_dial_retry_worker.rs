@@ -130,6 +130,7 @@ mod tests {
             node_id: "test-node".to_string(),
             endpoint_uri: "tls://127.0.0.1:7474".to_string(),
             tls_pin_sha256: Some("deadbeef".to_string()),
+            via: Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay),
         }
     }
 
@@ -188,6 +189,41 @@ mod tests {
             extra, 0,
             "expected no further attempts after cancellation, got {extra}"
         );
+    }
+
+    #[test]
+    fn retry_worker_preserves_via_on_every_resend() {
+        let (ingress_tx, ingress_rx) = mpsc::channel::<InternalEvent>();
+        let (state_tx, _state_rx) = mpsc::channel::<StateEvent>();
+        let worker = OutboundDialRetryWorker::start(
+            "test-node".to_string(),
+            dummy_request(),
+            ingress_tx,
+            state_tx,
+        );
+
+        // Let a couple of attempts fire, then cancel.
+        std::thread::sleep(Duration::from_millis(700));
+        let _ = worker.cancel_tx.send(());
+
+        let events: Vec<InternalEvent> = ingress_rx.try_iter().collect();
+        assert!(
+            !events.is_empty(),
+            "at least one dial attempt should be queued"
+        );
+        for event in events {
+            match event {
+                InternalEvent::InitiateOutboundConnection { request } => {
+                    assert_eq!(
+                        request.via,
+                        Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay),
+                        "the clone carries the dial path into every attempt"
+                    );
+                    assert_eq!(request.endpoint_uri, "tls://127.0.0.1:7474");
+                }
+                _other => panic!("unexpected internal event"),
+            }
+        }
     }
 
     #[test]

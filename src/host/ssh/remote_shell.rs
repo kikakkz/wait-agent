@@ -308,6 +308,7 @@ mod tests {
             tls_pin_sha256: None,
             host_kind: crate::host::ssh::remote_host_history_store::RemoteHostKind::Lan,
             remote_shell: None,
+            via: None,
         }
     }
 

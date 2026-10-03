@@ -515,6 +515,8 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                 node_id: node_id.clone(),
                 endpoint_uri: endpoint_uri.clone(),
                 tls_pin_sha256: None,
+                // Authority publication dials stay direct in this slice.
+                via: None,
             },
             transport_event_tx,
         ) {

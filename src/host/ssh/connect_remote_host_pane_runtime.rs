@@ -2285,6 +2285,15 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
             "Saved",
             Style::default().bg(Color::Green).fg(Color::Black),
         ));
+        if state.selected_profile().and_then(|profile| profile.via())
+            == Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay)
+        {
+            content.push(Span::raw(" "));
+            content.push(Span::styled(
+                "via relay",
+                Style::default().bg(Color::Magenta).fg(Color::Black),
+            ));
+        }
     }
 
     let star = if state.selected >= state.profiles.len() {
@@ -3569,6 +3578,12 @@ where
         remote_shell: state
             .selected_profile()
             .and_then(|profile| profile.remote_shell),
+        // Preserve an existing via choice; new entries self-describe as
+        // direct so the file is explicit about the dial path.
+        via: state
+            .selected_profile()
+            .and_then(|profile| profile.via.clone())
+            .or_else(|| Some("direct".to_string())),
     };
 
     history_store
@@ -6176,6 +6191,7 @@ mod tests {
             tls_pin_sha256: None,
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
+            via: None,
         };
 
         let mut state = ConnectRemoteHostState::load();
@@ -6222,6 +6238,7 @@ mod tests {
             tls_pin_sha256: Some("deadbeef".to_string()),
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
+            via: None,
         };
 
         let mut state = ConnectRemoteHostState::load();

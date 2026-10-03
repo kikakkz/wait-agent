@@ -348,6 +348,7 @@ where
             node_id: authority_node_id.clone(),
             endpoint_uri: format!("tls://{}:{}", profile.host, bootstrap_result.remote_port),
             tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
+            via: profile.via(),
         };
         ERROR_LOG.log(format!(
             "[remote-host-connect] queuing bootstrap dial for {}:{} node={}",
@@ -440,6 +441,7 @@ where
             node_id: authority_node_id.clone(),
             endpoint_uri: format!("tls://{}:{}", profile.host, port),
             tls_pin_sha256: Some(tls_pin_sha256),
+            via: profile.via(),
         };
 
         ERROR_LOG.log(format!(
@@ -686,6 +688,9 @@ fn profile_from_direct_args(
         tls_pin_sha256: None,
         host_kind: host_kind.unwrap_or_default(),
         remote_shell: None,
+        // CLI-driven ad-hoc connects stay direct; the profile file is the
+        // phase-1 setter for relay-via.
+        via: None,
     })
 }
 

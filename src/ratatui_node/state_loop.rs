@@ -909,6 +909,7 @@ fn handle_remote_session_disconnected(
                             endpoint_uri: format!("tls://{}:{}", info.host, info.port),
                             tls_pin_sha256: Some(info.tls_pin_sha256.clone())
                                 .filter(|s| !s.is_empty()),
+                            via: info.via,
                         };
                         let ingress_tx = {
                             let guard = shared
@@ -1130,6 +1131,7 @@ fn handle_remote_node_offline(
                     node_id: node_id.clone(),
                     endpoint_uri: format!("tls://{}:{}", info.host, info.port),
                     tls_pin_sha256: Some(info.tls_pin_sha256.clone()).filter(|s| !s.is_empty()),
+                    via: info.via,
                 };
                 let ingress_tx = {
                     let guard = shared
@@ -1297,6 +1299,7 @@ fn reset_outbound_dial_retry_worker(
         node_id: node_id.clone(),
         endpoint_uri: format!("tls://{}:{}", info.host, info.port),
         tls_pin_sha256: Some(info.tls_pin_sha256.clone()).filter(|s| !s.is_empty()),
+        via: info.via,
     };
     let ingress_tx = {
         let guard = shared
@@ -2169,6 +2172,7 @@ fn perform_remote_host_connect(
         tls_pin_sha256: profile.tls_pin_sha256.clone().unwrap_or_default(),
         profile_name: profile.name.clone(),
         server_can_reach_peer: true,
+        via: profile.via(),
     });
 
     remote_owner
@@ -2270,6 +2274,7 @@ fn dial_sibling_nodes(
             node_id,
             endpoint_uri: format!("tls://{}:{}", profile.host, port),
             tls_pin_sha256: Some(tls_pin_sha256.clone()).filter(|pin| !pin.is_empty()),
+            via: profile.via(),
         };
         if ingress_tx
             .send(InternalEvent::InitiateOutboundConnection { request })
@@ -3469,6 +3474,7 @@ mod state_loop_tests {
                 tls_pin_sha256: String::new(),
                 profile_name: "test-profile".to_string(),
                 server_can_reach_peer: false,
+                via: None,
             },
         );
 

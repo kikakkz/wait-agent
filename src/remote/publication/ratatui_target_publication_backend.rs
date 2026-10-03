@@ -255,6 +255,8 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
                     tls_pin_sha256: String::new(),
                     profile_name: String::new(),
                     server_can_reach_peer,
+                    // Inbound-connect authorities are dialed directly.
+                    via: None,
                 },
             });
         Ok(())
