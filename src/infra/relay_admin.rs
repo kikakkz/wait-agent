@@ -22,9 +22,7 @@ use tokio::sync::watch;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::relay_capacity::{RelayCapacityConfig, RelayUsage, SharedUsageMeter};
 use crate::infra::relay_connection_table::RelayConnectionTable;
-use crate::infra::relay_enrollment::{
-    remove_authorized_node, EnrollmentTokenStore, DEFAULT_DEPLOY_TTL, DEFAULT_INVITE_TTL,
-};
+use crate::infra::relay_enrollment::{remove_authorized_node, EnrollmentTokenStore};
 use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::RoutingTable;
 use crate::platform::remote_ipc::{
@@ -223,18 +221,20 @@ pub(crate) fn handle_relay_admin_command(
 
 /// `invite`: mints the enrollment token, persists the store (best-effort —
 /// a persist failure is logged, never fatal), and answers with the raw
-/// token plus its unix expiry.
+/// token plus its unix expiry. Configured TTLs come from the serve config;
+/// per-request `--ttl` overrides them.
 fn handle_invite(
     ttl_secs: Option<u64>,
     deploy: bool,
     tokens: &Arc<EnrollmentTokenStore>,
     tokens_path: &Path,
+    token_ttls: &crate::infra::relay_server::TokenTtlConfig,
 ) -> RelayAdminResponse {
     let (ttl, one_time) = match (deploy, ttl_secs) {
         (true, Some(secs)) => (Duration::from_secs(secs), false),
-        (true, None) => (DEFAULT_DEPLOY_TTL, false),
+        (true, None) => (token_ttls.deploy, false),
         (false, Some(secs)) => (Duration::from_secs(secs), true),
-        (false, None) => (DEFAULT_INVITE_TTL, true),
+        (false, None) => (token_ttls.invite, true),
     };
     let minted = tokens.mint(one_time, ttl);
     if let Err(error) = tokens.persist(tokens_path) {
@@ -290,6 +290,7 @@ pub(crate) struct RelayAdminContext {
     pub(crate) tokens_path: PathBuf,
     pub(crate) whitelist_dir: PathBuf,
     pub(crate) presence: Arc<PresenceHub>,
+    pub(crate) token_ttls: crate::infra::relay_server::TokenTtlConfig,
 }
 
 /// Accept loop for the admin socket. `shutdown_tx` is the server-wide
@@ -324,6 +325,7 @@ pub(crate) async fn run_admin_listener(
                         tokens_path,
                         whitelist_dir,
                         presence,
+                        token_ttls,
                     } = context;
                     let mut bytes = Vec::new();
                     if let Err(error) = stream.read_to_end(&mut bytes).await {
@@ -373,7 +375,7 @@ pub(crate) async fn run_admin_listener(
                             response
                         }
                         Ok(RelayAdminCommand::Invite { ttl_secs, deploy }) => {
-                            handle_invite(ttl_secs, deploy, &tokens, &tokens_path)
+                            handle_invite(ttl_secs, deploy, &tokens, &tokens_path, &token_ttls)
                         }
                         Ok(RelayAdminCommand::Remove { fingerprint }) => {
                             handle_remove(&fingerprint, &whitelist_dir, &table, &presence)
@@ -499,7 +501,13 @@ mod tests {
                 .unwrap_or("test")
                 .replace(":", "_")
         ));
-        let response = handle_invite(None, false, &tokens, &path);
+        let response = handle_invite(
+            None,
+            false,
+            &tokens,
+            &path,
+            &crate::infra::relay_server::TokenTtlConfig::default(),
+        );
         assert!(response.ok);
         let message = response.message.expect("invite answers with a message");
         let token = message
@@ -520,6 +528,71 @@ mod tests {
         assert_eq!(
             tokens.redeem(token, now),
             crate::infra::relay_enrollment::RedeemOutcome::EnrollOk { one_time: true }
+        );
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn invite_honors_configured_token_ttls() {
+        let tokens = Arc::new(EnrollmentTokenStore::new());
+        let path = std::env::temp_dir().join(format!(
+            "waitagent-admin-invite-ttls-{}-{}.json",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        let ttls = crate::infra::relay_server::TokenTtlConfig {
+            invite: Duration::from_secs(1234),
+            deploy: Duration::from_secs(987_654),
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+
+        let invite = handle_invite(None, false, &tokens, &path, &ttls);
+        let message = invite.message.expect("invite answers with a message");
+        let expiry: u64 = message
+            .lines()
+            .find_map(|line| line.strip_prefix("expires_at: "))
+            .expect("expiry present")
+            .parse()
+            .expect("expiry is unix seconds");
+        assert!(
+            (expiry - now).abs_diff(1234) <= 1,
+            "invite TTL comes from the config: {expiry} vs now+1234"
+        );
+
+        let deploy = handle_invite(None, true, &tokens, &path, &ttls);
+        let message = deploy.message.expect("deploy answers with a message");
+        let expiry: u64 = message
+            .lines()
+            .find_map(|line| line.strip_prefix("expires_at: "))
+            .expect("expiry present")
+            .parse()
+            .expect("expiry is unix seconds");
+        assert!(
+            (expiry - now).abs_diff(987_654) <= 1,
+            "deploy TTL comes from the config: {expiry} vs now+987654"
+        );
+
+        // An explicit --ttl still beats the configured default.
+        let override_invite = handle_invite(Some(60), false, &tokens, &path, &ttls);
+        let message = override_invite
+            .message
+            .expect("invite answers with a message");
+        let expiry: u64 = message
+            .lines()
+            .find_map(|line| line.strip_prefix("expires_at: "))
+            .expect("expiry present")
+            .parse()
+            .expect("expiry is unix seconds");
+        assert!(
+            (expiry - now).abs_diff(60) <= 1,
+            "--ttl overrides the configured default: {expiry}"
         );
         crate::infra::best_effort::remove_file(&path);
     }

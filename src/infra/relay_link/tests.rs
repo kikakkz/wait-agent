@@ -234,6 +234,8 @@ pub(super) async fn start_test_server_with_capacity(
         lifecycle,
         capacity,
         tokens_path: dir.join("relay-enroll-tokens.json"),
+        admin_socket: None,
+        token_ttls: crate::infra::relay_server::TokenTtlConfig::default(),
     };
     let started = start(config.clone()).await.expect("server should start");
     RunningServer {
