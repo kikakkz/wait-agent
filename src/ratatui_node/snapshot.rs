@@ -12,7 +12,25 @@ fn is_remote_target(target: &str, shared: &SharedState) -> bool {
         .unwrap_or(false)
 }
 
-use super::runtime::SharedState;
+use super::runtime::{RelayLinkErrorSnapshot, SharedState};
+
+/// Console-facing view of the last connection-level relay error. Rendered
+/// from the structured snapshot channel; carries the wire code plus the
+/// relay's message so unassigned (future) codes stay explainable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelayErrorView {
+    pub code: u16,
+    pub message: String,
+}
+
+impl RelayErrorView {
+    pub(crate) fn from_snapshot(snapshot: RelayLinkErrorSnapshot) -> Self {
+        Self {
+            code: snapshot.code,
+            message: snapshot.message,
+        }
+    }
+}
 
 /// Status returned by the STATUS one-shot command.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -136,6 +154,10 @@ pub struct SessionView {
     /// unwatched/unknown peers. Filled by `build_snapshot`.
     #[serde(default)]
     pub relay_presence: Option<String>,
+    /// Last connection-level relay link error, attached by `build_snapshot`
+    /// to relay-routed sessions only (`relay_presence` is `Some`).
+    #[serde(default)]
+    pub relay_error: Option<RelayErrorView>,
 }
 
 impl SessionView {
@@ -167,6 +189,7 @@ impl SessionView {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             relay_presence: None,
+            relay_error: None,
         }
     }
 
@@ -221,6 +244,9 @@ pub struct FooterState {
     /// Relay-watched peers in total (online + offline).
     #[serde(default)]
     pub relay_watch_count: usize,
+    /// Last connection-level relay link error, for the console status line.
+    #[serde(default)]
+    pub relay_error: Option<RelayErrorView>,
 }
 
 /// A single entry in the footer session list.
@@ -318,6 +344,21 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
     let relay_peers_online = presence_guard.values().filter(|online| **online).count();
     drop(presence_guard);
 
+    // Relay link error: read once (leaf lock), surfaced in the footer and
+    // attached to every relay-routed session (`relay_presence` is `Some`) —
+    // a link-level error concerns exactly those.
+    let relay_error = shared
+        .relay_error
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .map(RelayErrorView::from_snapshot);
+    for session in sessions.iter_mut() {
+        if session.relay_presence.is_some() {
+            session.relay_error = relay_error.clone();
+        }
+    }
+
     RatatuiSnapshot {
         session_name: active_session_id.clone(),
         client_count,
@@ -339,6 +380,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                 .count(),
             relay_peers_online,
             relay_watch_count,
+            relay_error,
         },
         sessions,
         active_target,
@@ -393,6 +435,7 @@ mod snapshot_tests {
                 remote_count: 0,
                 relay_peers_online: 0,
                 relay_watch_count: 0,
+                relay_error: None,
             },
             sessions: vec![sample_session_view()],
             active_target: Some("local#17474:1".to_string()),
@@ -412,9 +455,17 @@ mod snapshot_tests {
         let mut snap = sample_snapshot();
         snap.footer.relay_peers_online = 1;
         snap.footer.relay_watch_count = 2;
+        snap.footer.relay_error = Some(RelayErrorView {
+            code: 0x0009,
+            message: "node access revoked by the relay operator".to_string(),
+        });
         let mut remote_view = sample_session_view();
         remote_view.transport = "remote".to_string();
         remote_view.relay_presence = Some("online".to_string());
+        remote_view.relay_error = Some(RelayErrorView {
+            code: 0x0009,
+            message: "node access revoked by the relay operator".to_string(),
+        });
         snap.sessions.push(remote_view);
         let json = serde_json::to_string(&snap).expect("serialize snapshot");
         let decoded: RatatuiSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
@@ -424,6 +475,125 @@ mod snapshot_tests {
         assert_eq!(
             decoded.sessions[1].relay_presence.as_deref(),
             Some("online")
+        );
+        assert_eq!(
+            decoded.sessions[1].relay_error.as_ref().map(|e| e.code),
+            Some(0x0009)
+        );
+    }
+
+    fn sample_remote_record() -> ManagedSessionRecord {
+        ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer("peer#1", "1"),
+            selector: None,
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: None,
+            opened_by: Vec::new(),
+            attached_clients: 1,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            display_command_name: None,
+            agent_command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Input,
+        }
+    }
+
+    fn sample_local_record() -> ManagedSessionRecord {
+        ManagedSessionRecord {
+            address: ManagedSessionAddress::local("local#17474", "1"),
+            selector: None,
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: None,
+            opened_by: Vec::new(),
+            attached_clients: 1,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            display_command_name: Some("demo".to_string()),
+            agent_command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Input,
+        }
+    }
+
+    #[test]
+    fn snapshot_relay_error_reaches_routed_sessions_only() {
+        use super::super::runtime::{
+            RelayLinkErrorSnapshot, RemoteNodeConnectionInfo, RemoteNodeConnectionMode,
+        };
+        use crate::cli::RemoteNetworkConfig;
+
+        let shared = SharedState::new(RemoteNetworkConfig::default())
+            .expect("SharedState::new should succeed");
+        let local = sample_local_record();
+        let remote = sample_remote_record();
+        {
+            let mut guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(local.address.qualified_target(), local);
+            guard.insert(remote.address.qualified_target(), remote);
+        }
+        shared.record_remote_node_connection(
+            "peer#1",
+            RemoteNodeConnectionInfo {
+                mode: RemoteNodeConnectionMode::OutboundDial,
+                host: "peer".to_string(),
+                port: 1,
+                tls_pin_sha256: "DEADBEEF".to_string(),
+                profile_name: "profile".to_string(),
+                server_can_reach_peer: false,
+                via: None,
+            },
+        );
+        shared
+            .relay_presence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("deadbeef".to_string(), true);
+        *shared.relay_error.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(RelayLinkErrorSnapshot {
+                code: 0x0009,
+                message: "node access revoked by the relay operator".to_string(),
+            });
+
+        let snapshot = build_snapshot(0, &shared);
+        let routed = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.transport == "remote")
+            .expect("remote session in snapshot");
+        assert_eq!(
+            routed.relay_error,
+            Some(RelayErrorView {
+                code: 0x0009,
+                message: "node access revoked by the relay operator".to_string(),
+            }),
+            "a relay-routed session carries the link error"
+        );
+        assert_eq!(routed.relay_presence.as_deref(), Some("online"));
+        let local_view = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.transport == "local")
+            .expect("local session in snapshot");
+        assert_eq!(
+            local_view.relay_error, None,
+            "a local session is not relay-routed and carries no link error"
+        );
+        assert_eq!(
+            snapshot.footer.relay_error,
+            Some(RelayErrorView {
+                code: 0x0009,
+                message: "node access revoked by the relay operator".to_string(),
+            }),
+            "the footer carries the link error once"
         );
     }
 

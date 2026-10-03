@@ -269,6 +269,7 @@ mod tests {
                 attached_clients: 1,
                 current_path: None,
                 relay_presence: None,
+                relay_error: None,
             }],
             ..Default::default()
         }

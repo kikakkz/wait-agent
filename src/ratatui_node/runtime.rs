@@ -137,10 +137,8 @@ pub(crate) fn probe_server_can_reach_peer(host: &str, port: u16) -> bool {
 
 /// Last connection-level relay error (`Frame::Error` on the persistent link):
 /// the wire code and the relay's message, stored for the console. Written
-/// only by `StateEventLoop` (each event replaces the prior snapshot).
-/// `dead_code`: read by the console rendering (issue #36 PR-3) and the
-/// state-loop test until then.
-#[allow(dead_code)]
+/// only by `StateEventLoop` (each event replaces the prior snapshot); read
+/// by `build_snapshot` for the structured console rendering.
 #[derive(Clone)]
 pub(crate) struct RelayLinkErrorSnapshot {
     /// The wire error code from `Frame::Error.code`.
