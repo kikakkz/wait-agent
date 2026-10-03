@@ -17,7 +17,7 @@ use crate::infra::node_credentials::{self, NodeCredentialPaths};
 use crate::infra::relay_capacity::RelayCapacityConfig;
 use crate::infra::relay_connection_table::{RelayLifecycleConfig, RelayLifecycleEvent};
 use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
-use crate::infra::relay_routing::error_code;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::relay_server::{start, RelayServeConfig, RelayServerHandle};
 
 mod admin;
@@ -483,6 +483,16 @@ async fn register_then_heartbeat_silence_evicts() {
         other => panic!("expected EvictedOffline, got {other:?}"),
     }
     active_connections_reaches(&server.server, 0).await;
+    // The evicted link is told why before teardown (issue #36).
+    let frame = read_link_frame(&mut link).await;
+    assert!(
+        matches!(
+            frame,
+            Frame::Error { stream_id: 0, code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::HeartbeatLost)
+        ),
+        "the evicted link must be told its heartbeat was lost, got {frame:?}"
+    );
     expect_link_closed(&mut link).await;
     server.server.shutdown().await;
 }
@@ -621,9 +631,9 @@ async fn data_on_unknown_stream_gets_error_and_link_stays() {
             read_link_frame(&mut link).await,
             Frame::Error {
                 stream_id: 1,
-                code: error_code::STREAM_UNKNOWN,
+                code,
                 ..
-            }
+            } if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::StreamUnknown)
         ),
         "data on a stream that was never opened must get STREAM_UNKNOWN"
     );

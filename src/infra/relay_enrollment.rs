@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::relay_mux::frame::Frame;
-use crate::infra::relay_routing::error_code;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 
 /// Default TTL for one-time invite tokens.
 // #35 surfaces these via relay.toml token parameters.
@@ -213,7 +213,7 @@ pub fn handle_enrollment_frame(
             ));
             return Some(Frame::Error {
                 stream_id: 0,
-                code: error_code::TOKEN_INVALID,
+                code: RelayErrorCode::TokenInvalid.wire_value(),
                 message: "first frame must be Enroll".to_string(),
             });
         }
@@ -233,12 +233,12 @@ pub fn handle_enrollment_frame(
         }
         RedeemOutcome::Invalid => Some(Frame::Error {
             stream_id: 0,
-            code: error_code::TOKEN_INVALID,
+            code: RelayErrorCode::TokenInvalid.wire_value(),
             message: "enrollment token is unknown or already used".to_string(),
         }),
         RedeemOutcome::Expired => Some(Frame::Error {
             stream_id: 0,
-            code: error_code::TOKEN_EXPIRED,
+            code: RelayErrorCode::TokenExpired.wire_value(),
             message: "enrollment token has expired".to_string(),
         }),
     }
@@ -495,10 +495,8 @@ mod tests {
         assert!(
             matches!(
                 again,
-                Some(Frame::Error {
-                    code: error_code::TOKEN_INVALID,
-                    ..
-                })
+                Some(Frame::Error { code, .. })
+                    if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenInvalid)
             ),
             "reused token must be rejected, got {again:?}"
         );
@@ -525,10 +523,8 @@ mod tests {
         );
         assert!(matches!(
             response,
-            Some(Frame::Error {
-                code: error_code::TOKEN_EXPIRED,
-                ..
-            })
+            Some(Frame::Error { code, .. })
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenExpired)
         ));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -548,10 +544,8 @@ mod tests {
         );
         assert!(matches!(
             response,
-            Some(Frame::Error {
-                code: error_code::TOKEN_INVALID,
-                ..
-            })
+            Some(Frame::Error { code, .. })
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenInvalid)
         ));
     }
 

@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::infra::relay_mux::frame::Frame;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::relay_scheduler::SchedulerIngress;
 
 /// Default eviction deadline: three missed 10s beats = 30s of silence.
@@ -194,11 +196,15 @@ impl RelayConnectionTable {
         }
     }
 
-    /// Removes the entry for `node_id` and signals its link task to retire —
-    /// the `relay remove` revocation path (docs/relay-design.md node 生命周
-    /// 期). Mirrors the replace-retire logic in `register`. Returns whether a
-    /// live entry was removed.
-    pub(crate) fn retire(&self, node_id: &str) -> bool {
+    /// Removes the entry for `node_id` and signals its link task to retire,
+    /// first queueing a `Frame::Error` carrying `code` on the removed link's
+    /// outbound queue, so the node learns why the link is going away (issue
+    /// #36). The Error frame is a best-effort notification: a full control
+    /// queue must not block or prevent teardown, so the enqueue is
+    /// `try_send`-based and its failure is ignored before the retire signal
+    /// fires. (Register replacement retires the stale link via the handle
+    /// returned from [`RelayConnectionTable::register`], not through here.)
+    pub(crate) fn retire_notifying(&self, node_id: &str, code: RelayErrorCode) -> bool {
         let entry = self
             .entries
             .lock()
@@ -206,6 +212,11 @@ impl RelayConnectionTable {
             .remove(node_id);
         match entry {
             Some(entry) => {
+                let _ = entry.outbound.try_send(Frame::Error {
+                    stream_id: 0,
+                    code: code.wire_value(),
+                    message: code.message().to_string(),
+                });
                 let _ = entry.retire_tx.send(true);
                 true
             }
@@ -391,19 +402,38 @@ mod tests {
     }
 
     #[test]
-    fn retire_removes_entry_and_signals_the_link() {
+    fn retire_notifying_removes_entry_signals_the_link_and_queues_the_code() {
         let table = RelayConnectionTable::default();
-        let registered = table.register(&node_id("node-a"), dummy_outbound());
+        let (ingress, _bulk_rx, mut control_rx) = SchedulerIngress::test_channels(8);
+        let registered = table.register(&node_id("node-a"), ingress);
         let retire_rx = registered.retire_rx;
 
-        assert!(table.retire(&node_id("node-a")));
+        assert!(table.retire_notifying(&node_id("node-a"), RelayErrorCode::NodeRevoked));
         assert_eq!(table.len(), 0);
         assert!(
             *retire_rx.borrow(),
             "retire must send true on the entry's watch before dropping it"
         );
+        let frame = control_rx
+            .try_recv()
+            .expect("the notice frame is queued before the entry drops");
+        match frame {
+            Frame::Error {
+                stream_id,
+                code,
+                message,
+            } => {
+                assert_eq!(stream_id, 0);
+                assert_eq!(
+                    RelayErrorCode::from_wire(code),
+                    Some(RelayErrorCode::NodeRevoked)
+                );
+                assert_eq!(message, RelayErrorCode::NodeRevoked.message());
+            }
+            other => panic!("expected an Error notice frame, got {other:?}"),
+        }
         assert!(
-            !table.retire(&node_id("node-a")),
+            !table.retire_notifying(&node_id("node-a"), RelayErrorCode::NodeRevoked),
             "a second retire finds no live entry"
         );
     }

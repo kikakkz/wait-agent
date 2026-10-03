@@ -23,7 +23,7 @@ use tokio_rustls::TlsConnector;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
 use crate::infra::peer_connection::dial_tcp_peer_connection;
 use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
-use crate::infra::relay_routing::error_code;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::relay_server::{DEFAULT_RELAY_LISTEN_PORT, RELAY_ENROLL_PORT_OFFSET};
 use crate::infra::relay_toml_store::{RelayTomlConfig, RelayTomlStoreError};
 
@@ -149,17 +149,13 @@ pub async fn join_relay(
                 toml_path: toml_path.to_path_buf(),
             })
         }
-        Frame::Error {
-            code: error_code::TOKEN_INVALID,
-            ..
-        } => Err(RelayJoinError::TokenInvalid),
-        Frame::Error {
-            code: error_code::TOKEN_EXPIRED,
-            ..
-        } => Err(RelayJoinError::TokenExpired),
-        Frame::Error { code, message, .. } => Err(RelayJoinError::Protocol(format!(
-            "relay rejected enrollment with code 0x{code:04x}: {message}"
-        ))),
+        Frame::Error { code, message, .. } => match RelayErrorCode::from_wire(code) {
+            Some(RelayErrorCode::TokenInvalid) => Err(RelayJoinError::TokenInvalid),
+            Some(RelayErrorCode::TokenExpired) => Err(RelayJoinError::TokenExpired),
+            _ => Err(RelayJoinError::Protocol(format!(
+                "relay rejected enrollment with code 0x{code:04x}: {message}"
+            ))),
+        },
         other => Err(RelayJoinError::Protocol(format!(
             "unexpected enrollment response: {other:?}"
         ))),
