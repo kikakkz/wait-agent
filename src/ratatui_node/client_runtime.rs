@@ -1,6 +1,7 @@
 use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crate::infra::error_log::{LogLevel, ERROR_LOG};
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
 use crate::platform::local_ipc::{LocalIpcAddr, LocalStream};
@@ -16,6 +17,7 @@ use crate::ratatui_node::logical_key::LogicalKey;
 use crate::ratatui_node::node_runtime::{
     ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson, SessionView,
 };
+use crate::ratatui_node::snapshot::RelayErrorView;
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver};
 use crossterm::cursor::{Hide, MoveTo};
@@ -2283,6 +2285,16 @@ fn session_row_primary_label(session: &SessionView, width: usize) -> String {
     )
 }
 
+/// Canonical `0x{code} {message}` form of a relay link error: assigned codes
+/// render `RelayErrorCode`'s message (the single source of truth); the
+/// carried message is the fallback for unassigned (future) codes only.
+fn relay_error_text(view: &RelayErrorView) -> String {
+    let message = RelayErrorCode::from_wire(view.code)
+        .map(|code| code.message().to_string())
+        .unwrap_or_else(|| view.message.clone());
+    format!("0x{:04x} {message}", view.code)
+}
+
 fn selected_detail_text(session: &SessionView, width: usize) -> String {
     let suffix = if session.availability != "online" {
         session.availability.to_ascii_uppercase()
@@ -2294,8 +2306,13 @@ fn selected_detail_text(session: &SessionView, width: usize) -> String {
         .as_ref()
         .map(|state| format!(" relay:{state}"))
         .unwrap_or_default();
+    let relay_error = session
+        .relay_error
+        .as_ref()
+        .map(|error| format!(" relay-error:{}", relay_error_text(error)))
+        .unwrap_or_default();
     let full_label = session.display_label();
-    let full_detail = format!("{full_label} {suffix}{relay}");
+    let full_detail = format!("{full_label} {suffix}{relay}{relay_error}");
     if display_width(&full_detail) <= width {
         return full_detail;
     }
@@ -2303,12 +2320,15 @@ fn selected_detail_text(session: &SessionView, width: usize) -> String {
     if session.transport != "local" {
         let command_host_label =
             format!("{}@{}", session.command_name, session.display_authority_id);
-        let command_host_detail = format!("{command_host_label} {suffix}{relay}");
+        let command_host_detail = format!("{command_host_label} {suffix}{relay}{relay_error}");
         if display_width(&command_host_detail) <= width {
             return command_host_detail;
         }
 
-        let host_only_detail = format!("{} {suffix}{relay}", session.display_authority_id);
+        let host_only_detail = format!(
+            "{} {suffix}{relay}{relay_error}",
+            session.display_authority_id
+        );
         if display_width(&host_only_detail) <= width {
             return host_only_detail;
         }
@@ -2435,6 +2455,13 @@ fn render_footer_line(
             muted_style,
         ));
     }
+    if let Some(relay_error) = &snapshot.footer.relay_error {
+        left_spans.push(Span::styled("· ", muted_style));
+        left_spans.push(Span::styled(
+            format!("relay error {} ", relay_error_text(relay_error)),
+            muted_style,
+        ));
+    }
 
     if !left_spans.is_empty() {
         left_spans.push(Span::styled("· ", muted_style));
@@ -2527,5 +2554,114 @@ fn separator_style(focus: Focus) -> Style {
     match focus {
         Focus::Main => Style::default().fg(Color::DarkGray),
         Focus::Sidebar => Style::default().fg(Color::Yellow),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ratatui_node::snapshot::{FooterState, RelayErrorView};
+
+    fn remote_session_view(relay_error: Option<RelayErrorView>) -> SessionView {
+        SessionView {
+            id: "peer#1:1".to_string(),
+            transport: "remote".to_string(),
+            command_name: "bash".to_string(),
+            agent_command_name: None,
+            authority_node_id: "peer#1".to_string(),
+            display_authority_id: "peer".to_string(),
+            session_id: "1".to_string(),
+            task_state: "input".to_string(),
+            availability: "online".to_string(),
+            attached_clients: 1,
+            current_path: None,
+            relay_presence: Some("online".to_string()),
+            relay_error,
+        }
+    }
+
+    fn line_text(line: Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn selected_detail_text_appends_typed_relay_error() {
+        // The carried message deliberately disagrees with the canonical
+        // `RelayErrorCode` message: an assigned code must render the typed
+        // message, not the carried one.
+        let session = remote_session_view(Some(RelayErrorView {
+            code: 0x0009,
+            message: "carried text".to_string(),
+        }));
+        let detail = selected_detail_text(&session, 200);
+        assert_eq!(
+            detail,
+            "bash@peer:1 INPUT relay:online \
+             relay-error:0x0009 node access revoked by the relay operator"
+        );
+    }
+
+    #[test]
+    fn selected_detail_text_falls_back_to_carried_message_for_unknown_code() {
+        let session = remote_session_view(Some(RelayErrorView {
+            code: 0x7fff,
+            message: "future relay fault".to_string(),
+        }));
+        let detail = selected_detail_text(&session, 200);
+        assert!(
+            detail.contains("relay-error:0x7fff future relay fault"),
+            "unassigned codes render the carried message: {detail}"
+        );
+    }
+
+    #[test]
+    fn selected_detail_text_omits_relay_error_when_clean() {
+        let session = remote_session_view(None);
+        let detail = selected_detail_text(&session, 200);
+        assert!(
+            !detail.contains("relay-error"),
+            "a clean session renders no relay error: {detail}"
+        );
+    }
+
+    #[test]
+    fn footer_renders_relay_error_when_present() {
+        let snapshot = RatatuiSnapshot {
+            footer: FooterState {
+                relay_peers_online: 1,
+                relay_watch_count: 1,
+                relay_error: Some(RelayErrorView {
+                    code: 0x0009,
+                    message: "node access revoked by the relay operator".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = line_text(render_footer_line(&snapshot, 300, false, false));
+        assert!(
+            text.contains("relay error 0x0009 node access revoked by the relay operator"),
+            "footer must render the structured relay error: {text}"
+        );
+    }
+
+    #[test]
+    fn footer_omits_relay_error_when_clean() {
+        let snapshot = RatatuiSnapshot {
+            footer: FooterState {
+                relay_peers_online: 1,
+                relay_watch_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = line_text(render_footer_line(&snapshot, 300, false, false));
+        assert!(
+            !text.contains("relay error"),
+            "a clean footer renders no relay error: {text}"
+        );
     }
 }
