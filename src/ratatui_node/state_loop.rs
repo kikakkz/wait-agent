@@ -25,7 +25,9 @@ use super::logical_key::LogicalKey;
 use super::outbound_dial_retry_worker::OutboundDialRetryWorker;
 use super::peer_reachability_probe_worker::PeerReachabilityProbeWorker;
 use super::reconnect_worker::ReconnectWorker;
-use super::runtime::{RemoteNodeConnectionInfo, RemoteNodeConnectionMode, SharedState};
+use super::runtime::{
+    RelayLinkErrorSnapshot, RemoteNodeConnectionInfo, RemoteNodeConnectionMode, SharedState,
+};
 use super::snapshot::{
     build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
     HistoryResponse, ServerStatus, SessionView,
@@ -512,6 +514,18 @@ fn run_state_event_loop(
                 ERROR_LOG.log(format!(
                     "[ratatui-node] relay link {relay_address} disconnected: {reason}"
                 ));
+            }
+
+            StateEvent::RelayLinkError { code, message } => {
+                // Stored for the console (issue #36 PR-3); the matching
+                // RelayLinkDisconnected follows immediately and stays the
+                // log-only carrier. Same leaf-lock-then-broadcast shape as
+                // the presence arms: no clients/sessions/Term lock is held
+                // across broadcast_snapshot.
+                if let Ok(mut slot) = shared.relay_error.lock() {
+                    *slot = Some(RelayLinkErrorSnapshot { code, message });
+                }
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::RelayPeerOnline { node_id } => {
@@ -3228,6 +3242,72 @@ mod state_loop_tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(presence.get("relay-peer-a"), Some(&false));
+
+        drop(server);
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn relay_link_error_updates_state_and_broadcasts() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (shared, tx, client_writer, handle) = start_test_loop();
+
+        // Attach a client so broadcast_snapshot actually broadcasts.
+        let (server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(super::super::client_writer::ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+        std::thread::sleep(Duration::from_millis(100));
+
+        TEST_BROADCAST_COUNT.store(0, Ordering::SeqCst);
+        let _ = tx.send(StateEvent::RelayLinkError {
+            code: 0x0009,
+            message: "node access revoked by the relay operator".to_string(),
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            TEST_BROADCAST_COUNT.load(Ordering::SeqCst),
+            1,
+            "a relay link error must broadcast exactly one snapshot"
+        );
+        let snapshot = shared
+            .relay_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("the relay error snapshot must be stored");
+        assert_eq!(snapshot.code, 0x0009);
+        assert_eq!(
+            snapshot.message,
+            "node access revoked by the relay operator"
+        );
+
+        // A later error replaces the stored snapshot.
+        let _ = tx.send(StateEvent::RelayLinkError {
+            code: 0x000a,
+            message: "relay heartbeat timed out; the link was evicted".to_string(),
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            TEST_BROADCAST_COUNT.load(Ordering::SeqCst),
+            2,
+            "a replacement relay link error must broadcast exactly one snapshot"
+        );
+        let snapshot = shared
+            .relay_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("the relay error snapshot must be stored");
+        assert_eq!(snapshot.code, 0x000a);
+        assert_eq!(
+            snapshot.message,
+            "relay heartbeat timed out; the link was evicted"
+        );
 
         drop(server);
         drop(tx);

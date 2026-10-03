@@ -69,7 +69,8 @@ pub(super) async fn expect_connected(
             event @ RelayClientEvent::Connected { .. } => return event,
             RelayClientEvent::Connecting { .. }
             | RelayClientEvent::Disconnected { .. }
-            | RelayClientEvent::Presence { .. } => continue,
+            | RelayClientEvent::Presence { .. }
+            | RelayClientEvent::RelayError { .. } => continue,
         }
     }
 }
@@ -78,7 +79,11 @@ pub(super) async fn expect_disconnected(rx: &mut mpsc::Receiver<RelayClientEvent
     loop {
         match next_client_event(rx).await {
             RelayClientEvent::Disconnected { reason, .. } => return reason,
-            RelayClientEvent::Connecting { .. } | RelayClientEvent::Presence { .. } => continue,
+            // A relay Error frame always arrives right before its
+            // Disconnected; it is informational for this helper.
+            RelayClientEvent::Connecting { .. }
+            | RelayClientEvent::Presence { .. }
+            | RelayClientEvent::RelayError { .. } => continue,
             other => panic!("expected Disconnected, got {other:?}"),
         }
     }
@@ -285,6 +290,76 @@ async fn client_with_wrong_fingerprint_disconnects_and_retries() {
 
     handle.cancel();
     expect_clean_stop(event_rx).await;
+    server.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_emits_relay_error_before_disconnect_on_link_error() {
+    install_provider();
+    let node = TestNode::generate();
+    // The client heartbeats far slower than the relay's offline deadline, so
+    // the relay evicts the registered link — a connection-level Error frame
+    // (HeartbeatLost) arrives on the link before the relay closes it.
+    let lifecycle = RelayLifecycleConfig {
+        offline_after: Duration::from_millis(350),
+        sweep_interval: Duration::from_millis(50),
+        register_timeout: Duration::from_secs(2),
+    };
+    let server = start_test_server_with(&[node.fingerprint()], lifecycle).await;
+    let relay_fingerprint = relay_fingerprint(&server);
+    let dir = temp_dir("relay-client-link-error");
+    let credentials = node_credentials_in(&dir, &node);
+
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let handle = RelayClient::spawn(
+        relay_client_config(
+            server.server.local_addr(),
+            relay_fingerprint,
+            credentials,
+            Duration::from_secs(5),
+        ),
+        event_tx,
+    );
+    expect_connected(&mut event_rx).await;
+
+    match next_client_event(&mut event_rx).await {
+        RelayClientEvent::RelayError { code, message } => {
+            assert_eq!(
+                RelayErrorCode::from_wire(code),
+                Some(RelayErrorCode::HeartbeatLost),
+                "the eviction error must carry the heartbeat-lost code"
+            );
+            assert_eq!(
+                message,
+                RelayErrorCode::HeartbeatLost.message(),
+                "the relay's message must be preserved verbatim"
+            );
+        }
+        other => panic!("expected RelayError after connect, got {other:?}"),
+    }
+    match next_client_event(&mut event_rx).await {
+        RelayClientEvent::Disconnected { reason, .. } => {
+            assert!(
+                reason.contains("relay error 0x000a"),
+                "the disconnect reason must fold in the relay error: {reason}"
+            );
+        }
+        other => panic!("expected Disconnected after the relay error, got {other:?}"),
+    }
+
+    // The client is mid-backoff (or mid-retry) here; drain tolerantly until
+    // the event stream closes.
+    handle.cancel();
+    loop {
+        match timeout(NO_DEADLOCK, event_rx.recv()).await {
+            Ok(Some(RelayClientEvent::Connecting { .. }))
+            | Ok(Some(RelayClientEvent::Disconnected { .. }))
+            | Ok(Some(RelayClientEvent::RelayError { .. })) => continue,
+            Ok(Some(other)) => panic!("unexpected event after cancel: {other:?}"),
+            Ok(None) => break,
+            Err(_) => panic!("event stream should close after cancel"),
+        }
+    }
     server.server.shutdown().await;
 }
 

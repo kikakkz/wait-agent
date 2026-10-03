@@ -1,5 +1,7 @@
 use crate::infra::operator_auth::{self};
 use crate::infra::peer_connection;
+use crate::infra::relay_mux::stream::MuxResetError;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
 use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
@@ -1116,6 +1118,42 @@ fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
+/// Extracts the typed relay error code from an `io::Error` whose payload is a
+/// [`MuxResetError`] — a stream-scoped relay `Error` frame surfaced through a
+/// mux stream reset — decoding the wire code via
+/// [`RelayErrorCode::from_wire`]. Returns `None` when the error carries no
+/// such payload (plain resets, direct-dial failures, unrelated io errors).
+pub(crate) fn relay_reset_code(error: &std::io::Error) -> Option<RelayErrorCode> {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<MuxResetError>())
+        .and_then(|reset| RelayErrorCode::from_wire(reset.code))
+}
+
+/// Finds a relay reset code anywhere in an error source chain. Tonic wraps
+/// connector `io::Error`s behind `ConnectError` while its own `Display` stays
+/// "transport error", so the typed code must be recovered by walking the
+/// chain (`relay_reset_code` alone only sees a top-level `io::Error`).
+fn relay_reset_code_in_chain(error: &(dyn std::error::Error + 'static)) -> Option<RelayErrorCode> {
+    let mut source = error.source();
+    while let Some(error) = source {
+        if let Some(code) = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(relay_reset_code)
+        {
+            return Some(code);
+        }
+        if let Some(code) = error
+            .downcast_ref::<MuxResetError>()
+            .and_then(|reset| RelayErrorCode::from_wire(reset.code))
+        {
+            return Some(code);
+        }
+        source = error.source();
+    }
+    None
+}
+
 async fn connect_channel(
     endpoint: &Endpoint,
     tls_pin_sha256: &Option<String>,
@@ -1132,7 +1170,16 @@ async fn connect_channel(
                         "connect_channel (tls pin) failed; pin={pin}; error chain:\n{}",
                         format_error_chain(&error)
                     ));
-                    RemoteNodeTransportError::new(error.to_string())
+                    // An OpenStream refusal surfaces here as a relay reset:
+                    // the mux attached the Error frame's code+message to the
+                    // stream's io::Error. Append the canonical message so the
+                    // typed error names the cause (tonic's own Display is
+                    // bare "transport error").
+                    let mut message = error.to_string();
+                    if let Some(code) = relay_reset_code_in_chain(&error) {
+                        message = format!("{message}: {}", code.message());
+                    }
+                    RemoteNodeTransportError::new(message)
                 })
         }
         None => endpoint.connect().await.map_err(|error| {
@@ -1417,6 +1464,48 @@ mod tests {
         assert!(
             message.contains("via = \"direct\""),
             "the error names the escape hatch: {message}"
+        );
+    }
+
+    #[test]
+    fn relay_reset_code_extracts_typed_code_from_mux_reset() {
+        use crate::infra::relay_mux::stream::MuxResetError;
+        use crate::infra::relay_routing::error_code::RelayErrorCode;
+
+        let reset = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            MuxResetError {
+                code: RelayErrorCode::TargetUnknown.wire_value(),
+                message: "target unknown".to_string(),
+            },
+        );
+        assert_eq!(
+            super::relay_reset_code(&reset),
+            Some(RelayErrorCode::TargetUnknown),
+            "a ConnectionReset carrying MuxResetError must decode to the typed code"
+        );
+
+        let plain = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "mux stream 1 reset by the relay",
+        );
+        assert_eq!(
+            super::relay_reset_code(&plain),
+            None,
+            "a plain reset has no relay code to extract"
+        );
+
+        let other_kind = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            MuxResetError {
+                code: RelayErrorCode::StreamUnknown.wire_value(),
+                message: "unknown stream".to_string(),
+            },
+        );
+        assert_eq!(
+            super::relay_reset_code(&other_kind),
+            Some(RelayErrorCode::StreamUnknown),
+            "the payload, not the ErrorKind, carries the code (write leg resets are BrokenPipe)"
         );
     }
 

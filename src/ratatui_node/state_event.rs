@@ -142,6 +142,16 @@ pub(crate) enum StateEvent {
         /// Why the link ended (see `RelayClientEvent::Disconnected`).
         reason: String,
     },
+    /// The relay sent a connection-level `Error` frame on the persistent link;
+    /// a `RelayLinkDisconnected` follows immediately as the link tears down.
+    /// The raw wire code is preserved; type it via
+    /// `RelayErrorCode::from_wire`.
+    RelayLinkError {
+        /// The wire error code from `Frame::Error.code`.
+        code: u16,
+        /// The relay's human-readable explanation.
+        message: String,
+    },
     /// A relay-watched peer came online (relay `Presence` transition).
     RelayPeerOnline {
         /// The peer's certificate fingerprint (lowercase).

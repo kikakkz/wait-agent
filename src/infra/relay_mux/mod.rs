@@ -15,13 +15,16 @@
 //! no path acquires them in reverse:
 //!
 //! 1. `StreamTable` (`Mutex<HashMap<u32, StreamEntry>>`, connection.rs)
-//! 2. per-stream `Mutex<StreamState>` (stream.rs)
+//! 2. per-stream mutexes (stream.rs): `Mutex<StreamState>` and
+//!    `Mutex<Option<MuxResetError>>` (the relay-teardown payload)
 //! 3. `close_reason` (`Mutex<Option<String>>`, connection.rs)
 //! 4. `outbound_waker` (`Mutex<Option<Waker>>`, connection.rs)
 //!
 //! The only path that holds two locks at once is connection failure
-//! handling (1 → 2). Reader dispatch takes (1), drops it, then takes (2).
-//! Stream read/write paths take (2) alone and never (1).
+//! handling (1 → 2). Reader dispatch takes (1), drops it, then takes each
+//! per-stream lock separately. Stream read/write paths take a (2) lock alone
+//! and never (1); the teardown payload lock is a leaf and is never held
+//! while another lock is taken.
 //!
 //! # Concurrency model
 //!

@@ -12,7 +12,7 @@
 //! - [`AsyncWrite::poll_shutdown`] half-closes the write leg (sends `Close`);
 //!   after that, writes fail and the stream ends when both legs are closed.
 //!
-//! Locking: the per-stream [`Mutex`] is a leaf lock (never held across an
+//! Locking: the per-stream mutexes are leaf locks (never held across an
 //! `.await` and never taken while holding the connection's stream-table
 //! lock); see the lock-order table in the module docs.
 
@@ -56,6 +56,10 @@ pub struct MuxStream {
     /// Set when the relay tore the stream down (`CloseStream` / stream-scoped
     /// `Error`): reads and writes fail instead of returning EOF / succeeding.
     reset_by_peer: Arc<std::sync::atomic::AtomicBool>,
+    /// Relay `Error` frame payload for a relay-initiated teardown, when the
+    /// teardown was an `Error` frame: the code+message surfaced to the stream
+    /// user. Stored by the reader task before `reset_by_peer` is set.
+    reset_detail: Arc<Mutex<Option<MuxResetError>>>,
     /// Tail of the last popped chunk that did not fit the caller's buffer.
     read_leftover: Vec<u8>,
     read_offset: usize,
@@ -92,6 +96,7 @@ impl MuxStream {
         }));
         let peer_fin = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reset_by_peer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reset_detail = Arc::new(Mutex::new(None));
         let stream = MuxStream {
             id,
             shared,
@@ -99,6 +104,7 @@ impl MuxStream {
             inbound: inbound_rx,
             peer_fin: peer_fin.clone(),
             reset_by_peer: reset_by_peer.clone(),
+            reset_detail: reset_detail.clone(),
             read_leftover: Vec::new(),
             read_offset: 0,
         };
@@ -107,6 +113,7 @@ impl MuxStream {
             state,
             peer_fin,
             reset: reset_by_peer,
+            reset_detail,
         };
         (stream, entry)
     }
@@ -183,24 +190,66 @@ impl MuxStream {
             *waker = Some(cx.waker().clone());
         }
     }
+
+    /// Clones the relay `Error` payload stored by a relay-initiated teardown,
+    /// when the teardown was an `Error` frame (not `CloseStream`).
+    fn reset_detail(&self) -> Option<MuxResetError> {
+        self.reset_detail
+            .lock()
+            .ok()
+            .and_then(|detail| detail.clone())
+    }
 }
+
+/// Error delivered to a stream the relay tore down with a stream-scoped
+/// `Error` frame: the wire code and the relay's message, preserved
+/// structurally for callers that type the code via
+/// [`crate::infra::relay_routing::error_code::RelayErrorCode::from_wire`].
+///
+/// The wrapping `io::Error` keeps `ErrorKind::ConnectionReset` (read leg) /
+/// `ErrorKind::BrokenPipe` (write leg) so existing callers keep matching on
+/// it; this struct rides as the error payload (`io::Error::get_ref()`).
+/// Teardowns without an `Error` frame (`CloseStream`) attach no payload.
+#[derive(Debug, Clone)]
+pub struct MuxResetError {
+    /// The wire error code from `Frame::Error.code`.
+    pub code: u16,
+    /// The relay's human-readable explanation.
+    pub message: String,
+}
+
+impl std::fmt::Display for MuxResetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay error 0x{:04x}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for MuxResetError {}
 
 /// Error delivered to a stream the relay tore down (`CloseStream` or a
 /// stream-scoped `Error`): the full stream is gone, so reads and writes fail
-/// with `ConnectionReset` / `BrokenPipe` rather than EOF.
-fn reset_by_peer_error(stream_id: u32) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::ConnectionReset,
-        format!("mux stream {stream_id} reset by the relay"),
-    )
+/// with `ConnectionReset` / `BrokenPipe` rather than EOF. A stream-scoped
+/// `Error` frame attaches its code+message as a [`MuxResetError`] payload;
+/// other teardowns keep the plain message.
+fn reset_by_peer_error(stream_id: u32, detail: Option<MuxResetError>) -> std::io::Error {
+    match detail {
+        Some(detail) => std::io::Error::new(std::io::ErrorKind::ConnectionReset, detail),
+        None => std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            format!("mux stream {stream_id} reset by the relay"),
+        ),
+    }
 }
 
 /// The write-side counterpart of [`reset_by_peer_error`].
-fn reset_by_peer_write_error(stream_id: u32) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::BrokenPipe,
-        format!("mux stream {stream_id} reset by the relay"),
-    )
+fn reset_by_peer_write_error(stream_id: u32, detail: Option<MuxResetError>) -> std::io::Error {
+    match detail {
+        Some(detail) => std::io::Error::new(std::io::ErrorKind::BrokenPipe, detail),
+        None => std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            format!("mux stream {stream_id} reset by the relay"),
+        ),
+    }
 }
 
 impl AsyncRead for MuxStream {
@@ -235,7 +284,7 @@ impl AsyncRead for MuxStream {
             // peer's directional close (clean EOF).
             Poll::Ready(None) => {
                 if self.reset_by_peer.load(Ordering::Acquire) {
-                    Poll::Ready(Err(reset_by_peer_error(self.id)))
+                    Poll::Ready(Err(reset_by_peer_error(self.id, self.reset_detail())))
                 } else if self.shared.dead.load(Ordering::Acquire) {
                     Poll::Ready(Err(self.connection_dead_error()))
                 } else {
@@ -265,7 +314,7 @@ impl AsyncWrite for MuxStream {
             return Poll::Ready(Ok(0));
         }
         if self.reset_by_peer.load(Ordering::Acquire) {
-            return Poll::Ready(Err(reset_by_peer_write_error(self.id)));
+            return Poll::Ready(Err(reset_by_peer_write_error(self.id, self.reset_detail())));
         }
         if self.shared.dead.load(Ordering::Acquire) {
             return Poll::Ready(Err(self.connection_dead_error()));
