@@ -26,26 +26,90 @@ use std::sync::Mutex;
 
 use crate::infra::relay_scheduler::SchedulerIngress;
 
-/// Structured relay error codes carried by `Frame::Error` (docs: 错误语义
-/// work lands later; these are what routing and enrollment need today).
+/// Structured relay error semantics carried by `Frame::Error` (issue #36):
+/// typed codes with stable wire values plus a canonical human-readable
+/// message per code. The wire format is unchanged — `Frame::Error.code`
+/// stays a raw `u16`; [`error_code::RelayErrorCode::from_wire`] decodes known
+/// values and rejects anything outside the assigned range.
 pub mod error_code {
-    /// The target node id is not in the connection table (unknown or
-    /// offline — the table evicts offline nodes).
-    pub const TARGET_UNKNOWN: u16 = 0x0001;
-    /// The stream id has no routing entry on this link.
-    pub const STREAM_UNKNOWN: u16 = 0x0002;
-    /// The stream id is routed but this direction is already closed.
-    pub const STREAM_CLOSED: u16 = 0x0003;
-    /// Register refused: the connection table is at max_nodes.
-    pub const NODE_CAPACITY: u16 = 0x0004;
-    /// OpenStream refused: the routing table is at max_streams.
-    pub const STREAM_CAPACITY: u16 = 0x0005;
-    /// OpenStream refused: the forwarded-bytes/s threshold is exceeded.
-    pub const THROUGHPUT_EXCEEDED: u16 = 0x0006;
-    /// Enrollment refused: the token is unknown or already consumed.
-    pub const TOKEN_INVALID: u16 = 0x0007;
-    /// Enrollment refused: the token is past its expiry.
-    pub const TOKEN_EXPIRED: u16 = 0x0008;
+    /// Typed relay error codes; the discriminant is the wire value carried
+    /// by `Frame::Error.code`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u16)]
+    pub enum RelayErrorCode {
+        /// The target node id is not in the connection table (unknown or
+        /// offline — the table evicts offline nodes).
+        TargetUnknown = 0x0001,
+        /// The stream id has no routing entry on this link.
+        StreamUnknown = 0x0002,
+        /// The stream id is routed but this direction is already closed.
+        StreamClosed = 0x0003,
+        /// Register refused: the connection table is at max_nodes.
+        NodeCapacity = 0x0004,
+        /// OpenStream refused: the routing table is at max_streams.
+        StreamCapacity = 0x0005,
+        /// OpenStream refused: the forwarded-bytes/s threshold is exceeded.
+        ThroughputExceeded = 0x0006,
+        /// Enrollment refused: the token is unknown or already consumed.
+        TokenInvalid = 0x0007,
+        /// Enrollment refused: the token is past its expiry.
+        TokenExpired = 0x0008,
+        /// The relay operator revoked the node; its live link was dropped.
+        NodeRevoked = 0x0009,
+        /// Heartbeat silence past the offline deadline; the link was evicted.
+        HeartbeatLost = 0x000a,
+        /// Quota exhausted; reserved for quota enforcement — no emitter
+        /// assigns it yet.
+        #[allow(dead_code)]
+        QuotaExceeded = 0x000b,
+    }
+
+    impl RelayErrorCode {
+        /// Every assigned code, for table-driven checks.
+        const ALL: [RelayErrorCode; 11] = [
+            RelayErrorCode::TargetUnknown,
+            RelayErrorCode::StreamUnknown,
+            RelayErrorCode::StreamClosed,
+            RelayErrorCode::NodeCapacity,
+            RelayErrorCode::StreamCapacity,
+            RelayErrorCode::ThroughputExceeded,
+            RelayErrorCode::TokenInvalid,
+            RelayErrorCode::TokenExpired,
+            RelayErrorCode::NodeRevoked,
+            RelayErrorCode::HeartbeatLost,
+            RelayErrorCode::QuotaExceeded,
+        ];
+
+        /// Decodes a wire value from `Frame::Error.code`; `None` when the
+        /// value has no assigned meaning.
+        pub fn from_wire(code: u16) -> Option<Self> {
+            Self::ALL
+                .into_iter()
+                .find(|assigned| assigned.wire_value() == code)
+        }
+
+        /// The wire value carried by `Frame::Error.code`.
+        pub fn wire_value(self) -> u16 {
+            self as u16
+        }
+
+        /// The canonical human-readable explanation of this error.
+        pub fn message(self) -> &'static str {
+            match self {
+                RelayErrorCode::TargetUnknown => "target node is unknown or offline",
+                RelayErrorCode::StreamUnknown => "stream is unknown on this link",
+                RelayErrorCode::StreamClosed => "stream direction is already closed",
+                RelayErrorCode::NodeCapacity => "relay node capacity reached",
+                RelayErrorCode::StreamCapacity => "relay stream capacity reached",
+                RelayErrorCode::ThroughputExceeded => "relay throughput limit exceeded",
+                RelayErrorCode::TokenInvalid => "enrollment token is invalid or already used",
+                RelayErrorCode::TokenExpired => "enrollment token has expired",
+                RelayErrorCode::NodeRevoked => "node access revoked by the relay operator",
+                RelayErrorCode::HeartbeatLost => "relay heartbeat timed out; the link was evicted",
+                RelayErrorCode::QuotaExceeded => "quota exceeded",
+            }
+        }
+    }
 }
 
 /// One endpoint of a routed stream: a link (by connection id) plus the
@@ -303,5 +367,106 @@ mod tests {
     fn teardown_of_unknown_connection_is_empty() {
         let table = RoutingTable::default();
         assert!(table.teardown_connection(99).is_empty());
+    }
+
+    mod error_code {
+        use super::super::error_code::RelayErrorCode;
+
+        /// (code, wire value, canonical message) — the table pins both the
+        /// assigned wire numbers and the canonical wording.
+        const TABLE: &[(RelayErrorCode, u16, &str)] = &[
+            (
+                RelayErrorCode::TargetUnknown,
+                0x0001,
+                "target node is unknown or offline",
+            ),
+            (
+                RelayErrorCode::StreamUnknown,
+                0x0002,
+                "stream is unknown on this link",
+            ),
+            (
+                RelayErrorCode::StreamClosed,
+                0x0003,
+                "stream direction is already closed",
+            ),
+            (
+                RelayErrorCode::NodeCapacity,
+                0x0004,
+                "relay node capacity reached",
+            ),
+            (
+                RelayErrorCode::StreamCapacity,
+                0x0005,
+                "relay stream capacity reached",
+            ),
+            (
+                RelayErrorCode::ThroughputExceeded,
+                0x0006,
+                "relay throughput limit exceeded",
+            ),
+            (
+                RelayErrorCode::TokenInvalid,
+                0x0007,
+                "enrollment token is invalid or already used",
+            ),
+            (
+                RelayErrorCode::TokenExpired,
+                0x0008,
+                "enrollment token has expired",
+            ),
+            (
+                RelayErrorCode::NodeRevoked,
+                0x0009,
+                "node access revoked by the relay operator",
+            ),
+            (
+                RelayErrorCode::HeartbeatLost,
+                0x000a,
+                "relay heartbeat timed out; the link was evicted",
+            ),
+            (RelayErrorCode::QuotaExceeded, 0x000b, "quota exceeded"),
+        ];
+
+        #[test]
+        fn from_wire_roundtrips_every_assigned_code() {
+            for (code, wire, _) in TABLE {
+                assert_eq!(
+                    code.wire_value(),
+                    *wire,
+                    "{code:?} keeps its assigned wire value"
+                );
+                assert_eq!(
+                    RelayErrorCode::from_wire(*wire),
+                    Some(*code),
+                    "wire {wire:#06x} must decode to {code:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn from_wire_rejects_unassigned_values() {
+            assert_eq!(
+                RelayErrorCode::from_wire(0x0000),
+                None,
+                "zero is unassigned"
+            );
+            assert_eq!(
+                RelayErrorCode::from_wire(0x000c),
+                None,
+                "the value above the assigned range is unknown"
+            );
+        }
+
+        #[test]
+        fn every_code_has_a_canonical_message() {
+            for (code, _, message) in TABLE {
+                assert!(
+                    !message.is_empty(),
+                    "{code:?} must carry a non-empty canonical message"
+                );
+                assert_eq!(code.message(), *message);
+            }
+        }
     }
 }

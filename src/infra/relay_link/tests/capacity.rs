@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::infra::relay_capacity::RelayCapacityConfig;
-use crate::infra::relay_routing::error_code;
+use crate::infra::relay_routing::error_code::RelayErrorCode;
 
 async fn start_with_capacity(whitelist: &[String], capacity: RelayCapacityConfig) -> RunningServer {
     start_test_server_with_capacity(whitelist, RelayLifecycleConfig::fast_for_tests(), capacity)
@@ -46,7 +46,11 @@ async fn register_beyond_max_nodes_gets_structured_refusal() {
             code,
             message,
         } => {
-            assert_eq!(code, error_code::NODE_CAPACITY, "{message}");
+            assert_eq!(
+                RelayErrorCode::from_wire(code),
+                Some(RelayErrorCode::NodeCapacity),
+                "{message}"
+            );
         }
         other => panic!("expected NODE_CAPACITY refusal, got {other:?}"),
     }
@@ -126,7 +130,11 @@ async fn open_stream_beyond_max_streams_gets_structured_refusal() {
             code,
             message,
         } => {
-            assert_eq!(code, error_code::STREAM_CAPACITY, "{message}");
+            assert_eq!(
+                RelayErrorCode::from_wire(code),
+                Some(RelayErrorCode::StreamCapacity),
+                "{message}"
+            );
         }
         other => panic!("expected STREAM_CAPACITY refusal, got {other:?}"),
     }
@@ -144,7 +152,10 @@ async fn open_stream_beyond_max_streams_gets_structured_refusal() {
     match read_link_frame(&mut link_a).await {
         Frame::Error {
             stream_id: 3, code, ..
-        } => assert_eq!(code, error_code::STREAM_UNKNOWN),
+        } => assert_eq!(
+            RelayErrorCode::from_wire(code),
+            Some(RelayErrorCode::StreamUnknown)
+        ),
         other => panic!("expected STREAM_UNKNOWN, got {other:?}"),
     }
 
@@ -226,7 +237,11 @@ async fn throughput_threshold_refuses_new_opens_after_metering_data() {
             code,
             message,
         } => {
-            assert_eq!(code, error_code::THROUGHPUT_EXCEEDED, "{message}");
+            assert_eq!(
+                RelayErrorCode::from_wire(code),
+                Some(RelayErrorCode::ThroughputExceeded),
+                "{message}"
+            );
         }
         other => panic!("expected THROUGHPUT_EXCEEDED refusal, got {other:?}"),
     }

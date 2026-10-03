@@ -46,9 +46,9 @@ use crate::infra::relay_connection_table::{
 use crate::infra::relay_enrollment::{
     handle_enrollment_frame, pem_encode_cert, EnrollmentTokenStore,
 };
-use crate::infra::relay_mux::frame::{read_frame, write_frame};
+use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
 use crate::infra::relay_presence::PresenceHub;
-use crate::infra::relay_routing::RoutingTable;
+use crate::infra::relay_routing::{error_code::RelayErrorCode, RoutingTable};
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncListener};
 
 // rustls re-exports `HandshakeSignatureValid` under `client::danger` for both
@@ -512,6 +512,14 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                 _ = sweeper_shutdown.changed() => return,
                 _ = tokio::time::sleep(sweeper_lifecycle.sweep_interval) => {
                     for (node_id, entry) in sweeper_table.evict_idle(sweeper_lifecycle.offline_after) {
+                        // Best-effort death notice before the teardown signal
+                        // (issue #36): a full control queue must not block
+                        // eviction, so the enqueue failure is ignored.
+                        let _ = entry.outbound.try_send(Frame::Error {
+                            stream_id: 0,
+                            code: RelayErrorCode::HeartbeatLost.wire_value(),
+                            message: RelayErrorCode::HeartbeatLost.message().to_string(),
+                        });
                         let _ = entry.retire_tx.send(true);
                         let _ = sweeper_events.try_send(RelayLifecycleEvent::EvictedOffline { node_id: node_id.clone() });
                         sweeper_presence.publish(&node_id, false);

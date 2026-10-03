@@ -156,9 +156,9 @@ async fn unknown_target_gets_structured_error() {
             read_link_frame(&mut link_a).await,
             Frame::Error {
                 stream_id: 1,
-                code: error_code::TARGET_UNKNOWN,
+                code,
                 ..
-            }
+            } if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TargetUnknown)
         ),
         "an unknown target must get TARGET_UNKNOWN"
     );
@@ -178,9 +178,9 @@ async fn unknown_target_gets_structured_error() {
             read_link_frame(&mut link_a).await,
             Frame::Error {
                 stream_id: 1,
-                code: error_code::STREAM_UNKNOWN,
+                code,
                 ..
-            }
+            } if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::StreamUnknown)
         ),
         "no route was created, so data gets STREAM_UNKNOWN"
     );
@@ -259,9 +259,9 @@ async fn half_close_keeps_reverse_leg_then_both_close_drops() {
             read_link_frame(&mut link_a).await,
             Frame::Error {
                 stream_id: 1,
-                code: error_code::STREAM_UNKNOWN,
+                code,
                 ..
-            }
+            } if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::StreamUnknown)
         ),
         "a fully closed pair is dropped, so data gets STREAM_UNKNOWN"
     );
@@ -308,9 +308,10 @@ async fn node_close_stream_tears_down_both_legs() {
             read_link_frame(&mut link_b).await,
             Frame::Error {
                 stream_id,
-                code: error_code::STREAM_UNKNOWN,
+                code,
                 ..
             } if stream_id == b_stream
+                && RelayErrorCode::from_wire(code) == Some(RelayErrorCode::StreamUnknown)
         ),
         "CloseStream tears down both legs"
     );
@@ -353,9 +354,9 @@ async fn peer_disconnect_sends_close_stream_and_drops_routes() {
             read_link_frame(&mut link_a).await,
             Frame::Error {
                 stream_id: 1,
-                code: error_code::STREAM_UNKNOWN,
+                code,
                 ..
-            }
+            } if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::StreamUnknown)
         ),
         "the torn-down route answers with STREAM_UNKNOWN"
     );

@@ -321,9 +321,18 @@ async fn client_heartbeats_survive_eviction_window_but_silence_does_not() {
     wait_admin_lists_node(&admin_addr, &node.fingerprint()).await;
 
     // Control: a registered link that never heartbeats is evicted well inside
-    // the window the client survives.
+    // the window the client survives — and hears why before the link dies.
     let mut silent_link = register_node(&mut server, &silent, &server_der).await;
     expect_evicted(&mut server.events, &silent.fingerprint()).await;
+    let frame = read_link_frame(&mut silent_link).await;
+    assert!(
+        matches!(
+            frame,
+            Frame::Error { stream_id: 0, code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::HeartbeatLost)
+        ),
+        "the evicted link must be told its heartbeat was lost, got {frame:?}"
+    );
     expect_link_closed(&mut silent_link).await;
 
     // Past the eviction window plus sweep slack the heartbeat-driven client

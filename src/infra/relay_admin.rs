@@ -24,7 +24,7 @@ use crate::infra::relay_capacity::{RelayCapacityConfig, RelayUsage, SharedUsageM
 use crate::infra::relay_connection_table::RelayConnectionTable;
 use crate::infra::relay_enrollment::{remove_authorized_node, EnrollmentTokenStore};
 use crate::infra::relay_presence::PresenceHub;
-use crate::infra::relay_routing::RoutingTable;
+use crate::infra::relay_routing::{error_code::RelayErrorCode, RoutingTable};
 use crate::platform::remote_ipc::{
     cleanup_remote_listener, RemoteControlAddr, RemoteControlAsyncListener,
 };
@@ -262,7 +262,8 @@ fn handle_remove(
 ) -> RelayAdminResponse {
     match remove_authorized_node(whitelist_dir, fingerprint) {
         Ok(removed_from_whitelist) => {
-            let retired = table.retire(&fingerprint.to_lowercase());
+            let retired =
+                table.retire_notifying(&fingerprint.to_lowercase(), RelayErrorCode::NodeRevoked);
             if retired {
                 presence.publish(&fingerprint.to_lowercase(), false);
             }

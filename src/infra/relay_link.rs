@@ -28,7 +28,9 @@ use crate::infra::relay_connection_table::{
 };
 use crate::infra::relay_mux::frame::{read_frame, Frame};
 use crate::infra::relay_presence::PresenceHub;
-use crate::infra::relay_routing::{error_code, CloseOutcome, Lookup, RouteKey, RoutingTable};
+use crate::infra::relay_routing::{
+    error_code::RelayErrorCode, CloseOutcome, Lookup, RouteKey, RoutingTable,
+};
 use crate::infra::relay_scheduler::{LinkScheduler, SchedulerConfig, SchedulerIngress};
 
 /// Bounded outbound queue per link: frames waiting for the writer task.
@@ -213,7 +215,7 @@ async fn register_link(
         send_stream_error(
             outbound_tx,
             0,
-            error_code::NODE_CAPACITY,
+            RelayErrorCode::NodeCapacity.wire_value(),
             "relay is at max_nodes capacity",
         )
         .await;
@@ -327,7 +329,7 @@ async fn dispatch_loop(
                                 ));
                             }
                             CloseOutcome::Unknown => {
-                                send_stream_error(outbound_tx, stream_id, error_code::STREAM_UNKNOWN, "unknown stream").await;
+                                send_stream_error(outbound_tx, stream_id, RelayErrorCode::StreamUnknown.wire_value(), "unknown stream").await;
                             }
                         }
                     }
@@ -335,7 +337,7 @@ async fn dispatch_loop(
                         if let Some(leg) = routing.teardown_pair(RouteKey { connection_id, stream_id }) {
                             let _ = leg.peer_outbound.send(Frame::CloseStream { stream_id: leg.peer.stream_id }).await;
                         } else {
-                            send_stream_error(outbound_tx, stream_id, error_code::STREAM_UNKNOWN, "unknown stream").await;
+                            send_stream_error(outbound_tx, stream_id, RelayErrorCode::StreamUnknown.wire_value(), "unknown stream").await;
                         }
                     }
                     Ok(other) => {
@@ -380,7 +382,7 @@ async fn handle_open_stream(
         send_stream_error(
             outbound_tx,
             stream_id,
-            error_code::TARGET_UNKNOWN,
+            RelayErrorCode::TargetUnknown.wire_value(),
             "target node is unknown or offline",
         )
         .await;
@@ -395,7 +397,7 @@ async fn handle_open_stream(
             send_stream_error(
                 outbound_tx,
                 stream_id,
-                error_code::STREAM_CAPACITY,
+                RelayErrorCode::StreamCapacity.wire_value(),
                 "relay is at max_streams capacity",
             )
             .await;
@@ -405,7 +407,7 @@ async fn handle_open_stream(
             send_stream_error(
                 outbound_tx,
                 stream_id,
-                error_code::THROUGHPUT_EXCEEDED,
+                RelayErrorCode::ThroughputExceeded.wire_value(),
                 "relay forwarded-throughput threshold exceeded",
             )
             .await;
@@ -440,7 +442,7 @@ async fn handle_open_stream(
         send_stream_error(
             outbound_tx,
             stream_id,
-            error_code::TARGET_UNKNOWN,
+            RelayErrorCode::TargetUnknown.wire_value(),
             "target link closed during open",
         )
         .await;
@@ -477,7 +479,7 @@ async fn forward_routed(
                 send_stream_error(
                     outbound_tx,
                     stream_id,
-                    error_code::STREAM_UNKNOWN,
+                    RelayErrorCode::StreamUnknown.wire_value(),
                     "peer link closed",
                 )
                 .await;
@@ -489,7 +491,7 @@ async fn forward_routed(
             send_stream_error(
                 outbound_tx,
                 stream_id,
-                error_code::STREAM_CLOSED,
+                RelayErrorCode::StreamClosed.wire_value(),
                 "stream is closed",
             )
             .await;
@@ -498,7 +500,7 @@ async fn forward_routed(
             send_stream_error(
                 outbound_tx,
                 stream_id,
-                error_code::STREAM_UNKNOWN,
+                RelayErrorCode::StreamUnknown.wire_value(),
                 "unknown stream",
             )
             .await;

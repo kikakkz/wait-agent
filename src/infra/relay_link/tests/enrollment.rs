@@ -93,10 +93,8 @@ async fn one_time_token_redeems_once_then_reports_invalid() {
     assert!(
         matches!(
             second,
-            Frame::Error {
-                code: error_code::TOKEN_INVALID,
-                ..
-            }
+            Frame::Error { code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenInvalid)
         ),
         "reused one-time token must be rejected, got {second:?}"
     );
@@ -113,10 +111,8 @@ async fn unknown_token_reports_invalid_and_does_not_whitelist() {
     assert!(
         matches!(
             response,
-            Frame::Error {
-                code: error_code::TOKEN_INVALID,
-                ..
-            }
+            Frame::Error { code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenInvalid)
         ),
         "unknown token must be rejected, got {response:?}"
     );
@@ -152,10 +148,8 @@ async fn expired_token_reports_expired() {
     assert!(
         matches!(
             response,
-            Frame::Error {
-                code: error_code::TOKEN_EXPIRED,
-                ..
-            }
+            Frame::Error { code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenExpired)
         ),
         "expired token must be reported as such, got {response:?}"
     );
@@ -209,10 +203,8 @@ async fn first_frame_must_be_enroll() {
     assert!(
         matches!(
             response,
-            Frame::Error {
-                code: error_code::TOKEN_INVALID,
-                ..
-            }
+            Frame::Error { code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::TokenInvalid)
         ),
         "a non-Enroll first frame must be rejected, got {response:?}"
     );
@@ -256,6 +248,17 @@ async fn admin_remove_revokes_whitelist_and_drops_live_link() {
             .exists(),
         "the whitelist entry must be gone"
     );
+    // Revocation now tells the kicked link why before closing it; consume
+    // the notice, then the link must be gone.
+    let frame = read_link_frame(&mut link).await;
+    assert!(
+        matches!(
+            frame,
+            Frame::Error { stream_id: 0, code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::NodeRevoked)
+        ),
+        "the kicked link must be told it was revoked, got {frame:?}"
+    );
     expect_link_closed(&mut link).await;
     active_connections_reaches(&server.server, 0).await;
 
@@ -264,5 +267,59 @@ async fn admin_remove_revokes_whitelist_and_drops_live_link() {
         .await
         .expect_err("a revoked node must fail new handshakes");
     assert!(!error.is_empty());
+    server.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_remove_notifies_kicked_link_before_close() {
+    let node = TestNode::generate();
+    let mut server = start_test_server_with(
+        &[node.fingerprint()],
+        RelayLifecycleConfig::fast_for_tests(),
+    )
+    .await;
+    let server_der = server_cert_der(&server.config);
+    let admin_addr = server.server.admin_addr().clone();
+
+    let mut link = register_node(&mut server, &node, &server_der).await;
+    active_connections_reaches(&server.server, 1).await;
+
+    let fingerprint = node.fingerprint();
+    let body = admin_request(
+        &admin_addr,
+        &format!(r#"{{"command":"remove","fingerprint":"{fingerprint}"}}"#),
+    )
+    .await;
+    let response: serde_json::Value = serde_json::from_str(&body).expect("remove json");
+    assert_eq!(response["ok"], true, "remove should succeed: {body}");
+    assert!(
+        response["message"]
+            .as_str()
+            .expect("remove message")
+            .contains("live link dropped"),
+        "the live link must be dropped: {body}"
+    );
+    assert!(
+        !server
+            .config
+            .authorized_nodes_dir
+            .join(&fingerprint)
+            .exists(),
+        "the whitelist entry must be gone"
+    );
+
+    // The kicked link learns why before it dies: the NODE_REVOKED error
+    // (issue #36) precedes the teardown close.
+    let frame = read_link_frame(&mut link).await;
+    assert!(
+        matches!(
+            frame,
+            Frame::Error { stream_id: 0, code, .. }
+                if RelayErrorCode::from_wire(code) == Some(RelayErrorCode::NodeRevoked)
+        ),
+        "the kicked link must be told it was revoked, got {frame:?}"
+    );
+    expect_link_closed(&mut link).await;
+    active_connections_reaches(&server.server, 0).await;
     server.server.shutdown().await;
 }
