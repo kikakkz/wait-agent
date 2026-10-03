@@ -24,9 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tokio::sync::mpsc;
-
-use crate::infra::relay_mux::frame::Frame;
+use crate::infra::relay_scheduler::SchedulerIngress;
 
 /// Structured relay error codes carried by `Frame::Error` (docs: 错误语义
 /// work lands later; these are what routing and enrollment need today).
@@ -64,7 +62,7 @@ pub(crate) struct RouteLeg {
     pub(crate) peer: RouteKey,
     /// The peer link's outbound queue: frames for the peer are queued here
     /// (remapped to `peer.stream_id`) by the caller.
-    pub(crate) peer_outbound: mpsc::Sender<Frame>,
+    pub(crate) peer_outbound: SchedulerIngress,
     /// This direction's write leg is closed (a half-close `Close` arrived
     /// from this side and was forwarded).
     pub(crate) closed: bool,
@@ -102,8 +100,8 @@ impl RoutingTable {
         from: RouteKey,
         target_connection_id: u64,
         target_stream_id: u32,
-        target_outbound: mpsc::Sender<Frame>,
-        from_outbound: mpsc::Sender<Frame>,
+        target_outbound: SchedulerIngress,
+        from_outbound: SchedulerIngress,
     ) -> RouteLeg {
         let to = RouteKey {
             connection_id: target_connection_id,
@@ -177,10 +175,7 @@ impl RoutingTable {
     /// Tears down every route touching `connection_id`. Returns one entry
     /// per affected peer link: the peer's outbound queue and the stream id
     /// (as the peer knows it) for a `CloseStream`.
-    pub(crate) fn teardown_connection(
-        &self,
-        connection_id: u64,
-    ) -> Vec<(mpsc::Sender<Frame>, u32)> {
+    pub(crate) fn teardown_connection(&self, connection_id: u64) -> Vec<(SchedulerIngress, u32)> {
         let mut legs = self.legs.lock().expect("relay routing table lock poisoned");
         let keys: Vec<RouteKey> = legs
             .keys()
@@ -217,9 +212,16 @@ impl RouteLeg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
-    fn outbound() -> (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) {
-        mpsc::channel(8)
+    use crate::infra::relay_mux::frame::Frame;
+
+    fn outbound() -> (
+        SchedulerIngress,
+        mpsc::Receiver<Frame>,
+        mpsc::Receiver<Frame>,
+    ) {
+        SchedulerIngress::test_channels(8)
     }
 
     fn key(connection_id: u64, stream_id: u32) -> RouteKey {
@@ -232,8 +234,8 @@ mod tests {
     #[test]
     fn open_inserts_two_legs_and_routes_both_ways() {
         let table = RoutingTable::default();
-        let (a_tx, _a_rx) = outbound();
-        let (b_tx, _b_rx) = outbound();
+        let (a_tx, _, _) = outbound();
+        let (b_tx, _, _) = outbound();
         let from = key(1, 1);
         let forward = table.open(from, 2, 2, b_tx, a_tx);
         assert_eq!(forward.peer, key(2, 2));
@@ -245,8 +247,8 @@ mod tests {
     #[test]
     fn close_leg_forwards_then_drops_pair_after_both_close() {
         let table = RoutingTable::default();
-        let (a_tx, _a_rx) = outbound();
-        let (b_tx, _b_rx) = outbound();
+        let (a_tx, _, _) = outbound();
+        let (b_tx, _, _) = outbound();
         let a = key(1, 1);
         let b = key(2, 2);
         table.open(a, b.connection_id, b.stream_id, b_tx, a_tx);
@@ -267,8 +269,8 @@ mod tests {
     #[test]
     fn duplicate_close_is_swallowed() {
         let table = RoutingTable::default();
-        let (a_tx, _a_rx) = outbound();
-        let (b_tx, _b_rx) = outbound();
+        let (a_tx, _, _) = outbound();
+        let (b_tx, _, _) = outbound();
         let a = key(1, 1);
         table.open(a, 2, 2, b_tx, a_tx);
         assert!(matches!(table.close_leg(a), CloseOutcome::Forward(_)));
@@ -278,9 +280,9 @@ mod tests {
     #[test]
     fn teardown_connection_notifies_each_peer_once() {
         let table = RoutingTable::default();
-        let (a_tx, _a_rx) = outbound();
-        let (b_tx, _b_rx) = outbound();
-        let (c_tx, _c_rx) = outbound();
+        let (a_tx, _, _) = outbound();
+        let (b_tx, _, _) = outbound();
+        let (c_tx, _, _) = outbound();
         // A talks to B and C; B also talks to C (untouched by A's death).
         table.open(key(1, 1), 2, 2, b_tx.clone(), a_tx.clone());
         table.open(key(1, 3), 3, 2, c_tx.clone(), a_tx);

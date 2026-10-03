@@ -351,6 +351,74 @@ async fn control_frames_overtake_bulk_backlog() {
 }
 
 #[tokio::test]
+async fn close_stream_arrives_under_bulk_backpressure() {
+    let mut pair = registered_pair().await;
+    let mut source_link = open_node_link(
+        pair.server.server.local_addr(),
+        &pair.source,
+        &pair.server_der,
+    )
+    .await
+    .expect("source handshake");
+    register_raw_link(&mut source_link, &pair.source.fingerprint()).await;
+    let target_ids = open_streams_toward(
+        &mut source_link,
+        &mut pair.target_reader,
+        &pair.target.fingerprint(),
+        2,
+    )
+    .await;
+    let stalled_target_id = target_ids[0];
+
+    // Pump stream 1 well past its 1 MiB bucket cap while the target never
+    // consumes stream 1's data, then tear that same stream down: the
+    // forwarded CloseStream reaches the target link's scheduler behind a
+    // parked bulk arm, and must classify via the control channel instead of
+    // queueing behind the stalled stream (issue #105).
+    const PUMP_FRAMES: usize = 128; // 2 MiB: bucket 1 MiB + ingress slack
+    let (_source_reader, mut source_writer) = split_link(source_link);
+    let producer = tokio::spawn(async move {
+        let payload = vec![0x33u8; MAX_PAYLOAD_USIZE];
+        for _ in 0..PUMP_FRAMES {
+            write_frame(
+                &mut source_writer,
+                &Frame::Data {
+                    stream_id: 1,
+                    payload: payload.clone(),
+                },
+            )
+            .await
+            .expect("stalled-stream frame");
+        }
+        write_frame(&mut source_writer, &Frame::CloseStream { stream_id: 1 })
+            .await
+            .expect("close stream");
+    });
+
+    // The target keeps reading the wire but drops stream 1's bytes (its
+    // consumer is absent): the teardown must still arrive, ahead of the
+    // bulk backlog that stalled the stream.
+    let mut stalled_bytes = 0usize;
+    loop {
+        let frame = read_one(&mut pair.target_reader).await;
+        match frame {
+            Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
+                stalled_bytes += payload.len()
+            }
+            Frame::CloseStream { stream_id } if stream_id == stalled_target_id => break,
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    producer.await.expect("producer");
+    assert!(
+        stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
+        "the stalled stream's own teardown must bypass its bulk backlog (saw {stalled_bytes} bytes)"
+    );
+
+    pair.server.server.shutdown().await;
+}
+
+#[tokio::test]
 async fn end_to_end_stream_credit_bounds_a_stream_the_peer_never_reads() {
     install_provider();
     let node_a = TestNode::generate();

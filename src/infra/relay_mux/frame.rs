@@ -242,6 +242,24 @@ impl Frame {
         }
     }
 
+    /// Whether the frame rides the scheduler's bulk-ordered ingress channel
+    /// rather than its control channel.
+    ///
+    /// `Data`, `Window`, and `Close` must keep per-stream FIFO order: the
+    /// mux consumer fails the whole connection on `Data` after `peer_fin`
+    /// (`relay_mux/connection.rs`), and the wire format promises a `Close`
+    /// reader reaches EOF only once the peer's buffered `Data` has drained
+    /// (the module doc above), so a `Close` must never overtake its own
+    /// stream's `Data`. Every other variant is a reset or lifecycle control
+    /// frame (`CloseStream`, `Error`, `OpenStream`, register/heartbeat,
+    /// presence, enrollment) that must bypass a backpressured bulk queue.
+    pub(crate) fn is_bulk_ordered(&self) -> bool {
+        matches!(
+            self,
+            Frame::Data { .. } | Frame::Window { .. } | Frame::Close { .. }
+        )
+    }
+
     /// Byte length of the encoded payload (header excluded). Used by the
     /// relay scheduler's per-stream accounting.
     pub(crate) fn payload_len(&self) -> usize {
