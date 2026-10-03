@@ -4,8 +4,8 @@ version: 1
 summary:
   layout: repository structure most relevant to planning and execution
   freshness_note: >
-    last refreshed 2026-10 during the issue-driven migration (AD-0001);
-    the session-bootstrap skill verifies these anchors before trusting
+    last refreshed 2026-10 after #35 merged (PR #107); the
+    session-bootstrap skill verifies these anchors before trusting
     them — stale entries are reported, never silently followed
 module_map:
   entrypoints:
@@ -23,7 +23,8 @@ module_map:
         ratatui-first workspace runtime core — local sessions, remote
         sessions, state event loop, node runtime, reconnect and outbound
         dial workers, clipboard pipeline, authority host/session IO, loom
-        model tests
+        model tests; the node runtime installs the SharedState
+        relay_client handle once after RelayClient::spawn (#35 PR-B)
     - path: src/event.rs
       responsibility: internal runtime event bus
     - path: src/lifecycle.rs
@@ -34,7 +35,14 @@ module_map:
       responsibility: ratatui UI surfaces
   networking:
     - path: src/infra/remote_grpc_transport.rs
-      responsibility: node-to-node transport session establishment (TCP dial path)
+      responsibility: >
+        node-to-node transport session establishment: RemoteNodeVia
+        selector + PeerDialer at the TlsPinConnector::call funnel
+        (#35 PR-B) — relay dials RelayClientHandle::open_stream against
+        the node fingerprint with the inner TLS E2E over the relay
+        stream (spawn_blocking bridge); direct TCP path byte-identical;
+        requests, connection info, and retry resends carry
+        RemoteNodeVia
     - path: src/infra/peer_connection.rs
       responsibility: >
         PeerConnection transport seam — ordered, reliable, full-duplex
@@ -173,7 +181,11 @@ module_map:
     - path: src/infra/remote_node_paths.rs
       responsibility: owner-control socket paths for local runtime ingress
     - path: src/host/ssh/
-      responsibility: SSH remote host bootstrap, connect runtime, secret store
+      responsibility: >
+        SSH remote host bootstrap, connect runtime, secret store;
+        remote-hosts profiles carry the via = "relay" | "direct"
+        selector (absent loads as direct for legacy entries) and the
+        Ctrl-W popup shows it (#35 PR-B)
     - path: src/remote/
       responsibility: remote-session support modules outside the node runtime
   structure:
