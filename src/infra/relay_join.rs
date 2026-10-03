@@ -138,6 +138,10 @@ pub async fn join_relay(
             let config = RelayTomlConfig {
                 address: format!("{host}:{port}"),
                 relay_fingerprint: relay_fingerprint.clone(),
+                // `relay join` writes only the enrollment result; the
+                // heartbeat cadence stays at the default until an operator
+                // adds it to relay.toml by hand.
+                ..RelayTomlConfig::default()
             };
             config.save(toml_path)?;
             Ok(JoinOutcome {
@@ -163,8 +167,9 @@ pub async fn join_relay(
 }
 
 /// Splits `host[:port]`; a missing port defaults to
-/// [`DEFAULT_RELAY_LISTEN_PORT`].
-fn parse_relay_address(address: &str) -> Result<(String, u16), RelayJoinError> {
+/// [`DEFAULT_RELAY_LISTEN_PORT`]. Shared by the join flow and the relay.toml
+/// store's `address` validation.
+pub(crate) fn parse_relay_address(address: &str) -> Result<(String, u16), RelayJoinError> {
     let address = address.trim();
     if address.is_empty() {
         return Err(RelayJoinError::Address(

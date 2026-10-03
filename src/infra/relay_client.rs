@@ -36,8 +36,12 @@ use crate::infra::relay_server::DEFAULT_RELAY_LISTEN_PORT;
 use crate::infra::relay_toml_store::RelayTomlConfig;
 
 /// Default cadence of `Frame::Heartbeat` on an established link: the relay
-/// evicts after 30s of silence (three missed 10s beats).
-pub const DEFAULT_RELAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// evicts after 30s of silence (three missed 10s beats). Single source of
+/// truth is the seconds constant
+/// [`DEFAULT_RELAY_HEARTBEAT_INTERVAL_SECS`](crate::infra::relay_toml_store::DEFAULT_RELAY_HEARTBEAT_INTERVAL_SECS)
+/// in the relay.toml store.
+pub const DEFAULT_RELAY_HEARTBEAT_INTERVAL: Duration =
+    Duration::from_secs(crate::infra::relay_toml_store::DEFAULT_RELAY_HEARTBEAT_INTERVAL_SECS);
 
 /// Upper bound on the relay TLS handshake, matching the server's own
 /// `HANDSHAKE_TIMEOUT`.
@@ -83,11 +87,18 @@ impl RelayClientConfig {
     /// Builds a config from a parsed `relay.toml`, defaulting the heartbeat
     /// cadence to [`DEFAULT_RELAY_HEARTBEAT_INTERVAL`] and the retry policy to
     /// [`RelayRetryPolicy::default`].
+    /// Builds a config from a parsed `relay.toml`, applying the file's
+    /// `heartbeat_interval_secs` when present and
+    /// [`DEFAULT_RELAY_HEARTBEAT_INTERVAL`] when absent.
     pub fn from_relay_toml(relay: RelayTomlConfig, credentials: NodeCredentialPaths) -> Self {
+        let heartbeat_interval = relay
+            .heartbeat_interval_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_RELAY_HEARTBEAT_INTERVAL);
         Self {
             relay,
             credentials,
-            heartbeat_interval: DEFAULT_RELAY_HEARTBEAT_INTERVAL,
+            heartbeat_interval,
             retry: RelayRetryPolicy::default(),
         }
     }
@@ -831,6 +842,7 @@ mod tests {
             RelayTomlConfig {
                 address: "relay.example:7475".to_string(),
                 relay_fingerprint: "ab".to_string(),
+                heartbeat_interval_secs: None,
             },
             NodeCredentialPaths {
                 key_path: std::path::PathBuf::from("node.key"),
@@ -839,6 +851,22 @@ mod tests {
         );
         assert_eq!(config.heartbeat_interval, DEFAULT_RELAY_HEARTBEAT_INTERVAL);
         assert_eq!(config.retry, RelayRetryPolicy::default());
+    }
+
+    #[test]
+    fn from_relay_toml_applies_the_configured_heartbeat() {
+        let config = RelayClientConfig::from_relay_toml(
+            RelayTomlConfig {
+                address: "relay.example:7475".to_string(),
+                relay_fingerprint: "ab".to_string(),
+                heartbeat_interval_secs: Some(30),
+            },
+            NodeCredentialPaths {
+                key_path: std::path::PathBuf::from("node.key"),
+                cert_path: std::path::PathBuf::from("node.crt"),
+            },
+        );
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(30));
     }
 
     #[test]

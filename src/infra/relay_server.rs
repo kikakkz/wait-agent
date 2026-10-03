@@ -84,6 +84,26 @@ pub enum RelayServerError {
     AdminIo(String, io::Error),
 }
 
+/// Enrollment token lifetimes for `relay invite` answers. Defaults follow
+/// the store constants (short-lived one-time invites, long-lived deploy
+/// tokens); `relay serve`'s relay.toml may override either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenTtlConfig {
+    /// Default TTL for one-time invite tokens.
+    pub invite: Duration,
+    /// Default TTL for reusable deploy tokens.
+    pub deploy: Duration,
+}
+
+impl Default for TokenTtlConfig {
+    fn default() -> Self {
+        Self {
+            invite: crate::infra::relay_enrollment::DEFAULT_INVITE_TTL,
+            deploy: crate::infra::relay_enrollment::DEFAULT_DEPLOY_TTL,
+        }
+    }
+}
+
 /// Configuration for [`start`].
 #[derive(Debug, Clone)]
 pub struct RelayServeConfig {
@@ -102,6 +122,11 @@ pub struct RelayServeConfig {
     /// Enrollment token store persistence path (invite tokens survive
     /// restarts). Defaults to `waitagent_home()/relay-enroll-tokens.json`.
     pub tokens_path: PathBuf,
+    /// Admin socket override (absolute UDS path; Unix only). `None` derives
+    /// the socket from the listen address (port+20000 on Windows).
+    pub admin_socket: Option<PathBuf>,
+    /// Enrollment token TTLs answered by `relay invite`.
+    pub token_ttls: TokenTtlConfig,
 }
 
 impl RelayServeConfig {
@@ -117,6 +142,36 @@ impl RelayServeConfig {
             lifecycle: RelayLifecycleConfig::default(),
             capacity: RelayCapacityConfig::default(),
             tokens_path: crate::infra::relay_enrollment::default_token_store_path(),
+            admin_socket: None,
+            token_ttls: TokenTtlConfig::default(),
+        }
+    }
+}
+
+/// Resolves the admin socket address: the configured absolute UDS path when
+/// set (Unix only — the Windows admin listener is the fixed loopback port
+/// derived from `listen`), otherwise the listen-derived default.
+fn admin_addr_for(
+    configured: &Option<PathBuf>,
+    listen: SocketAddr,
+) -> Result<RemoteControlAddr, RelayServerError> {
+    match configured {
+        None => Ok(relay_admin_addr(listen)),
+        Some(path) => {
+            #[cfg(unix)]
+            {
+                Ok(RemoteControlAddr::Unix(path.clone()))
+            }
+            #[cfg(not(unix))]
+            {
+                Err(RelayServerError::AdminIo(
+                    path.display().to_string(),
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "relay.toml `admin_socket` is only supported on Unix; on Windows the admin listener derives from --listen (listen port + 20000)",
+                    ),
+                ))
+            }
         }
     }
 }
@@ -403,7 +458,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let enroll_local_addr = enroll_listener.local_addr()?;
     // The admin socket is the bootstrap/emergency channel: a relay that
     // cannot bind it must not start half-managed.
-    let admin_addr = relay_admin_addr(local_addr);
+    let admin_addr = admin_addr_for(&config.admin_socket, local_addr)?;
     let admin_listener = RemoteControlAsyncListener::bind(&admin_addr)
         .await
         .map_err(|error| RelayServerError::AdminIo(admin_addr.to_arg_string(), error))?;
@@ -441,6 +496,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
             tokens_path: tokens_path.clone(),
             whitelist_dir: config.authorized_nodes_dir.clone(),
             presence: presence.clone(),
+            token_ttls: config.token_ttls,
         },
         shutdown_tx.clone(),
     ));

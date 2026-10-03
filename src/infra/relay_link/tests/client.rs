@@ -28,6 +28,7 @@ pub(super) fn relay_client_config(
         relay: RelayTomlConfig {
             address: addr.to_string(),
             relay_fingerprint,
+            heartbeat_interval_secs: None,
         },
         credentials,
         heartbeat_interval,
