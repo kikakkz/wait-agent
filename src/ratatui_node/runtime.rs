@@ -102,6 +102,9 @@ pub(crate) struct RemoteNodeConnectionInfo {
     /// listening port. Used to choose a shorter offline timeout for `--connect`
     /// peers that are on the same LAN as the control host.
     pub server_can_reach_peer: bool,
+    /// Dial path for reconnects: `Some(Relay)` re-dials through the pinned
+    /// relay, `None` dials directly. Recorded from the host profile.
+    pub via: Option<crate::infra::remote_grpc_transport::RemoteNodeVia>,
 }
 
 const PEER_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -158,6 +161,10 @@ pub(crate) struct SharedState {
     /// from relay `Presence` transitions. Written only by `StateEventLoop`;
     /// a leaf lock (no ordering constraints against other SharedState locks).
     pub(crate) relay_presence: Mutex<HashMap<String, bool>>,
+    /// Relay client handle for `via = "relay"` dials. Installed once at
+    /// startup (before the state loop and any dial can observe it) and only
+    /// taken back at shutdown; a leaf lock, read-only afterwards.
+    pub(crate) relay_client: Mutex<Option<Arc<crate::infra::relay_client::RelayClientHandle>>>,
 }
 
 /// Runtime configuration for agent lifecycle signals.
@@ -242,6 +249,7 @@ impl SharedState {
             remote_node_connections: Mutex::new(HashMap::new()),
             remote_node_auth_rejections: Mutex::new(HashMap::new()),
             relay_presence: Mutex::new(HashMap::new()),
+            relay_client: Mutex::new(None),
         }))
     }
 }
@@ -1147,7 +1155,6 @@ impl RatatuiNodeRuntime {
                 ));
                 None
             });
-        let mut relay_client = None;
         let mut _relay_forwarder = None;
         if let Some(relay) = relay_config {
             let credentials = NodeCredentialPaths::default_paths();
@@ -1158,10 +1165,15 @@ impl RatatuiNodeRuntime {
             } else {
                 let (relay_event_tx, relay_event_rx) =
                     tokio::sync::mpsc::channel::<RelayClientEvent>(16);
-                relay_client = Some(RelayClient::spawn(
+                let handle = RelayClient::spawn(
                     RelayClientConfig::from_relay_toml(relay, credentials),
                     relay_event_tx,
-                ));
+                );
+                // Install the shared handle for relay-via dials before any
+                // consumer can look it up; taken back at shutdown below.
+                if let Ok(mut slot) = self.shared.relay_client.lock() {
+                    *slot = Some(Arc::new(handle));
+                }
                 let state_tx = state_event_loop.sender();
                 _relay_forwarder = Some(std::thread::spawn(move || {
                     forward_relay_link_events(relay_event_rx, state_tx);
@@ -1281,13 +1293,22 @@ impl RatatuiNodeRuntime {
             ingress_network.clone(),
             ingress_backend,
         )?;
+        let relay_client_handle = {
+            let slot = self
+                .shared
+                .relay_client
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            slot.clone()
+        };
         let ingress_runtime = RemoteNodeIngressServerRuntime::new_with_backends(
             ingress_network,
             ingress_publication_runtime,
             RatatuiLocalTargetFactory::new(shared.clone(), self.network.clone()),
             RatatuiLocalAuthorityHostBackend::new(shared.clone(), self.network.clone()),
             RatatuiLocalSessionCatalog::new(shared.clone()),
-        );
+        )
+        .with_relay_client(relay_client_handle);
         let _ingress_guard = match ingress_runtime.start(ingress_catalog_rx) {
             Ok(guard) => {
                 // Bind the same local control socket that legacy sidecar
@@ -1391,10 +1412,23 @@ impl RatatuiNodeRuntime {
             }
         }
 
-        // Stop the persistent relay link; the event forwarder exits on its own
-        // once the client's event channel closes.
-        if let Some(relay_client) = relay_client {
-            relay_client.cancel();
+        // Stop the persistent relay link: taking the slot drops the last Arc
+        // in the common case, and RelayClientHandle::cancel signals the stop
+        // watch and joins the client thread. A dial still holding a clone
+        // keeps it alive; its drop cancels later.
+        let relay_handle = {
+            let mut slot = self
+                .shared
+                .relay_client
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            slot.take()
+        };
+        if let Some(arc) = relay_handle {
+            match Arc::try_unwrap(arc) {
+                Ok(handle) => handle.cancel(),
+                Err(arc) => drop(arc),
+            }
         }
         if let Some(signal_server) = signal_server {
             signal_server.cleanup();

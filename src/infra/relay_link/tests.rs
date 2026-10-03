@@ -29,6 +29,7 @@ mod join;
 mod presence;
 mod routing;
 mod streams;
+mod via_connect;
 
 const NO_DEADLOCK: Duration = Duration::from_secs(10);
 

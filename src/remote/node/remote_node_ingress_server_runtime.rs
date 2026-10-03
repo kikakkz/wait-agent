@@ -105,6 +105,9 @@ pub struct RemoteNodeIngressServerRuntime<
     authority_backend: A,
     local_session_catalog: G,
     network: RemoteNetworkConfig,
+    /// Relay client for `via = "relay"` outbound dials; installed by the node
+    /// runtime after the relay link spawns.
+    relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
 }
 
 pub struct RemoteNodeIngressServerGuard {
@@ -283,7 +286,17 @@ where
             authority_backend,
             local_session_catalog,
             network,
+            relay_client: None,
         }
+    }
+
+    /// Attaches the relay client used for `via = "relay"` outbound dials.
+    pub fn with_relay_client(
+        mut self,
+        relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
+    ) -> Self {
+        self.relay_client = relay_client;
+        self
     }
 
     pub fn run_owner(&self, ready_socket: Option<&str>) -> Result<(), LifecycleError> {
@@ -442,6 +455,7 @@ where
         let authority_backend = self.authority_backend.clone();
         let local_session_catalog = self.local_session_catalog.clone();
         let network = self.network.clone();
+        let relay_client = self.relay_client.clone();
         let shutdown_tx = internal_tx.clone();
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
@@ -457,6 +471,7 @@ where
                     internal_tx,
                     local_catalog_rx,
                     start_authority_socket_watcher: true,
+                    relay_client,
                 },
             );
         });
@@ -1557,6 +1572,7 @@ struct RunNodeIngressServerLoopArgs {
     internal_tx: mpsc::Sender<InternalEvent>,
     local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     start_authority_socket_watcher: bool,
+    relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
 }
 
 fn run_node_ingress_server_loop<
@@ -1581,6 +1597,7 @@ fn run_node_ingress_server_loop<
         internal_tx,
         local_catalog_rx,
         start_authority_socket_watcher,
+        relay_client,
     } = args;
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
     let mut authority_manager = SessionSyncAuthorityManager::with_ingress_events(
@@ -1659,7 +1676,7 @@ fn run_node_ingress_server_loop<
     let mut outbound_guards = HashMap::<String, GrpcRemoteNodeTransportGuard>::new();
     let mut pending_outbound_guards = HashMap::<String, GrpcRemoteNodeTransportGuard>::new();
     let mut pending_outbound_dials = HashSet::<String>::new();
-    let outbound_transport = GrpcRemoteNodeTransport::new();
+    let outbound_transport = GrpcRemoteNodeTransport::new().with_relay_client(relay_client);
     let (outbound_guard_tx, outbound_guard_rx) = mpsc::channel::<(
         String,
         Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError>,
