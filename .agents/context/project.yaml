@@ -22,25 +22,20 @@ task_source:
 current_phase:
   phase_id: relay-phase-1
   phase_title: relay phase 1 (CS star topology, self-hosted)
-  stage_id: relay-1-config
-  stage_title: config surface — relay.toml and remote-hosts via (issue #35)
+  stage_id: relay-1-error-semantics
+  stage_title: structured relay error semantics relay to node to console (issue #36)
 current_focus:
-  default_task_id: "#35"
+  default_task_id: "#36"
   focus_statement: >
-    land the relay config surface (design-doc Phase-1 task 7): node
-    relay.toml (address, relay_fingerprint, heartbeat) and relay
-    relay.toml (listen, admin socket, whitelist dir, token params,
-    heartbeat, capacity limits) load and validate; remote-hosts
-    entries gain an explicit `via = "relay" | "direct"` selector with
-    no implicit fallback; the Ctrl-W connect path dials through the
-    PeerConnection seam choosing relay or direct per the selector —
-    calling relay_client::open_stream for relay targets; direct TCP
-    and socks5 paths stay untouched; all dependencies (#31, #32, #34)
-    are landed
+    land structured relay error semantics end to end (relay -> node ->
+    console), reusing the #32 presence channel; investigate #105 (relay
+    close-cascade stall under scheduler backpressure) before or during
+    this slice — it touches the same teardown paths; the #35 config
+    surface (relay.toml both sides, remote-hosts via selector, Ctrl-W
+    relay dial path) is merged (PRs #104 and #107)
 upcoming_focus:
-  - structured error semantics relay to node to console (issue #36,
-    reuses the #32 presence channel)
   - e2e suite: docker two-node / concurrent sessions (issue #37)
+  - WebUI console (issue #38)
 source_of_truth:
   - AGENTS.md
   - docs/relay-design.md
