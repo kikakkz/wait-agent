@@ -73,6 +73,8 @@ pub(crate) async fn run_link(
         },
         writer,
     );
+    #[cfg(test)]
+    scheduler.publish_for_tests(&peer_fingerprint);
 
     let registered = match register_link(
         &mut reader,
@@ -89,6 +91,8 @@ pub(crate) async fn run_link(
     {
         Some(state) => state,
         None => {
+            #[cfg(test)]
+            scheduler.unpublish_for_tests(&peer_fingerprint);
             drop(outbound_tx);
             drop(reader);
             scheduler.shutdown().await;
@@ -127,6 +131,8 @@ pub(crate) async fn run_link(
     }
     drop(outbound_tx);
     drop(reader);
+    #[cfg(test)]
+    scheduler.unpublish_for_tests(&peer_fingerprint);
     scheduler.shutdown().await;
 }
 

@@ -149,7 +149,7 @@ struct Shared {
 
 /// Scheduler state: the data mutex plus the two wake signals. The notifies
 /// live OUTSIDE the mutex so a signal is never issued while holding it.
-struct SchedulerState {
+pub(crate) struct SchedulerState {
     shared: Mutex<Shared>,
     /// Consumer → writer: work is available.
     work_available: Notify,
@@ -183,6 +183,55 @@ impl SchedulerHandle {
     #[cfg(test)]
     async fn debug_classified_frames(&self) -> u64 {
         lock(&self.state.shared).classified_frames
+    }
+}
+
+/// Test-only registry publishing each link's egress scheduler under the
+/// link's node id. Unit tests hold the [`SchedulerHandle`] directly; relay
+/// integration tests drive a real relay and need to await classification
+/// milestones without racing the writer (issue #122).
+#[cfg(test)]
+pub(crate) mod test_registry {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use super::{lock, SchedulerState};
+
+    fn registry() -> &'static Mutex<HashMap<String, Arc<SchedulerState>>> {
+        static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<SchedulerState>>>> = OnceLock::new();
+        REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(crate) fn register(node_id: &str, state: Arc<SchedulerState>) {
+        if let Ok(mut registry) = registry().lock() {
+            registry.insert(node_id.to_string(), state);
+        }
+    }
+
+    pub(crate) fn unregister(node_id: &str) {
+        if let Ok(mut registry) = registry().lock() {
+            registry.remove(node_id);
+        }
+    }
+
+    /// Cumulative classified-frame count of `node_id`'s link, if registered.
+    pub(crate) async fn classified_frames(node_id: &str) -> Option<u64> {
+        let state = registry().lock().ok()?.get(node_id)?.clone();
+        let frames = lock(&state.shared).classified_frames;
+        Some(frames)
+    }
+}
+
+#[cfg(test)]
+impl SchedulerHandle {
+    /// Publishes this scheduler under the link's node id for integration tests.
+    pub(crate) fn publish_for_tests(&self, node_id: &str) {
+        test_registry::register(node_id, self.state.clone());
+    }
+
+    /// Removes the registration installed by [`Self::publish_for_tests`].
+    pub(crate) fn unpublish_for_tests(&self, node_id: &str) {
+        test_registry::unregister(node_id);
     }
 }
 
