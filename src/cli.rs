@@ -188,6 +188,7 @@ pub enum Command {
     RelayRemove(RelayRemoveCommand),
     GenerateNodeCredentials,
     ProvisionMsys,
+    NodeControl(NodeControlCommand),
     Help(String),
     Version,
 }
@@ -216,6 +217,15 @@ pub struct RatatuiClientCommand;
 #[derive(Debug, Clone, Default)]
 pub struct RatatuiListSessionsCommand {
     pub target: Option<String>,
+}
+
+/// `waitagent __node-command <port> <command>`: send one raw control command
+/// to the local node's control socket and print its one-line JSON response.
+/// Hidden automation surface for the e2e harness and operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeControlCommand {
+    pub port: u16,
+    pub command: String,
 }
 
 /// Used directly by ratatui runtime code; not parsed from the CLI.
@@ -330,6 +340,10 @@ impl Cli {
                 args.remove(0);
                 parse_no_args(args)?;
                 Command::GenerateNodeCredentials
+            }
+            "__node-command" => {
+                args.remove(0);
+                Command::NodeControl(parse_node_control(args)?)
             }
             "__provision-msys" => {
                 args.remove(0);
@@ -492,6 +506,23 @@ fn parse_ratatui_list_sessions(args: Vec<String>) -> Result<RatatuiListSessionsC
     }
 
     Ok(command)
+}
+
+fn parse_node_control(args: Vec<String>) -> Result<NodeControlCommand, CliError> {
+    let mut iter = args.into_iter();
+    let port_text = iter
+        .next()
+        .ok_or_else(|| CliError::MissingValue("__node-command <port> <command>".to_string()))?;
+    let port = port_text.parse::<u16>().map_err(|_| {
+        CliError::InvalidValue("__node-command port".to_string(), port_text.clone())
+    })?;
+    let command = iter.collect::<Vec<_>>().join(" ");
+    if command.is_empty() {
+        return Err(CliError::MissingValue(
+            "__node-command <port> <command>".to_string(),
+        ));
+    }
+    Ok(NodeControlCommand { port, command })
 }
 
 fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
@@ -703,6 +734,58 @@ mod tests {
             parse(&["waitagent", "cleanup"]).command,
             Command::Cleanup
         ));
+    }
+
+    #[test]
+    fn parses_node_command_verb() {
+        match parse(&[
+            "waitagent",
+            "__node-command",
+            "9001",
+            "E2E_RELAY_PROBE abc 4 10",
+        ])
+        .command
+        {
+            Command::NodeControl(command) => {
+                assert_eq!(command.port, 9001);
+                assert_eq!(command.command, "E2E_RELAY_PROBE abc 4 10");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn node_command_requires_a_port_and_a_command() {
+        let error = ["waitagent", "__node-command"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            Cli::parse(error)
+                .expect_err("missing port should fail")
+                .to_string(),
+            "missing value for __node-command <port> <command>"
+        );
+        let error = ["waitagent", "__node-command", "9001"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            Cli::parse(error)
+                .expect_err("missing command should fail")
+                .to_string(),
+            "missing value for __node-command <port> <command>"
+        );
+        let error = ["waitagent", "__node-command", "abc", "LIST_SESSIONS"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            Cli::parse(error)
+                .expect_err("invalid port should fail")
+                .to_string(),
+            "invalid value for __node-command port: abc"
+        );
     }
 
     #[test]

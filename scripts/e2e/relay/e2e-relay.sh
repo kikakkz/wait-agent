@@ -11,7 +11,7 @@
 # host binary to skip the in-docker build (CI and quick local runs).
 #
 # Usage: e2e-relay.sh [scenario ...]
-#   scenarios: smoke (default), reconnect, reregister
+#   scenarios: smoke (default), reconnect, reregister, streams
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -186,9 +186,55 @@ scenario_reregister() {
     log "reregister OK: both nodes re-registered after the relay restart"
 }
 
+scenario_streams() {
+    log "scenario: streams (concurrent relay streams between nodes)"
+    bring_up_topology
+
+    local fp_b
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_b" ] || die "could not read node B's fingerprint"
+
+    # Node A opens 4 concurrent relay streams to node B and holds them for
+    # 10s; the admin usage must show them as active streams while held.
+    local probe_out
+    probe_out=$(mktemp)
+    docker exec "$NODE_A" waitagent __node-command "$NODE_PORT_A" \
+        "E2E_RELAY_PROBE $fp_b 4 10" >"$probe_out" 2>&1 &
+    local probe_pid=$!
+
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    local observed=0 active
+    while ((SECONDS < deadline)); do
+        if active=$(relay_status 2>/dev/null | jq -r '.usage.active_streams' 2>/dev/null); then
+            if [ "$active" -ge 4 ] 2>/dev/null; then
+                observed=1
+                break
+            fi
+        fi
+        sleep 1
+    done
+    wait "$probe_pid" || true
+
+    if [ "$observed" != "1" ]; then
+        cat "$probe_out"
+        rm -f "$probe_out"
+        die "usage.active_streams never reached 4 during the probe"
+    fi
+    if ! jq -e '.type == "Response" and .payload.ok == true
+        and (.payload.message | contains("\"streams_held\":4"))' "$probe_out" >/dev/null; then
+        cat "$probe_out"
+        rm -f "$probe_out"
+        die "probe response did not confirm 4 held streams"
+    fi
+    rm -f "$probe_out"
+
+    log "streams OK: 4 concurrent streams held through the relay"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister)
+    scenarios=(smoke reconnect reregister streams)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -205,8 +251,11 @@ for scenario in "${scenarios[@]}"; do
         reregister)
             scenario_reregister
             ;;
+        streams)
+            scenario_streams
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams)"
             ;;
     esac
     log "scenario '$scenario' passed"

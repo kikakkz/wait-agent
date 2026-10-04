@@ -125,6 +125,18 @@ impl CommandDispatcher {
                 println!("WAITAGENT_CREDENTIALS{}:{}", fingerprint, self.network.port);
                 Ok(())
             }
+            Command::NodeControl(command) => {
+                // Generous timeout: e2e probes (E2E_RELAY_PROBE) hold relay
+                // streams open for seconds before replying.
+                let response = crate::platform::local_ipc::send_node_command_with_timeout(
+                    command.port,
+                    &command.command,
+                    std::time::Duration::from_secs(60),
+                )
+                .map_err(AppError::from)?;
+                println!("{response}");
+                Ok(())
+            }
             Command::Help(help) => {
                 print_banner();
                 println!("{help}");

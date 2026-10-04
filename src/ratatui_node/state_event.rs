@@ -196,6 +196,12 @@ pub(crate) enum StateEvent {
         authority_node_id: String,
         result: Box<Result<crate::domain::session_catalog::ManagedSessionRecord, String>>,
     },
+    /// The asynchronous e2e relay probe finished; the summary (JSON) or the
+    /// error is reported back to the originating one-shot client.
+    E2eRelayProbeResult {
+        client_id: u64,
+        result: Box<Result<String, String>>,
+    },
     /// Timer tick telling the state loop to flush a pending output-driven
     /// snapshot broadcast. Sent by a detached interval thread; only the state
     /// loop consumes it. PTY output events only set a dirty flag and are
@@ -254,6 +260,15 @@ pub(crate) enum ClientCommand {
     SetPublic {
         endpoint: Option<String>,
         save: bool,
+    },
+    /// Test-only probe (issue #37): open `streams` concurrent relay streams
+    /// to `peer` through this node's relay client, hold them open for
+    /// `hold_secs`, then close them. Used by the docker e2e harness to
+    /// exercise concurrent multi-session topology without a TUI.
+    E2eRelayProbe {
+        peer: String,
+        streams: u32,
+        hold_secs: u32,
     },
 }
 
