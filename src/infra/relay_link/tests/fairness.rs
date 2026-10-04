@@ -4,6 +4,8 @@
 //! control frames overtake bulk data. End-to-end stream credit (the nodes'
 //! own window) stays the first backpressure layer.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -56,6 +58,28 @@ async fn read_one(link: &mut ReadHalf<ClientTls>) -> Frame {
         .await
         .expect("frame within deadline")
         .expect("frame decodes")
+}
+
+/// Awaits the relay→`node_id` link's egress scheduler classifying
+/// `additional` frames beyond `baseline` in total (issue #122).
+/// Classification is the ordering point these tests assert on: any wire-level
+/// rendezvous is blind to frames the kernel socket buffer hides, and a
+/// control-channel bypass can even answer before a bulk frame is classified.
+async fn await_classified(node_id: &str, baseline: u64, additional: u64) {
+    timeout(NO_DEADLOCK, async {
+        loop {
+            if let Some(count) =
+                crate::infra::relay_scheduler::test_registry::classified_frames(node_id).await
+            {
+                if count >= baseline + additional {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{additional} frames classified on {node_id} within deadline"));
 }
 
 /// Raw links register explicitly (the mux client does this inside its run
@@ -156,15 +180,22 @@ async fn no_head_of_line_blocking_for_a_stalled_stream() {
     .await;
     let stalled_target_id = target_ids[0];
     let live_target_id = target_ids[1];
-    let watch_target = pair.target.fingerprint();
-    // The probe moves into the producer task; the assert below keeps this
-    // binding for the equality check.
-    let probe_target = watch_target.clone();
+    let scheduler_key = pair.target.fingerprint();
 
-    // Pump the stalled stream well past one bucket's worth of data, then
-    // send the live stream's marker.
-    const PUMP_FRAMES: usize = 128; // 2 MiB: bucket 1 MiB + ingress slack
-    let (mut source_reader, mut source_writer) = split_link(source_link);
+    // Pump the stalled stream well past one bucket, then the live stream's
+    // marker. The drain runs concurrently: bulk classification only proceeds
+    // while the stalled bucket empties, and the bucket only empties while
+    // the target reads. The overtake assertion is anchored at the scheduler
+    // (issue #122): the relay→target socket can silently hold frames in the
+    // kernel buffer, so wire order alone cannot show scheduler fairness, and
+    // a control-channel rendezvous can fire before the marker is even
+    // classified. The drain therefore counts stalled bytes that arrive AFTER
+    // the marker was classified (observed through the scheduler's test
+    // registry); from that moment the deficit-round-robin scheduler must
+    // egress the marker within roughly one stalled-bucket round — never
+    // behind the backlog.
+    const PUMP_FRAMES: usize = 512; // 8 MiB: well above the 1 MiB bucket
+    let (_source_reader, mut source_writer) = split_link(source_link);
     let producer = tokio::spawn(async move {
         let payload = vec![0x11u8; MAX_PAYLOAD_USIZE];
         for _ in 0..PUMP_FRAMES {
@@ -187,54 +218,55 @@ async fn no_head_of_line_blocking_for_a_stalled_stream() {
         )
         .await
         .expect("marker frame");
-        // Rendezvous: the hub answers a Watch with one replay Presence only
-        // after every earlier frame on this link was processed, so reading
-        // the replay proves the marker reached the relay's ingress. Without
-        // this barrier a slow runner (Windows CI, issue #119) can still have
-        // the marker upstream of the relay when the backlog drains, and the
-        // overtake below is never exercised.
-        write_frame(
-            &mut source_writer,
-            &Frame::Watch {
-                node_id: probe_target,
-            },
-        )
-        .await
-        .expect("watch frame");
     });
 
-    let replay = read_one(&mut source_reader).await;
-    assert!(
-        matches!(
-            replay,
-            Frame::Presence { ref node_id, online: true } if node_id == &watch_target
-        ),
-        "the watch replay confirms the target is online: {replay:?}"
-    );
-    producer.await.expect("producer");
-
-    // The target reads everything but "processes" only the live stream:
-    // the stalled stream's bytes are counted and dropped (its consumer is
-    // absent).
-    let mut stalled_bytes = 0usize;
-    loop {
-        let frame = read_one(&mut pair.target_reader).await;
-        match frame {
-            Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
-                stalled_bytes += payload.len()
+    // The two forwarded OpenStream frames classified before the pump; the
+    // barrier counts relative to the pre-pump snapshot.
+    let pre_pump = crate::infra::relay_scheduler::test_registry::classified_frames(&scheduler_key)
+        .await
+        .expect("target link scheduler registered");
+    let barrier = Arc::new(AtomicBool::new(false));
+    let drain = tokio::spawn({
+        let barrier = barrier.clone();
+        async move {
+            let mut baseline = None;
+            let mut stalled_bytes = 0usize;
+            loop {
+                if baseline.is_none() && barrier.load(Ordering::Relaxed) {
+                    baseline = Some(stalled_bytes);
+                }
+                let frame = read_one(&mut pair.target_reader).await;
+                match frame {
+                    Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
+                        stalled_bytes += payload.len()
+                    }
+                    Frame::Data { stream_id, payload } if stream_id == live_target_id => {
+                        assert_eq!(payload, b"marker");
+                        return (baseline.unwrap_or(stalled_bytes), stalled_bytes);
+                    }
+                    other => panic!("unexpected frame: {other:?}"),
+                }
             }
-            Frame::Data { stream_id, payload } if stream_id == live_target_id => {
-                assert_eq!(payload, b"marker");
-                break;
-            }
-            other => panic!("unexpected frame: {other:?}"),
         }
-    }
+    });
+
+    await_classified(&scheduler_key, pre_pump, PUMP_FRAMES as u64 + 1).await;
+    barrier.store(true, Ordering::Relaxed);
+
+    let (baseline, stalled_bytes) = drain.await.expect("drain");
+    let post_classification_bytes = stalled_bytes - baseline;
+    const BUCKET_BYTES: usize = 1024 * 1024;
+    const ROUND_BYTES: usize = 64 * 1024;
+    // A pre-classification frame still unread when the drain observes the
+    // flag is counted post-barrier; the concurrent drain keeps the socket
+    // buffer near empty, so a few frames cover it.
+    const FLAG_CHECK_LAG_BYTES: usize = 8 * MAX_PAYLOAD_USIZE;
     assert!(
-        stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
-        "the marker must overtake the stalled stream's backlog (saw {stalled_bytes} bytes)"
+        post_classification_bytes <= BUCKET_BYTES + ROUND_BYTES + FLAG_CHECK_LAG_BYTES,
+        "once classified, the marker must egress within one stalled-bucket round, not behind the backlog (saw {post_classification_bytes} bytes after classification)"
     );
 
+    producer.await.expect("producer");
     pair.server.server.shutdown().await;
 }
 
@@ -334,13 +366,18 @@ async fn control_frames_overtake_bulk_backlog() {
     .await;
     let stalled_target_id = target_ids[0];
     let closing_target_id = target_ids[1];
-    let watch_target = pair.target.fingerprint();
-    // The probe moves into the producer task; the assert below keeps this
-    // binding for the equality check.
-    let probe_target = watch_target.clone();
+    let scheduler_key = pair.target.fingerprint();
 
-    const PUMP_FRAMES: usize = 128;
-    let (mut source_reader, mut source_writer) = split_link(source_link);
+    // Pump the stalled stream well past one bucket, then tear the second
+    // stream down: the forwarded CloseStream classifies on the target link's
+    // control channel and must egress before the stalled bulk still queued
+    // in the scheduler (issue #105). Anchored at classification like
+    // `no_head_of_line_blocking_for_a_stalled_stream` (issue #122): the
+    // kernel socket buffer can hide stalled frames from any wire-level
+    // assertion, so the bound below counts only bytes emitted after the
+    // teardown classified.
+    const PUMP_FRAMES: usize = 512; // 8 MiB: well above the 1 MiB bucket
+    let (_source_reader, mut source_writer) = split_link(source_link);
     let producer = tokio::spawn(async move {
         let payload = vec![0x22u8; MAX_PAYLOAD_USIZE];
         for _ in 0..PUMP_FRAMES {
@@ -354,49 +391,53 @@ async fn control_frames_overtake_bulk_backlog() {
             .await
             .expect("stalled-stream frame");
         }
-        // Teardown the second stream: the relay forwards CloseStream to the
-        // target as a priority frame on the target link's scheduler.
         write_frame(&mut source_writer, &Frame::CloseStream { stream_id: 3 })
             .await
             .expect("close stream");
-        // Rendezvous (issue #119): the replay Presence proves the teardown
-        // reached the relay's ingress before the target starts draining.
-        write_frame(
-            &mut source_writer,
-            &Frame::Watch {
-                node_id: probe_target,
-            },
-        )
-        .await
-        .expect("watch frame");
     });
 
-    let replay = read_one(&mut source_reader).await;
-    assert!(
-        matches!(
-            replay,
-            Frame::Presence { ref node_id, online: true } if node_id == &watch_target
-        ),
-        "the watch replay confirms the target is online: {replay:?}"
-    );
-    producer.await.expect("producer");
-
-    let mut stalled_bytes = 0usize;
-    loop {
-        let frame = read_one(&mut pair.target_reader).await;
-        match frame {
-            Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
-                stalled_bytes += payload.len()
+    let pre_pump = crate::infra::relay_scheduler::test_registry::classified_frames(&scheduler_key)
+        .await
+        .expect("target link scheduler registered");
+    let barrier = Arc::new(AtomicBool::new(false));
+    let drain = tokio::spawn({
+        let barrier = barrier.clone();
+        async move {
+            let mut baseline = None;
+            let mut stalled_bytes = 0usize;
+            loop {
+                if baseline.is_none() && barrier.load(Ordering::Relaxed) {
+                    baseline = Some(stalled_bytes);
+                }
+                let frame = read_one(&mut pair.target_reader).await;
+                match frame {
+                    Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
+                        stalled_bytes += payload.len()
+                    }
+                    Frame::CloseStream { stream_id } if stream_id == closing_target_id => {
+                        return (baseline.unwrap_or(stalled_bytes), stalled_bytes)
+                    }
+                    other => panic!("unexpected frame: {other:?}"),
+                }
             }
-            Frame::CloseStream { stream_id } if stream_id == closing_target_id => break,
-            other => panic!("unexpected frame: {other:?}"),
         }
-    }
+    });
+
+    await_classified(&scheduler_key, pre_pump, PUMP_FRAMES as u64 + 1).await;
+    barrier.store(true, Ordering::Relaxed);
+
+    let (baseline, stalled_bytes) = drain.await.expect("drain");
+    let post_classification_bytes = stalled_bytes - baseline;
+    // A control frame egresses from the priority queue, ahead of every
+    // queued bulk frame; only the flag-check lag can credit it with stalled
+    // bytes.
+    const FLAG_CHECK_LAG_BYTES: usize = 8 * MAX_PAYLOAD_USIZE;
     assert!(
-        stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
-        "the teardown must overtake the stalled stream's backlog (saw {stalled_bytes} bytes)"
+        post_classification_bytes <= FLAG_CHECK_LAG_BYTES,
+        "once classified, the teardown must egress ahead of the scheduler's bulk backlog (saw {post_classification_bytes} bytes after classification)"
     );
 
+    producer.await.expect("producer");
     pair.server.server.shutdown().await;
 }
 
@@ -419,18 +460,17 @@ async fn close_stream_arrives_under_bulk_backpressure() {
     )
     .await;
     let stalled_target_id = target_ids[0];
-    let watch_target = pair.target.fingerprint();
-    // The probe moves into the producer task; the assert below keeps this
-    // binding for the equality check.
-    let probe_target = watch_target.clone();
+    let scheduler_key = pair.target.fingerprint();
 
-    // Pump stream 1 well past its 1 MiB bucket cap while the target never
-    // consumes stream 1's data, then tear that same stream down: the
-    // forwarded CloseStream reaches the target link's scheduler behind a
-    // parked bulk arm, and must classify via the control channel instead of
-    // queueing behind the stalled stream (issue #105).
-    const PUMP_FRAMES: usize = 128; // 2 MiB: bucket 1 MiB + ingress slack
-    let (mut source_reader, mut source_writer) = split_link(source_link);
+    // Pump stream 1 well past its 1 MiB bucket cap, then tear that same
+    // stream down: the forwarded CloseStream reaches the target link's
+    // scheduler behind a parked bulk arm and must classify via the control
+    // channel instead of queueing behind the stalled stream (issue #105).
+    // Anchored at classification like the sibling tests (issue #122): only
+    // bytes emitted after the teardown classified may be counted against
+    // the bypass, never the kernel-buffered backlog.
+    const PUMP_FRAMES: usize = 512; // 8 MiB: well above the 1 MiB bucket
+    let (_source_reader, mut source_writer) = split_link(source_link);
     let producer = tokio::spawn(async move {
         let payload = vec![0x33u8; MAX_PAYLOAD_USIZE];
         for _ in 0..PUMP_FRAMES {
@@ -447,47 +487,50 @@ async fn close_stream_arrives_under_bulk_backpressure() {
         write_frame(&mut source_writer, &Frame::CloseStream { stream_id: 1 })
             .await
             .expect("close stream");
-        // Rendezvous (issue #119): the replay Presence proves the teardown
-        // reached the relay's ingress before the target starts draining.
-        write_frame(
-            &mut source_writer,
-            &Frame::Watch {
-                node_id: probe_target,
-            },
-        )
-        .await
-        .expect("watch frame");
     });
 
-    let replay = read_one(&mut source_reader).await;
-    assert!(
-        matches!(
-            replay,
-            Frame::Presence { ref node_id, online: true } if node_id == &watch_target
-        ),
-        "the watch replay confirms the target is online: {replay:?}"
-    );
-    producer.await.expect("producer");
+    let pre_pump = crate::infra::relay_scheduler::test_registry::classified_frames(&scheduler_key)
+        .await
+        .expect("target link scheduler registered");
+    let barrier = Arc::new(AtomicBool::new(false));
+    let drain = tokio::spawn({
+        let barrier = barrier.clone();
+        async move {
+            let mut baseline = None;
+            let mut stalled_bytes = 0usize;
+            loop {
+                if baseline.is_none() && barrier.load(Ordering::Relaxed) {
+                    baseline = Some(stalled_bytes);
+                }
+                let frame = read_one(&mut pair.target_reader).await;
+                match frame {
+                    Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
+                        stalled_bytes += payload.len()
+                    }
+                    Frame::CloseStream { stream_id } if stream_id == stalled_target_id => {
+                        return (baseline.unwrap_or(stalled_bytes), stalled_bytes)
+                    }
+                    other => panic!("unexpected frame: {other:?}"),
+                }
+            }
+        }
+    });
+
+    await_classified(&scheduler_key, pre_pump, PUMP_FRAMES as u64 + 1).await;
+    barrier.store(true, Ordering::Relaxed);
 
     // The target keeps reading the wire but drops stream 1's bytes (its
     // consumer is absent): the teardown must still arrive, ahead of the
-    // bulk backlog that stalled the stream.
-    let mut stalled_bytes = 0usize;
-    loop {
-        let frame = read_one(&mut pair.target_reader).await;
-        match frame {
-            Frame::Data { stream_id, payload } if stream_id == stalled_target_id => {
-                stalled_bytes += payload.len()
-            }
-            Frame::CloseStream { stream_id } if stream_id == stalled_target_id => break,
-            other => panic!("unexpected frame: {other:?}"),
-        }
-    }
+    // bulk still queued in the scheduler.
+    let (baseline, stalled_bytes) = drain.await.expect("drain");
+    let post_classification_bytes = stalled_bytes - baseline;
+    const FLAG_CHECK_LAG_BYTES: usize = 8 * MAX_PAYLOAD_USIZE;
     assert!(
-        stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
-        "the stalled stream's own teardown must bypass its bulk backlog (saw {stalled_bytes} bytes)"
+        post_classification_bytes <= FLAG_CHECK_LAG_BYTES,
+        "once classified, the teardown must bypass the stalled stream's queued bulk (saw {post_classification_bytes} bytes after classification)"
     );
 
+    producer.await.expect("producer");
     pair.server.server.shutdown().await;
 }
 
