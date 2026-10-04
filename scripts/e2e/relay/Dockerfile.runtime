@@ -1,0 +1,9 @@
+# Runtime-only stage for WA_E2E_BINARY runs: the orchestrator stages a
+# prebuilt host binary next to this file as `waitagent` and builds with the
+# staged directory as the context. Same base as the full Dockerfile's
+# runtime stage so scenario behavior is identical.
+#
+# ubuntu:24.04 rather than debian:bookworm-slim: both are glibc bases, and
+# the harness must run on hosts without registry access to Docker Hub.
+FROM ubuntu:24.04
+COPY waitagent /usr/local/bin/waitagent
