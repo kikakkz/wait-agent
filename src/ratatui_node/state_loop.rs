@@ -282,7 +282,9 @@ fn run_state_event_loop(
                     *result,
                 );
             }
-
+            StateEvent::E2eRelayProbeResult { client_id, result } => {
+                handle_e2e_relay_probe_result(&client_writer, client_id, *result);
+            }
             StateEvent::CreateAuthorityHostSession {
                 request_id,
                 cols,
@@ -776,6 +778,23 @@ fn handle_client_command_event(
     } = &command
     {
         create_remote_session_target(shared, client_id, authority_node_id, cwd, state_event_tx);
+        return;
+    }
+
+    if let ClientCommand::E2eRelayProbe {
+        peer,
+        streams,
+        hold_secs,
+    } = &command
+    {
+        run_e2e_relay_probe(
+            shared.clone(),
+            client_id,
+            peer.clone(),
+            *streams,
+            *hold_secs,
+            state_event_tx,
+        );
         return;
     }
 
@@ -1572,6 +1591,12 @@ fn handle_client_command(
             CommandOutcome::Error(
                 "CreateRemoteSession must be handled by the event loop".to_string(),
             )
+        }
+
+        ClientCommand::E2eRelayProbe { .. } => {
+            // Handled asynchronously in the event-loop dispatcher like
+            // CreateRemoteSession.
+            CommandOutcome::Error("E2eRelayProbe must be handled by the event loop".to_string())
         }
 
         ClientCommand::CloseSession { .. } => {
@@ -2509,6 +2534,96 @@ fn perform_create_remote_session_on_authority(
     session_creation
         .create_session(request)
         .map_err(|error| error.to_string())
+}
+
+/// Runs the e2e relay probe off the state loop thread, like remote session
+/// creation: the probe blocks on stream IO for `hold_secs` and must not stall
+/// the single writer loop.
+fn run_e2e_relay_probe(
+    shared: Arc<SharedState>,
+    client_id: u64,
+    peer: String,
+    streams: u32,
+    hold_secs: u32,
+    state_event_tx: mpsc::Sender<StateEvent>,
+) {
+    std::thread::spawn(move || {
+        let result = perform_e2e_relay_probe(&shared, &peer, streams, hold_secs);
+        let _ = state_event_tx.send(StateEvent::E2eRelayProbeResult {
+            client_id,
+            result: Box::new(result),
+        });
+    });
+}
+
+/// Opens `streams` concurrent relay streams to `peer` and holds them open
+/// for `hold_secs`. Each stream is drained on its own task so a peer that
+/// closes early (the peer's ingress serves these as gRPC connections) cannot
+/// wedge the hold. Returns a JSON summary for the e2e harness.
+fn perform_e2e_relay_probe(
+    shared: &Arc<SharedState>,
+    peer: &str,
+    streams: u32,
+    hold_secs: u32,
+) -> Result<String, String> {
+    // Scope the lock: clone the handle and drop the guard before any IO so
+    // no mutex is held across awaits (m07).
+    let relay_client = {
+        let slot = shared
+            .relay_client
+            .lock()
+            .map_err(|_| "relay client lock poisoned".to_string())?;
+        slot.clone()
+            .ok_or_else(|| "no relay configured on this node".to_string())?
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("build probe runtime: {error}"))?;
+    runtime.block_on(async move {
+        let mut held = Vec::new();
+        for _ in 0..streams {
+            let client = relay_client.clone();
+            let peer = peer.to_string();
+            let stream = tokio::task::spawn_blocking(move || client.open_stream(&peer))
+                .await
+                .map_err(|error| format!("open task failed: {error}"))?
+                .map_err(|error| format!("open_stream failed: {error}"))?;
+            held.push(tokio::spawn(async move {
+                let mut stream = stream;
+                let mut sink = vec![0u8; 8192];
+                loop {
+                    match tokio::io::AsyncReadExt::read(&mut stream, &mut sink).await {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            }));
+        }
+        let opened = held.len() as u32;
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(hold_secs))).await;
+        let summary = serde_json::json!({
+            "ok": true,
+            "streams_held": opened,
+            "hold_secs": hold_secs,
+        });
+        Ok(summary.to_string())
+    })
+}
+
+fn handle_e2e_relay_probe_result(
+    client_writer: &ClientWriterHandle,
+    client_id: u64,
+    result: Result<String, String>,
+) {
+    let outcome = match result {
+        Ok(summary) => CommandOutcome::Message(summary),
+        Err(message) => CommandOutcome::Error(message),
+    };
+    let response: ControlResponse = outcome.into();
+    let payload = response_json(&response);
+    client_writer.send(ClientWriterRequest::Write { client_id, payload });
 }
 
 fn handle_remote_session_create_result(

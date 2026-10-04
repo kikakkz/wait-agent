@@ -197,6 +197,19 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                     authority_node_id,
                     cwd,
                 })
+            } else if let Some(args) = trimmed.strip_prefix("E2E_RELAY_PROBE ") {
+                let mut parts = args.split_whitespace();
+                let peer = parts.next().unwrap_or("").to_string();
+                let streams = parts.next().and_then(|value| value.parse().ok());
+                let hold_secs = parts.next().and_then(|value| value.parse().ok());
+                match (peer.is_empty(), streams, hold_secs) {
+                    (false, Some(streams), Some(hold_secs)) => Some(ClientCommand::E2eRelayProbe {
+                        peer,
+                        streams,
+                        hold_secs,
+                    }),
+                    _ => None,
+                }
             } else if let Some(cwd) = trimmed.strip_prefix("CREATE_LOCAL_SESSION ") {
                 Some(ClientCommand::CreateLocalSession {
                     cwd: Some(cwd.to_string()),
@@ -290,6 +303,23 @@ mod tests {
             parse_command("CREATE_LOCAL_SESSION"),
             Some(ClientCommand::CreateLocalSession { cwd: None })
         ));
+    }
+
+    #[test]
+    fn parse_e2e_relay_probe_command() {
+        assert!(matches!(
+            parse_command("E2E_RELAY_PROBE deadbeef 4 10"),
+            Some(ClientCommand::E2eRelayProbe {
+                ref peer,
+                streams: 4,
+                hold_secs: 10,
+            }) if peer == "deadbeef"
+        ));
+        // Missing or unparseable fields reject the command.
+        assert!(parse_command("E2E_RELAY_PROBE").is_none());
+        assert!(parse_command("E2E_RELAY_PROBE deadbeef").is_none());
+        assert!(parse_command("E2E_RELAY_PROBE deadbeef x 10").is_none());
+        assert!(parse_command("E2E_RELAY_PROBE  deadbeef 4 10").is_some());
     }
 
     #[test]
