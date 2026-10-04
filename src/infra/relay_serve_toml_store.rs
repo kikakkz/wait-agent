@@ -321,8 +321,11 @@ mod tests {
     fn sample() -> RelayServeTomlConfig {
         RelayServeTomlConfig {
             listen: Some("127.0.0.1:7475".parse().expect("socket addr")),
-            admin_socket: Some(PathBuf::from("/tmp/waitagent-relay-admin.sock")),
-            whitelist_dir: Some(PathBuf::from("/tmp/authorized_nodes")),
+            // `admin_socket` must stay absolute on every platform:
+            // `std::env::temp_dir()` is absolute on both Unix and Windows,
+            // where a hardcoded "/tmp/..." path would fail validation.
+            admin_socket: Some(std::env::temp_dir().join("waitagent-relay-admin.sock")),
+            whitelist_dir: Some(std::env::temp_dir().join("authorized_nodes")),
             token_invite_ttl_secs: Some(900),
             token_deploy_ttl_secs: Some(86_400),
             heartbeat_offline_after_secs: Some(45),
@@ -447,8 +450,11 @@ mod tests {
     #[test]
     fn round_trips_paths_with_special_characters() {
         let path = unique_path("path-escapes");
+        // Quoting/escaping round-trip (quote, backslash, newline) over a
+        // path that stays absolute on every platform: `temp_dir()` anchors
+        // it, the suffix exercises the escapes.
         let config = RelayServeTomlConfig {
-            admin_socket: Some(PathBuf::from("/tmp/ad\"min\\admin\n.sock")),
+            admin_socket: Some(std::env::temp_dir().join("ad\"min\\admin\n.sock")),
             ..RelayServeTomlConfig::default()
         };
         config.save(&path).expect("save should succeed");

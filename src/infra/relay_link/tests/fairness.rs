@@ -156,11 +156,15 @@ async fn no_head_of_line_blocking_for_a_stalled_stream() {
     .await;
     let stalled_target_id = target_ids[0];
     let live_target_id = target_ids[1];
+    let watch_target = pair.target.fingerprint();
+    // The probe moves into the producer task; the assert below keeps this
+    // binding for the equality check.
+    let probe_target = watch_target.clone();
 
     // Pump the stalled stream well past one bucket's worth of data, then
     // send the live stream's marker.
     const PUMP_FRAMES: usize = 128; // 2 MiB: bucket 1 MiB + ingress slack
-    let (_source_reader, mut source_writer) = split_link(source_link);
+    let (mut source_reader, mut source_writer) = split_link(source_link);
     let producer = tokio::spawn(async move {
         let payload = vec![0x11u8; MAX_PAYLOAD_USIZE];
         for _ in 0..PUMP_FRAMES {
@@ -183,7 +187,31 @@ async fn no_head_of_line_blocking_for_a_stalled_stream() {
         )
         .await
         .expect("marker frame");
+        // Rendezvous: the hub answers a Watch with one replay Presence only
+        // after every earlier frame on this link was processed, so reading
+        // the replay proves the marker reached the relay's ingress. Without
+        // this barrier a slow runner (Windows CI, issue #119) can still have
+        // the marker upstream of the relay when the backlog drains, and the
+        // overtake below is never exercised.
+        write_frame(
+            &mut source_writer,
+            &Frame::Watch {
+                node_id: probe_target,
+            },
+        )
+        .await
+        .expect("watch frame");
     });
+
+    let replay = read_one(&mut source_reader).await;
+    assert!(
+        matches!(
+            replay,
+            Frame::Presence { ref node_id, online: true } if node_id == &watch_target
+        ),
+        "the watch replay confirms the target is online: {replay:?}"
+    );
+    producer.await.expect("producer");
 
     // The target reads everything but "processes" only the live stream:
     // the stalled stream's bytes are counted and dropped (its consumer is
@@ -202,7 +230,6 @@ async fn no_head_of_line_blocking_for_a_stalled_stream() {
             other => panic!("unexpected frame: {other:?}"),
         }
     }
-    producer.await.expect("producer");
     assert!(
         stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
         "the marker must overtake the stalled stream's backlog (saw {stalled_bytes} bytes)"
@@ -307,9 +334,13 @@ async fn control_frames_overtake_bulk_backlog() {
     .await;
     let stalled_target_id = target_ids[0];
     let closing_target_id = target_ids[1];
+    let watch_target = pair.target.fingerprint();
+    // The probe moves into the producer task; the assert below keeps this
+    // binding for the equality check.
+    let probe_target = watch_target.clone();
 
     const PUMP_FRAMES: usize = 128;
-    let (_source_reader, mut source_writer) = split_link(source_link);
+    let (mut source_reader, mut source_writer) = split_link(source_link);
     let producer = tokio::spawn(async move {
         let payload = vec![0x22u8; MAX_PAYLOAD_USIZE];
         for _ in 0..PUMP_FRAMES {
@@ -328,7 +359,27 @@ async fn control_frames_overtake_bulk_backlog() {
         write_frame(&mut source_writer, &Frame::CloseStream { stream_id: 3 })
             .await
             .expect("close stream");
+        // Rendezvous (issue #119): the replay Presence proves the teardown
+        // reached the relay's ingress before the target starts draining.
+        write_frame(
+            &mut source_writer,
+            &Frame::Watch {
+                node_id: probe_target,
+            },
+        )
+        .await
+        .expect("watch frame");
     });
+
+    let replay = read_one(&mut source_reader).await;
+    assert!(
+        matches!(
+            replay,
+            Frame::Presence { ref node_id, online: true } if node_id == &watch_target
+        ),
+        "the watch replay confirms the target is online: {replay:?}"
+    );
+    producer.await.expect("producer");
 
     let mut stalled_bytes = 0usize;
     loop {
@@ -341,7 +392,6 @@ async fn control_frames_overtake_bulk_backlog() {
             other => panic!("unexpected frame: {other:?}"),
         }
     }
-    producer.await.expect("producer");
     assert!(
         stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
         "the teardown must overtake the stalled stream's backlog (saw {stalled_bytes} bytes)"
@@ -369,6 +419,10 @@ async fn close_stream_arrives_under_bulk_backpressure() {
     )
     .await;
     let stalled_target_id = target_ids[0];
+    let watch_target = pair.target.fingerprint();
+    // The probe moves into the producer task; the assert below keeps this
+    // binding for the equality check.
+    let probe_target = watch_target.clone();
 
     // Pump stream 1 well past its 1 MiB bucket cap while the target never
     // consumes stream 1's data, then tear that same stream down: the
@@ -376,7 +430,7 @@ async fn close_stream_arrives_under_bulk_backpressure() {
     // parked bulk arm, and must classify via the control channel instead of
     // queueing behind the stalled stream (issue #105).
     const PUMP_FRAMES: usize = 128; // 2 MiB: bucket 1 MiB + ingress slack
-    let (_source_reader, mut source_writer) = split_link(source_link);
+    let (mut source_reader, mut source_writer) = split_link(source_link);
     let producer = tokio::spawn(async move {
         let payload = vec![0x33u8; MAX_PAYLOAD_USIZE];
         for _ in 0..PUMP_FRAMES {
@@ -393,7 +447,27 @@ async fn close_stream_arrives_under_bulk_backpressure() {
         write_frame(&mut source_writer, &Frame::CloseStream { stream_id: 1 })
             .await
             .expect("close stream");
+        // Rendezvous (issue #119): the replay Presence proves the teardown
+        // reached the relay's ingress before the target starts draining.
+        write_frame(
+            &mut source_writer,
+            &Frame::Watch {
+                node_id: probe_target,
+            },
+        )
+        .await
+        .expect("watch frame");
     });
+
+    let replay = read_one(&mut source_reader).await;
+    assert!(
+        matches!(
+            replay,
+            Frame::Presence { ref node_id, online: true } if node_id == &watch_target
+        ),
+        "the watch replay confirms the target is online: {replay:?}"
+    );
+    producer.await.expect("producer");
 
     // The target keeps reading the wire but drops stream 1's bytes (its
     // consumer is absent): the teardown must still arrive, ahead of the
@@ -409,7 +483,6 @@ async fn close_stream_arrives_under_bulk_backpressure() {
             other => panic!("unexpected frame: {other:?}"),
         }
     }
-    producer.await.expect("producer");
     assert!(
         stalled_bytes < PUMP_FRAMES * MAX_PAYLOAD_USIZE,
         "the stalled stream's own teardown must bypass its bulk backlog (saw {stalled_bytes} bytes)"
