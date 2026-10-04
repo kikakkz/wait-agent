@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: ci-gate check-branch test-tools check-trailers lint-sh ai-check
+.PHONY: ci-gate check-branch test-tools check-trailers lint-sh ai-check e2e-relay
 
 # The CI-first rule: every change lands together with its checks.
 # Rust checks live in the pre-commit hook and .github/workflows/ci.yaml.
@@ -27,3 +27,8 @@ lint-sh:
 
 ai-check:
 	.github/scripts/check-agents-integrity.sh
+
+# Relay docker e2e (issue #37): isolated two-nodes-plus-relay topology.
+# Set WA_E2E_BINARY to a prebuilt binary to skip the in-docker release build.
+e2e-relay:
+	@scripts/e2e/relay/e2e-relay.sh
