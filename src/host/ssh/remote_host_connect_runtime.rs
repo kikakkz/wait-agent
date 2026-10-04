@@ -79,6 +79,11 @@ pub struct RemoteHostConnectOutcome {
 
 pub struct RemoteHostConnectRuntime<H, P, B> {
     history_store: H,
+    /// Consulted for remote-install proxy settings when a connect request
+    /// enables `use_install_proxy`. Production uses the real waitagent home
+    /// file; tests override it via the test-only `with_proxy_store` builder
+    /// so user state cannot leak into the suite.
+    proxy_store: RemoteInstallProxyStore,
     port_probe_factory: P,
     bootstrapper: B,
     shell_detector: Arc<dyn RemoteShellDetector>,
@@ -145,6 +150,7 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
     ) -> Self {
         Self {
             history_store,
+            proxy_store: RemoteInstallProxyStore::default(),
             port_probe_factory,
             bootstrapper,
             shell_detector,
@@ -159,6 +165,16 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
     /// (see [`AuthRejectionChecker`]).
     pub fn with_auth_rejection_checker(mut self, checker: AuthRejectionChecker) -> Self {
         self.auth_rejection = Some(checker);
+        self
+    }
+
+    /// Scope the remote-install proxy settings store to a custom path.
+    /// Tests point it at a temp file so the connect path never reads the
+    /// real waitagent home; production relies on `Default`, which resolves
+    /// the real `remote-install-proxy.toml`.
+    #[cfg(test)]
+    pub fn with_proxy_store(mut self, proxy_store: RemoteInstallProxyStore) -> Self {
+        self.proxy_store = proxy_store;
         self
     }
 }
@@ -279,7 +295,8 @@ where
         plan.install_reachability_preflight_command =
             Some(default_install_reachability_preflight_command(remote_shell));
         if request.use_install_proxy {
-            let proxy_config = RemoteInstallProxyStore::default()
+            let proxy_config = self
+                .proxy_store
                 .load_active_config()
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
             if proxy_config.has_proxy() {
@@ -855,6 +872,10 @@ mod tests {
         Arc::new(MemoryOperatorKeyStore::generate().unwrap())
     }
 
+    fn test_proxy_store() -> RemoteInstallProxyStore {
+        RemoteInstallProxyStore::new(unique_path("remote-host-connect-proxy.toml"))
+    }
+
     #[test]
     fn split_host_ssh_port_strips_numeric_suffix() {
         assert_eq!(
@@ -1108,7 +1129,8 @@ mod tests {
                 Ok(remote_target("10.1.29.130#7476", "created-1")),
             )),
             test_operator_key_store(),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         let outcome = runtime
             .connect(
@@ -1159,6 +1181,7 @@ mod tests {
             unused_session_creation(),
             test_operator_key_store(),
         )
+        .with_proxy_store(test_proxy_store())
         .with_auth_rejection_checker(Arc::new(|_node_id| {
             Some("operator challenge signature invalid".to_string())
         }));
@@ -1215,7 +1238,8 @@ mod tests {
                 Ok(remote_target("10.1.29.130#7476", "created-1")),
             )),
             test_operator_key_store(),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         let outcome = runtime
             .connect(
@@ -1268,7 +1292,8 @@ mod tests {
             registry,
             unused_session_creation(),
             test_operator_key_store(),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         let outcome = runtime
             .connect(
@@ -1322,7 +1347,8 @@ mod tests {
             Arc::new(FakeRegistry::new(Vec::new())),
             unused_session_creation(),
             test_operator_key_store(),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         let result = runtime.connect(
             RemoteHostConnectRequest {
@@ -1366,7 +1392,8 @@ mod tests {
             registry,
             unused_session_creation(),
             test_operator_key_store(),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
         let mut edited = profile();
         edited.name = "kk@10.1.29.140".to_string();
         edited.host = "10.1.29.140".to_string();
@@ -1413,7 +1440,8 @@ mod tests {
             registry,
             unused_session_creation(),
             test_operator_key_store(),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         runtime
             .connect(
@@ -1564,7 +1592,8 @@ mod tests {
                 calls: Arc::new(Mutex::new(0)),
                 result: RemoteShellKind::Windows,
             }),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         runtime
             .connect(
@@ -1638,7 +1667,8 @@ mod tests {
                 calls: detector_calls.clone(),
                 result: RemoteShellKind::Windows,
             }),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         runtime
             .connect(
@@ -1695,7 +1725,8 @@ mod tests {
                 calls: detector_calls.clone(),
                 result: RemoteShellKind::Windows,
             }),
-        );
+        )
+        .with_proxy_store(test_proxy_store());
 
         runtime
             .connect(
