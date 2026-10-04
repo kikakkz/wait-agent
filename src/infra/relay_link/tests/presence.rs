@@ -444,6 +444,13 @@ async fn open_stream_establishes_an_implicit_watch() {
     let stream = open_stream_blocking(trio.handles[1].as_ref().expect("B present"), &trio.fps[2]);
     drop(stream);
 
+    // The implicit watch answers with exactly one replay before any
+    // transition; consume it first so the queue holds only the upcoming
+    // offline. Reading the replay here also fixes its order ahead of the
+    // teardown: on a slow runner (Windows CI, issue #119) the replay can
+    // otherwise race the cancel and surface before the transition.
+    expect_presence(&mut trio.event_rxs[1], &trio.fps[2], true).await;
+
     // Cancelling the stream target publishes offline to the implicit watcher.
     cancel_slot(&mut trio.handles[2], "stream target");
     expect_presence(&mut trio.event_rxs[1], &trio.fps[2], false).await;
