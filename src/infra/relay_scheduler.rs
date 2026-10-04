@@ -141,6 +141,12 @@ struct Shared {
     /// Cumulative count of classified frames (never decremented); the test
     /// hooks use it to wait for classification without racing the writer.
     classified_frames: u64,
+    /// Cumulative count of frames dequeued for emission (popped from the
+    /// priority queue or a bucket batch, before the socket write); the test
+    /// hooks pair it with `classified_frames` to bound scheduler queues.
+    emitted_frames: u64,
+    /// Dequeued-frame counts per stream id (same moment as `emitted_frames`).
+    emitted_by_stream: HashMap<u32, u64>,
     /// False once the ingress channel closed (all producers dropped).
     ingress_open: bool,
     /// Set when the writer exits (socket error): the consumer drops frames.
@@ -214,11 +220,24 @@ pub(crate) mod test_registry {
         }
     }
 
-    /// Cumulative classified-frame count of `node_id`'s link, if registered.
-    pub(crate) async fn classified_frames(node_id: &str) -> Option<u64> {
+    /// Atomic snapshot of the classification counter and the per-stream
+    /// dequeued-for-emission counters, taken under one lock. Integration
+    /// tests assert scheduler invariants on this: wire-level observation
+    /// cannot attribute bytes across the kernel socket buffer, so queue
+    /// bounds must be checked on the scheduler's own counters (issue #122).
+    pub(crate) async fn snapshot(node_id: &str) -> Option<SchedulerSnapshot> {
         let state = registry().lock().ok()?.get(node_id)?.clone();
-        let frames = lock(&state.shared).classified_frames;
-        Some(frames)
+        let guard = lock(&state.shared);
+        Some(SchedulerSnapshot {
+            classified: guard.classified_frames,
+            emitted_by_stream: guard.emitted_by_stream.clone(),
+        })
+    }
+
+    /// Atomic view of one link's scheduler counters; see [`snapshot`].
+    pub(crate) struct SchedulerSnapshot {
+        pub(crate) classified: u64,
+        pub(crate) emitted_by_stream: std::collections::HashMap<u32, u64>,
     }
 }
 
@@ -313,6 +332,8 @@ impl LinkScheduler {
                 buckets: HashMap::new(),
                 total_bucket_bytes: 0,
                 classified_frames: 0,
+                emitted_frames: 0,
+                emitted_by_stream: HashMap::new(),
                 ingress_open: true,
                 writer_done: false,
             }),
@@ -348,6 +369,19 @@ enum BucketEnqueue {
     Fits,
     Park(Frame),
     Drop,
+}
+
+/// Dequeue accounting for the test hooks: counts each frame the moment it is
+/// popped for emission (priority drain or bucket batch), before the socket
+/// write. Popped under the same lock section as the queue mutation, so the
+/// counters are consistent with the queues they left.
+fn record_emission(
+    emitted_frames: &mut u64,
+    emitted_by_stream: &mut HashMap<u32, u64>,
+    frame: &Frame,
+) {
+    *emitted_frames += 1;
+    *emitted_by_stream.entry(frame.stream_id()).or_insert(0) += 1;
 }
 
 /// Capacity check and enqueue are one critical section: the consumer is the
@@ -475,7 +509,17 @@ async fn writer_loop<W: AsyncWrite + Unpin>(
         // Priority first: control frames always precede bulk data.
         let priority_batch: Vec<Frame> = {
             let mut guard = lock(&state.shared);
-            guard.priority.drain(..).collect()
+            let Shared {
+                priority,
+                emitted_frames,
+                emitted_by_stream,
+                ..
+            } = &mut *guard;
+            let batch: Vec<Frame> = priority.drain(..).collect();
+            for frame in &batch {
+                record_emission(emitted_frames, emitted_by_stream, frame);
+            }
+            batch
         };
         for frame in &priority_batch {
             if let Err(error) = write_frame(&mut writer, frame).await {
@@ -490,8 +534,20 @@ async fn writer_loop<W: AsyncWrite + Unpin>(
         let mut freed_budget = false;
         let more_work = {
             let mut guard = lock(&state.shared);
+            // Disjoint field borrows: the bucket iterator mutably borrows
+            // `buckets`, so the dequeue counters are reached through the
+            // destructured fields, not `&mut guard`.
+            let Shared {
+                priority,
+                buckets,
+                total_bucket_bytes,
+                emitted_frames,
+                emitted_by_stream,
+                ingress_open,
+                ..
+            } = &mut *guard;
             let mut total_freed = 0usize;
-            for bucket in guard.buckets.values_mut() {
+            for bucket in buckets.values_mut() {
                 if bucket.queue.is_empty() {
                     bucket.idle_passes += 1;
                     continue;
@@ -505,13 +561,14 @@ async fn writer_loop<W: AsyncWrite + Unpin>(
                     };
                     if len as i64 > bucket.deficit {
                         break;
-                    }
+                    };
                     let Some(frame) = bucket.queue.pop_front() else {
                         break;
                     };
                     bucket.deficit -= len as i64;
                     bucket.queued_bytes -= len;
                     total_freed += len;
+                    record_emission(emitted_frames, emitted_by_stream, &frame);
                     batch.push(frame);
                     served = true;
                     freed_budget = true;
@@ -526,21 +583,19 @@ async fn writer_loop<W: AsyncWrite + Unpin>(
                         bucket.deficit -= len as i64;
                         bucket.queued_bytes -= len;
                         total_freed += len;
+                        record_emission(emitted_frames, emitted_by_stream, &frame);
                         batch.push(frame);
                         freed_budget = true;
                     }
                 }
             }
-            guard.total_bucket_bytes -= total_freed;
-            guard.buckets.retain(|_, bucket| {
+            *total_bucket_bytes -= total_freed;
+            buckets.retain(|_, bucket| {
                 !(bucket.queue.is_empty() && bucket.idle_passes >= IDLE_REAP_PASSES)
             });
-            let pending = !guard.priority.is_empty()
-                || guard
-                    .buckets
-                    .values()
-                    .any(|bucket| !bucket.queue.is_empty());
-            pending || guard.ingress_open
+            let pending =
+                !priority.is_empty() || buckets.values().any(|bucket| !bucket.queue.is_empty());
+            pending || *ingress_open
         };
         // Signal freed budget BEFORE writing the batch: the socket write can
         // block indefinitely (stalled target), and the consumer must not wait
