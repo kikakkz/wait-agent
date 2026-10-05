@@ -438,12 +438,28 @@ where
         &self,
         local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     ) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
+        // Relay-routed inbound dials (via = "relay") reach the listener
+        // through the transport's relay accept worker (issue #129); attach
+        // the same client the outbound dial path uses. A relay-enrolled node
+        // is dialed in by certificate fingerprint — the pin is the relay
+        // identity fingerprint, i.e. the SPKI hash of the node credential
+        // certificate — so when no explicit node cert is configured the
+        // listener must still present that identity; a plaintext listener
+        // fails the pinned dial instantly with InvalidContentType.
         let transport = match (
             self.network.node_cert_path.as_ref(),
             self.network.node_key_path.as_ref(),
         ) {
             (Some(cert), Some(key)) => GrpcRemoteNodeTransport::with_tls(cert, key),
             _ => GrpcRemoteNodeTransport::new(),
+        }
+        .with_relay_client(self.relay_client.clone());
+        let transport = if self.relay_client.is_some() {
+            transport.with_credential_tls_identity(
+                crate::infra::node_credentials::NodeCredentialPaths::default_paths(),
+            )
+        } else {
+            transport
         };
         let (transport_tx, transport_rx) = mpsc::channel();
         let (internal_tx, internal_rx) = mpsc::channel();

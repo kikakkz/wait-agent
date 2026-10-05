@@ -1,5 +1,6 @@
 use crate::infra::operator_auth::{self};
 use crate::infra::peer_connection;
+use crate::infra::relay_ingress::{spawn_relay_accept_worker, NodeIngressIo};
 use crate::infra::relay_mux::stream::MuxResetError;
 use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -16,6 +17,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -26,6 +28,7 @@ use crate::infra::error_log::ERROR_LOG;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
+use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Request, Response, Status};
 use tower::Service;
@@ -150,18 +153,33 @@ pub struct GrpcRemoteNodeTransport {
     tls_cert_path: Option<PathBuf>,
     /// Optional TLS private key path for inbound listeners.
     tls_key_path: Option<PathBuf>,
+    /// Optional fallback TLS identity (the node credential pair) for inbound
+    /// listeners with no explicit certificate configured. A relay-enrolled
+    /// node is dialed in by certificate fingerprint — the peer's
+    /// `tls_pin_sha256` is the relay identity fingerprint, i.e. the SPKI hash
+    /// of this certificate — so the listener must present it or the pinned
+    /// TLS dial hits a plaintext HTTP/2 listener and fails instantly with
+    /// `InvalidContentType` (issue #129 follow-up).
+    credential_tls_identity: Option<crate::infra::node_credentials::NodeCredentialPaths>,
     /// Optional authorized-operator keys directory for inbound listeners.
     /// When unset, the host default (`~/.waitagent/authorized_operators`) is
     /// used and inbound sessions skip operator authentication if it is empty.
     authorized_operators_dir: Option<PathBuf>,
-    /// Relay client for relay-via outbound dials. `None` makes a
-    /// `via = relay` request fail with the guiding enrollment error.
+    /// Relay client for relay-via outbound dials and for accepting
+    /// relay-routed inbound streams in `listen_inbound` (issue #129).
+    /// `None` makes a `via = relay` request fail with the guiding
+    /// enrollment error and leaves the inbound listener TCP-only.
     relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
 }
 
 pub struct GrpcRemoteNodeTransportGuard {
     shutdown_tx: Option<oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
+    /// Stops the relay inbound accept worker (issue #129). Set in `Drop`,
+    /// alongside the tonic oneshot; the worker is deliberately not joined —
+    /// it may be parked in `accept_inbound` until a stream arrives or the
+    /// relay client stops, and process exit tears it down regardless.
+    relay_stop: Option<Arc<AtomicBool>>,
     #[allow(dead_code)]
     local_addr: SocketAddr,
 }
@@ -176,13 +194,16 @@ impl GrpcRemoteNodeTransport {
         Self {
             tls_cert_path: None,
             tls_key_path: None,
+            credential_tls_identity: None,
             authorized_operators_dir: None,
             relay_client: None,
         }
     }
 
-    /// Attach the relay client used for `via = relay` outbound dials. Called
-    /// once at startup by the node runtime after the relay link spawns.
+    /// Attach the relay client used for `via = relay` outbound dials and for
+    /// accepting relay-routed inbound streams in `listen_inbound` (issue
+    /// #129). Called once at startup by the node runtime after the relay
+    /// link spawns.
     pub fn with_relay_client(
         mut self,
         relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
@@ -197,18 +218,32 @@ impl GrpcRemoteNodeTransport {
         Self {
             tls_cert_path: Some(cert_path.into()),
             tls_key_path: Some(key_path.into()),
+            credential_tls_identity: None,
             authorized_operators_dir: None,
             relay_client: None,
         }
     }
 
+    /// Serve inbound connections with the node credential identity when no
+    /// explicit certificate is configured. The node runtime attaches this for
+    /// relay-enrolled nodes: a peer dialing `via = "relay"` pins the relay
+    /// identity fingerprint (`tls_pin_sha256`), which is the SPKI hash of the
+    /// node credential certificate, so the listener must present that
+    /// certificate for the pinned TLS handshake to verify.
+    pub fn with_credential_tls_identity(
+        mut self,
+        identity: crate::infra::node_credentials::NodeCredentialPaths,
+    ) -> Self {
+        self.credential_tls_identity = Some(identity);
+        self
+    }
+
     /// Serve inbound connections only to operator keys listed in the given
     /// authorized-keys directory instead of the host default.
     #[cfg(test)]
-    pub fn with_authorized_operators_dir(dir: impl Into<PathBuf>) -> Self {
-        let mut transport = Self::new();
-        transport.authorized_operators_dir = Some(dir.into());
-        transport
+    pub fn with_authorized_operators_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.authorized_operators_dir = Some(dir.into());
+        self
     }
 
     pub fn endpoint(&self, endpoint_uri: &str) -> Result<Endpoint, RemoteNodeTransportError> {
@@ -269,6 +304,9 @@ impl Drop for GrpcRemoteNodeTransportGuard {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
+        if let Some(relay_stop) = &self.relay_stop {
+            relay_stop.store(true, Ordering::Relaxed);
+        }
         // Deliberately do NOT join the worker: tonic's
         // `serve_with_incoming_shutdown` stops accepting on the shutdown
         // signal but still waits for every already-accepted connection to
@@ -277,7 +315,9 @@ impl Drop for GrpcRemoteNodeTransportGuard {
         // whole node servers past their final "shutting down" log (observed
         // on remote hosts as zombies that still hold their listen port but
         // never accept again). The worker exits on its own once its
-        // connections drain, and process exit tears it down regardless.
+        // connections drain, and process exit tears it down regardless. The
+        // same policy covers the relay inbound accept worker (see
+        // `relay_stop` above).
         self.worker.take();
     }
 }
@@ -586,6 +626,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 Ok(GrpcRemoteNodeTransportGuard {
                     shutdown_tx: Some(shutdown_tx),
                     worker: Some(worker),
+                    relay_stop: None,
                     local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
                 })
             }
@@ -625,13 +666,58 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         let local_addr = listener
             .local_addr()
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?;
-        let tls_cert_path = self.tls_cert_path.clone();
-        let tls_key_path = self.tls_key_path.clone();
+        let (tls_cert_path, tls_key_path) = match (&self.tls_cert_path, &self.tls_key_path) {
+            (Some(cert_path), Some(key_path)) => (Some(cert_path.clone()), Some(key_path.clone())),
+            (None, None) => match &self.credential_tls_identity {
+                Some(identity) => {
+                    ERROR_LOG.log(format!(
+                        "[remote-ingress] listener presents the node credential identity \
+                         (no explicit node cert configured): cert={} key={}",
+                        identity.cert_path.display(),
+                        identity.key_path.display()
+                    ));
+                    (
+                        Some(identity.cert_path.clone()),
+                        Some(identity.key_path.clone()),
+                    )
+                }
+                None => (None, None),
+            },
+            _ => (None, None),
+        };
         let authorized_operators_dir = self
             .authorized_operators_dir
             .clone()
             .or_else(|| Some(operator_auth::default_authorized_operators_dir()));
+        let relay_client = self.relay_client.clone();
+        let relay_stop = Arc::new(AtomicBool::new(false));
+        // Relay-routed inbound dials (via = "relay") enter the same server
+        // pipeline as TCP accepts: a dedicated worker consumes the relay
+        // client's accept queue and feeds the listener's tonic server
+        // (issue #129). A spawn failure degrades to the TCP-only listener.
+        let relay_accept = relay_client
+            .map(|handle| {
+                let (relay_conn_tx, relay_conn_rx) =
+                    tokio_mpsc::unbounded_channel::<NodeIngressIo>();
+                (handle, relay_conn_tx, relay_conn_rx)
+            })
+            .and_then(|(handle, relay_conn_tx, relay_conn_rx)| {
+                match spawn_relay_accept_worker(handle, relay_conn_tx, relay_stop.clone()) {
+                    Ok(worker) => Some((worker, relay_conn_rx)),
+                    Err(error) => {
+                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                            node_id: None,
+                            session_instance_id: None,
+                            message: format!(
+                                "failed to spawn relay inbound accept worker: {error}"
+                            ),
+                        });
+                        None
+                    }
+                }
+            });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let relay_stop_worker = relay_stop.clone();
         let worker = thread::Builder::new()
             .spawn(move || {
                 let runtime = match Builder::new_multi_thread().enable_all().build() {
@@ -662,7 +748,21 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             return;
                         }
                     };
-                    let incoming = TcpListenerStream::new(listener);
+                    let tcp_incoming = TcpListenerStream::new(listener)
+                        .map(|result| result.map(NodeIngressIo::Tcp));
+                    let incoming: Pin<
+                        Box<dyn Stream<Item = Result<NodeIngressIo, std::io::Error>> + Send>,
+                    > = match relay_accept {
+                        Some((relay_worker, relay_conn_rx)) => {
+                            // Held until the server stops; detached afterwards,
+                            // like the listener worker itself.
+                            let _relay_worker = relay_worker;
+                            let relay_incoming = UnboundedReceiverStream::new(relay_conn_rx)
+                                .map(Result::<_, std::io::Error>::Ok);
+                            Box::pin(tcp_incoming.merge(relay_incoming))
+                        }
+                        None => Box::pin(tcp_incoming),
+                    };
                     let session_shutdowns = Arc::new(Mutex::new(Vec::new()));
                     let shutdown_registry = session_shutdowns.clone();
                     let service = TransportNodeSessionService {
@@ -713,7 +813,11 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                                 let _ = shutdown.send(());
                             }
                         });
-                    if let Err(error) = server.await {
+                    let server_result = server.await;
+                    // The listener stopped accepting: let the relay accept
+                    // worker drain out at its next wakeup.
+                    relay_stop_worker.store(true, Ordering::Relaxed);
+                    if let Err(error) = server_result {
                         let _ = failure_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: None,
                             session_instance_id: None,
@@ -730,6 +834,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         Ok(GrpcRemoteNodeTransportGuard {
             shutdown_tx: Some(shutdown_tx),
             worker: Some(worker),
+            relay_stop: Some(relay_stop),
             local_addr,
         })
     }
@@ -1108,11 +1213,14 @@ fn tls_endpoint_uri(endpoint_uri: &str, tls_pin_sha256: &Option<String>) -> Stri
     }
 }
 
+/// Renders an error and its `source()` chain as a single line, so the
+/// diagnostics log (which keys entries by line and drops continuations) keeps
+/// the whole chain. Shows each error's `Display`, not just its `Debug`.
 fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut message = format!("{error:#?}");
+    let mut message = format!("{error}");
     let mut source = error.source();
     while let Some(err) = source {
-        message.push_str(&format!("\n  caused by: {err:#?}"));
+        message.push_str(&format!("; caused by: {err}"));
         source = err.source();
     }
     message
@@ -1330,6 +1438,28 @@ pub(crate) fn test_direct_dialer() -> PeerDialer {
     PeerDialer::Direct
 }
 
+/// Test-only seam for the relay ingress wiring (issue #129): dials a tonic
+/// `Channel` through the given dialer exactly the way `connect_outbound`
+/// does (`connect_channel` + pinned TLS when a pin is present), so tests can
+/// drive the production client path against an ingress listener. The URI
+/// host is unused on the relay path (the pin is the routed target).
+#[cfg(test)]
+pub(crate) async fn test_connect_channel(
+    uri: &str,
+    tls_pin_sha256: &str,
+    dialer: PeerDialer,
+) -> Result<Channel, RemoteNodeTransportError> {
+    let endpoint = Endpoint::from_shared(uri.to_string())
+        .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?
+        .tcp_nodelay(true)
+        .tcp_keepalive(Some(TCP_KEEPALIVE_IDLE))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true);
+    connect_channel(&endpoint, &Some(tls_pin_sha256.to_string()), &dialer).await
+}
+
 #[derive(Debug)]
 struct PinnedCertVerifier {
     pin: String,
@@ -1526,7 +1656,7 @@ mod tests {
                 .replace(":", "_")
         ));
         std::fs::create_dir_all(&auth_dir).expect("auth dir should create");
-        let transport = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let transport = GrpcRemoteNodeTransport::new().with_authorized_operators_dir(auth_dir);
         let (event_tx, event_rx) = mpsc::channel();
         let _guard = transport
             .listen_inbound(bind_addr, event_tx)
@@ -1618,7 +1748,7 @@ mod tests {
     fn inbound_listener_completes_operator_auth_before_session_opened() {
         let (auth_dir, keystore) = authorized_operator_fixture("accept");
         let bind_addr = unused_local_addr();
-        let transport = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let transport = GrpcRemoteNodeTransport::new().with_authorized_operators_dir(auth_dir);
         let (event_tx, event_rx) = mpsc::channel();
         let _guard = transport
             .listen_inbound(bind_addr, event_tx)
@@ -1710,7 +1840,7 @@ mod tests {
     fn inbound_listener_rejects_invalid_operator_auth_signature() {
         let (auth_dir, _keystore) = authorized_operator_fixture("reject");
         let bind_addr = unused_local_addr();
-        let transport = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let transport = GrpcRemoteNodeTransport::new().with_authorized_operators_dir(auth_dir);
         let (event_tx, event_rx) = mpsc::channel();
         let _guard = transport
             .listen_inbound(bind_addr, event_tx)
@@ -1790,7 +1920,7 @@ mod tests {
             .expect("authorized operator should persist");
 
         let bind_addr = unused_local_addr();
-        let listener = GrpcRemoteNodeTransport::with_authorized_operators_dir(auth_dir);
+        let listener = GrpcRemoteNodeTransport::new().with_authorized_operators_dir(auth_dir);
         let (server_event_tx, _server_event_rx) = mpsc::channel();
         let _listener_guard = listener
             .listen_inbound(bind_addr, server_event_tx)
