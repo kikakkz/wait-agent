@@ -223,7 +223,7 @@ pub(crate) fn handle_relay_admin_command(
 /// a persist failure is logged, never fatal), and answers with the raw
 /// token plus its unix expiry. Configured TTLs come from the serve config;
 /// per-request `--ttl` overrides them.
-fn handle_invite(
+pub(crate) fn handle_invite(
     ttl_secs: Option<u64>,
     deploy: bool,
     tokens: &Arc<EnrollmentTokenStore>,
@@ -254,7 +254,7 @@ fn handle_invite(
 /// `remove`: revokes the whitelist entry (when present) and drops the live
 /// link (when registered). Reports both halves so the operator sees whether
 /// the node was whitelisted, online, or both.
-fn handle_remove(
+pub(crate) fn handle_remove(
     fingerprint: &str,
     whitelist_dir: &Path,
     table: &Arc<RelayConnectionTable>,

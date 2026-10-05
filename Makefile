@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: ci-gate check-branch test-tools check-trailers lint-sh ai-check e2e-relay
+.PHONY: ci-gate check-branch test-tools check-trailers lint-sh ai-check e2e-relay e2e-web
 
 # The CI-first rule: every change lands together with its checks.
 # Rust checks live in the pre-commit hook and .github/workflows/ci.yaml.
@@ -32,3 +32,8 @@ ai-check:
 # Set WA_E2E_BINARY to a prebuilt binary to skip the in-docker release build.
 e2e-relay:
 	@scripts/e2e/relay/e2e-relay.sh
+
+# WebUI process e2e (issue #131): loopback-only, no docker — real relay +
+# web processes with a stub SMTP server (see scripts/e2e/web/e2e-web.sh).
+e2e-web:
+	@scripts/e2e/web/e2e-web.sh

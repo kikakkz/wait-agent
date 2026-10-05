@@ -408,6 +408,8 @@ Alpine, openSUSE/SLES, and Homebrew.
 - [Protocol](docs/protocol.md)
 - [Interaction Flows](docs/archive/interaction-flows.md)
 - [UI Design](docs/ui-design.md)
+- [Relay Design](docs/relay-design.md)
+- [WebUI Deployment & Security](docs/webui.md)
 - [Execution Status Board](docs/archive/execution-status-board.md)
 
 ---

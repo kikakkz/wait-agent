@@ -47,6 +47,27 @@
   th { color: var(--muted); font-weight: normal; }
   td.num, th.num { text-align: right; padding-right: 0; }
   tr.empty td { color: var(--muted); border-bottom: none; }
+  p.banner {
+    border: 1px solid var(--line); padding: 8px 10px; white-space: pre-wrap;
+  }
+  p.banner.error { border-color: var(--accent); color: var(--dim); }
+  form.inline { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; margin-bottom: 8px; }
+  form.inline label { color: var(--muted); }
+  form.inline input[type=text], form.inline input[type=number] {
+    background: transparent; border: 1px solid var(--line); color: var(--fg);
+    font: inherit; padding: 2px 6px; width: 22em;
+  }
+  form.inline input[type=number] { width: 8em; }
+  form.inline button {
+    background: transparent; border: 1px solid var(--muted); color: var(--fg);
+    font: inherit; padding: 2px 12px; cursor: pointer;
+  }
+  form.inline button:hover { border-color: var(--fg); }
+  td button.revoke {
+    background: transparent; border: none; color: var(--muted);
+    font: inherit; cursor: pointer; padding: 0;
+  }
+  td button.revoke:hover { color: var(--fg); }
   dl.usage { display: flex; gap: 24px; margin: 0; flex-wrap: wrap; }
   dl.usage div { min-width: 140px; }
   dl.usage dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
@@ -63,6 +84,27 @@
     <span class="uptime">up {{ uptime }}</span>
   </header>
 
+  {% if let Some(text) = banner_text %}
+  <p class="banner{% if banner_error %} error{% endif %}">{{ text }}</p>
+  {% endif %}
+
+  <section>
+    <h2>Operator actions</h2>
+    <form method="post" action="/api/invite" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label><input type="checkbox" name="deploy"> deploy token (reusable until expiry)</label>
+      <label>ttl seconds <input type="number" name="ttl_secs" min="0" placeholder="default"></label>
+      <button type="submit">invite</button>
+    </form>
+    <form method="post" action="/api/remove" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>fingerprint or prefix
+        <input type="text" name="fingerprint" id="remove-fingerprint" placeholder="paste to confirm">
+      </label>
+      <button type="submit">remove</button>
+    </form>
+  </section>
+
   <section>
     <h2>Usage / capacity</h2>
     <dl class="usage">
@@ -76,7 +118,7 @@
     <h2>Connection table</h2>
     <table>
       <thead>
-        <tr><th>node id</th><th class="num">idle ms</th><th>state</th></tr>
+        <tr><th>node id</th><th class="num">idle ms</th><th>state</th><th></th></tr>
       </thead>
       <tbody>
         {% for node in nodes %}
@@ -84,9 +126,10 @@
           <td>{{ node.node_id }}</td>
           <td class="num">{{ node.idle_ms }}</td>
           <td class="state">{% if node.online %}online{% else %}offline{% endif %}</td>
+          <td><button type="button" class="revoke" data-fp="{{ node.node_id }}" onclick="waFillRemove(this)">revoke</button></td>
         </tr>
         {% else %}
-        <tr class="empty"><td colspan="3">no nodes registered</td></tr>
+        <tr class="empty"><td colspan="4">no nodes registered</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -95,6 +138,10 @@
   <footer>refreshes every 10s &middot; read-only &middot; issue #131 slice 2</footer>
 </main>
 <script>
+function waFillRemove(button) {
+  var input = document.getElementById("remove-fingerprint");
+  if (input) { input.value = button.getAttribute("data-fp") || ""; }
+}
 (function () {
   function probe() {
     return {

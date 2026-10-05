@@ -361,6 +361,210 @@ fn mint_test_session(state: &AuthState) -> String {
         .expect("session token signs")
 }
 
+// --- slice 4: dashboard write ops -------------------------------------------
+
+/// Extracts the session CSRF token the dashboard renders into its forms,
+/// exactly like a browser submitting the form would.
+fn csrf_from_dashboard(body: &str) -> String {
+    body.split("name=\"csrf\"")
+        .nth(1)
+        .expect("a csrf input")
+        .split("value=\"")
+        .nth(1)
+        .expect("a csrf value")
+        .split('"')
+        .next()
+        .expect("a quoted value")
+        .to_string()
+}
+
+#[tokio::test]
+async fn dashboard_write_ops_require_the_session_csrf_token() {
+    let stack = start_web_stack("write-csrf", "admin@example.com").await;
+    let session = mint_test_session(&stack.state.auth);
+    let cookie = format!("session={session}");
+
+    // No CSRF token at all: refused, and the session survives the refusal.
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/api/invite",
+        &[
+            ("cookie", &cookie),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        "deploy=on",
+    )
+    .await;
+    assert_eq!(code, 403, "a write without CSRF must be refused");
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/api/invite",
+        &[
+            ("cookie", &cookie),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        "csrf=wrong-token&deploy=on",
+    )
+    .await;
+    assert_eq!(code, 403, "a wrong CSRF token must be refused");
+
+    // No cookie at all: still 403.
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/api/invite",
+        &[("content-type", "application/x-www-form-urlencoded")],
+        "csrf=anything",
+    )
+    .await;
+    assert_eq!(code, 403);
+
+    stack.server.abort();
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn invite_shows_the_token_once_and_audits() {
+    let stack = start_web_stack("write-invite", "admin@example.com").await;
+    let session = mint_test_session(&stack.state.auth);
+    let cookie = format!("session={session}");
+    let deadline = std::time::Instant::now() + NO_DEADLOCK;
+    let csrf = loop {
+        let (code, _, dashboard) = http(stack.addr, "GET", "/", &[("cookie", &cookie)], "").await;
+        if code == 200 {
+            break csrf_from_dashboard(&dashboard);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dashboard should serve over the session (code {code})"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let (code, _, body) = http(
+        stack.addr,
+        "POST",
+        "/api/invite",
+        &[
+            ("cookie", &cookie),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        &format!("csrf={csrf}&ttl_secs=3600"),
+    )
+    .await;
+    assert_eq!(code, 200, "invite should answer with the dashboard: {body}");
+    let token_line = body
+        .lines()
+        .find(|line| line.contains("token: "))
+        .expect("the banner carries the raw token");
+    let token = token_line
+        .split("token: ")
+        .nth(1)
+        .expect("token value")
+        .split_whitespace()
+        .next()
+        .expect("a bare token");
+    assert_eq!(
+        token.len(),
+        43,
+        "256-bit base64url token shown once: {token_line}"
+    );
+
+    // The audit trail recorded the operator and the action.
+    let audit = crate::infra::error_log::ERROR_LOG
+        .entries()
+        .into_iter()
+        .find(|(_, _, message)| {
+            message.contains("[web-audit]") && message.contains("action=invite")
+        })
+        .expect("an audit entry for the invite");
+    assert!(audit.2.contains("operator="), "{audit:?}");
+
+    stack.server.abort();
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn remove_revokes_a_registered_node_after_prefix_confirmation() {
+    let stack = start_web_stack("write-remove", "admin@example.com").await;
+    let session = mint_test_session(&stack.state.auth);
+    let cookie = format!("session={session}");
+    // The relay link registers asynchronously; poll the dashboard until it
+    // renders, then take the CSRF token from the forms.
+    let deadline = std::time::Instant::now() + NO_DEADLOCK;
+    let csrf = loop {
+        let (code, _, dashboard) = http(stack.addr, "GET", "/", &[("cookie", &cookie)], "").await;
+        if code == 200 {
+            break csrf_from_dashboard(&dashboard);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dashboard should serve over the session (code {code})"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Enroll a second web node; both register on the relay.
+    let dir = temp_dir("write-remove-second");
+    let config = web_config(&dir);
+    let relay_fingerprint = relay_fingerprint(&stack.relay);
+    let relay_address = format!("127.0.0.1:{}", stack.relay.server.local_addr().port());
+    RelayTomlConfig {
+        address: relay_address,
+        relay_fingerprint,
+        heartbeat_interval_secs: None,
+    }
+    .save(&config.relay_toml_path)
+    .expect("relay.toml saves");
+    let second = enroll_and_link(&config).await.expect("second node enrolls");
+    let second_fingerprint = second.node_fingerprint.clone();
+    let admin_addr = stack.relay.server.admin_addr().clone();
+    registered_nodes_reaches(&admin_addr, 2).await;
+    assert!(stack
+        .relay
+        .config
+        .authorized_nodes_dir
+        .join(&second_fingerprint)
+        .is_file());
+
+    // Confirm with a unique prefix: the dashboard resolves it and revokes.
+    let prefix = second_fingerprint[..20].to_string();
+    let (code, _, body) = http(
+        stack.addr,
+        "POST",
+        "/api/remove",
+        &[
+            ("cookie", &cookie),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        &format!("csrf={csrf}&fingerprint={prefix}"),
+    )
+    .await;
+    assert_eq!(code, 200, "remove should answer with the dashboard: {body}");
+    assert!(body.contains("removed"), "{body}");
+
+    // The whitelist entry is gone and the connection table shrinks back.
+    assert!(
+        !stack
+            .relay
+            .config
+            .authorized_nodes_dir
+            .join(&second_fingerprint)
+            .is_file(),
+        "remove must delete the whitelist entry"
+    );
+    registered_nodes_reaches(&admin_addr, 1).await;
+
+    stack.server.abort();
+    drop(second);
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
 // --- slice 1 anchors -------------------------------------------------------
 
 /// Acceptance anchor (b): after `web serve` enrollment, the relay status
