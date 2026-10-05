@@ -534,6 +534,8 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let task_routing = routing.clone();
     let task_events = events_tx;
     let task_tokens = tokens.clone();
+    let task_tokens_path = tokens_path.clone();
+    let task_token_ttls = config.token_ttls;
     let task_whitelist_dir = config.authorized_nodes_dir.clone();
     let task_relay_fingerprint = relay_fingerprint.clone();
     let task_presence = presence.clone();
@@ -555,6 +557,10 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                     let capacity = capacity.clone();
                     let meter = meter.clone();
                     let presence = task_presence.clone();
+                    let tokens = task_tokens.clone();
+                    let tokens_path = task_tokens_path.clone();
+                    let token_ttls = task_token_ttls;
+                    let whitelist_dir = task_whitelist_dir.clone();
                     tokio::spawn(async move {
                         let handshake =
                             tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
@@ -575,7 +581,8 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                         };
                         crate::infra::relay_link::run_link(
                             tls, peer_addr, table, routing, events, lifecycle, capacity, meter,
-                            presence, local_addr, started_at,
+                            presence, local_addr, started_at, tokens, tokens_path, token_ttls,
+                            whitelist_dir,
                         )
                         .await;
                     });

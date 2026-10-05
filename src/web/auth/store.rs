@@ -31,6 +31,9 @@ struct MagicRecord {
 struct SessionRecord {
     fp: String,
     probe: Probe,
+    /// Session-level CSRF token, minted with the session and rendered into
+    /// every dashboard write form (slice 4).
+    csrf: String,
     last_seen: Instant,
     expires_at: Instant,
 }
@@ -112,6 +115,7 @@ impl AuthStores {
                 SessionRecord {
                     fp,
                     probe,
+                    csrf: crate::web::auth::token::new_jti(),
                     last_seen: now,
                     expires_at: now + ttl,
                 },
@@ -139,6 +143,7 @@ impl AuthStores {
         SessionTouch::Active {
             fp: record.fp.clone(),
             probe: record.probe.clone(),
+            csrf: record.csrf.clone(),
         }
     }
 
@@ -189,8 +194,13 @@ pub enum MagicRedeem {
 /// Outcome of [`AuthStores::touch_session`].
 #[derive(Debug)]
 pub enum SessionTouch {
-    /// Live: `last_seen` refreshed; carries the stored fingerprint data.
-    Active { fp: String, probe: Probe },
+    /// Live: `last_seen` refreshed; carries the stored fingerprint data and
+    /// the session's CSRF token for the write-form check.
+    Active {
+        fp: String,
+        probe: Probe,
+        csrf: String,
+    },
     /// Unknown jti (never existed, evicted, or this process restarted).
     Unknown,
     /// Idle past the heartbeat timeout or past the absolute expiry.

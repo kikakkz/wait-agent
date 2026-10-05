@@ -269,31 +269,42 @@ pub(crate) async fn auth_middleware(
     };
     let headers = request.headers().clone();
 
-    // Heartbeat probes ride in the JSON body; buffer it, parse the probe,
-    // and rebuild the request untouched for the handler.
-    let (request, body_probe) = if path == "/api/heartbeat" {
+    // Write POSTs and the heartbeat carry their payloads in the body;
+    // buffer it once here (probes for the fingerprint, the CSRF field for
+    // writes), then rebuild the request untouched for the handler.
+    let needs_body = path == "/api/heartbeat" || is_write_path(&path);
+    let (request, body_probe, body_form) = if needs_body {
         let (parts, body) = request.into_parts();
         match to_bytes(body, HEARTBEAT_BODY_LIMIT).await {
             Ok(bytes) => {
-                let probe = serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .map(|value| {
-                        Probe::from_fields(
-                            value["platform"].as_str(),
-                            value["timezone"].as_str(),
-                            value["language"].as_str(),
-                            value["screen"].as_str(),
-                        )
-                    });
-                (Request::from_parts(parts, Body::from(bytes)), probe)
+                let probe = if path == "/api/heartbeat" {
+                    serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .map(|value| {
+                            Probe::from_fields(
+                                value["platform"].as_str(),
+                                value["timezone"].as_str(),
+                                value["language"].as_str(),
+                                value["screen"].as_str(),
+                            )
+                        })
+                } else {
+                    None
+                };
+                let form = if is_write_path(&path) {
+                    std::str::from_utf8(&bytes).ok().map(parse_form)
+                } else {
+                    None
+                };
+                (Request::from_parts(parts, Body::from(bytes)), probe, form)
             }
             Err(error) => {
-                ERROR_LOG.log_debug(format!("[web] heartbeat body unreadable: {error}"));
+                ERROR_LOG.log_debug(format!("[web] {path} body unreadable: {error}"));
                 return reject(&path);
             }
         }
     } else {
-        (request, None)
+        (request, None, None)
     };
 
     let Some(cookie) = session_cookie(&headers) else {
@@ -303,7 +314,8 @@ pub(crate) async fn auth_middleware(
         Ok(claims) => claims,
         Err(_) => return reject(&path),
     };
-    let SessionTouch::Active { fp, probe } = state.auth.stores.touch_session(&claims.jti) else {
+    let SessionTouch::Active { fp, probe, csrf } = state.auth.stores.touch_session(&claims.jti)
+    else {
         return reject(&path);
     };
     let ip = request_ip(
@@ -321,7 +333,40 @@ pub(crate) async fn auth_middleware(
         state.auth.stores.remove_session(&claims.jti);
         return reject(&path);
     }
+    // Write commands carry a session-scoped CSRF token (hidden form field);
+    // the fingerprint gate above is the auth, this is the cross-site guard.
+    if is_write_path(&path) {
+        let provided = body_form
+            .as_ref()
+            .and_then(|form| form.get("csrf").map(String::as_str))
+            .unwrap_or_default();
+        if !fingerprint::constant_time_eq(provided, &csrf) {
+            ERROR_LOG.log_warn(format!(
+                "[web] session {} sent a bad CSRF token for {path}",
+                claims.jti
+            ));
+            return reject(&path);
+        }
+    }
+    let mut request = request;
+    request.extensions_mut().insert(SessionInfo {
+        jti: claims.jti.clone(),
+        csrf,
+    });
     next.run(request).await
+}
+
+/// The authenticated session's identity, inserted by the middleware for
+/// handlers: the CSRF token for rendering write forms and the jti (audit's
+/// operator handle).
+#[derive(Debug, Clone)]
+pub(crate) struct SessionInfo {
+    pub(crate) jti: String,
+    pub(crate) csrf: String,
+}
+
+fn is_write_path(path: &str) -> bool {
+    matches!(path, "/api/invite" | "/api/remove")
 }
 
 fn is_public_path(path: &str) -> bool {
@@ -438,12 +483,14 @@ fn parse_form(body: &str) -> HashMap<String, String> {
         let Some((name, value)) = pair.split_once('=') else {
             continue;
         };
-        out.insert(form_unescape(name), form_unescape(value));
+        out.insert(percent_decode(name), percent_decode(value));
     }
     out
 }
 
-fn form_unescape(text: &str) -> String {
+/// Percent-decodes one urlencoded component (`%XX`, `+`). Shared with the
+/// dashboard write handlers, which re-parse the buffered form body.
+pub(crate) fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;

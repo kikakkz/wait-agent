@@ -43,7 +43,7 @@ use crate::web::auth::routes::{
 };
 use crate::web::auth::token::WebAuthKeys;
 use crate::web::config::{WebuiConfig, WebuiConfigError};
-use crate::web::dashboard::dashboard;
+use crate::web::dashboard::{dashboard, invite, remove};
 
 /// Default web listen port. The default bind is `0.0.0.0` (issue #131 v2:
 /// public deployment; the magic-link auth from slice 3 protects the
@@ -179,6 +179,8 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/login", get(login_page))
         .route("/auth/magic", get(magic_link).post(login_form))
         .route("/api/heartbeat", post(heartbeat))
+        .route("/api/invite", post(invite))
+        .route("/api/remove", post(remove))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
