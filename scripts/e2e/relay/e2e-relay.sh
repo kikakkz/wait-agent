@@ -18,7 +18,8 @@
 # host binary to skip the in-docker build (CI and quick local runs).
 #
 # Usage: e2e-relay.sh [scenario ...]
-#   scenarios: smoke (default), reconnect, reregister, streams, direct
+#   scenarios: smoke (default), reconnect, reregister, streams, direct,
+#   pastefile
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -367,9 +368,177 @@ scenario_direct() {
     log "direct OK: catalog + data plane over the direct dial, no relay involved"
 }
 
+scenario_pastefile() {
+    log "scenario: pastefile (file paste over a relay link lands in the host cache)"
+    # Custom bring-up (not bring_up_topology): A must start first so its
+    # operator key exists, B then starts with A's operator public key
+    # authorized, and A needs a host-mounted .waitagent for the remote-hosts
+    # profile written below.
+    docker network create --internal "$NET_A" >/dev/null
+    docker network create --internal "$NET_B" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+    docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    local a_home stage
+    a_home=$(mktemp -d)
+    stage=$(mktemp -d)
+    docker run -dt --name "$NODE_A" --network "$NET_A" \
+        -v "$a_home:/root/.waitagent" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ -f "$a_home/operator.key" ] && break
+        assert_running "$NODE_A"
+        sleep 1
+    done
+    [ -f "$a_home/operator.key" ] || die "node A never generated its operator key"
+    docker cp "$NODE_A:/root/.waitagent/operator.key" "$stage/operator.key" >/dev/null
+    ssh-keygen -y -f "$stage/operator.key" >"$stage/node-a.pub" 2>/dev/null \
+        || die "could not derive node A's operator public key"
+
+    docker run -dt --name "$NODE_B" --network "$NET_B" \
+        -v "$stage/node-a.pub:/root/.waitagent/authorized_operators/node-a.pub:ro" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 2 ] \
+        || die "expected 2 whitelisted nodes, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+
+    local fp_b
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_b" ] || die "could not read node B's fingerprint"
+
+    # A connects to B through the relay via a remote-hosts profile. The relay
+    # dial keys on tls_pin_sha256 (== B's enrolled fingerprint), so
+    # last_remote_port only feeds the authority id "node-b#9002" and the
+    # reuse fast path; SSH bootstrap never runs.
+    cat >"$a_home/remote-hosts.toml" <<EOF
+[[hosts]]
+name = "node-b"
+host = "node-b"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/unused"
+remote_shell = "posix"
+last_remote_port = $NODE_PORT_B
+tls_pin_sha256 = "$fp_b"
+via = "relay"
+EOF
+
+    local connect_out
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CONNECT_REMOTE_HOST node-b")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "CONNECT_REMOTE_HOST on A failed: $connect_out"
+
+    # The connected authority shows up as a remote session row.
+    local row=""
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        row=$(node_command "$NODE_A" "$NODE_PORT_A" LIST_SESSIONS 2>/dev/null \
+            | jq -c '[.payload.data[]?
+                | select(.transport == "remote"
+                    and .authority_node_id == "node-b#9002"
+                    and .availability == "online")]
+                | first' 2>/dev/null || true)
+        if [ -n "$row" ] && [ "$row" != "null" ]; then
+            break
+        fi
+        row=""
+        sleep 2
+    done
+    [ -n "$row" ] || die "node A never saw node B through the relay profile"
+    log "node A sees node B through the relay: $row"
+
+    # Create a session on B and open a viewer on it.
+    local create_out b_target
+    create_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CREATE_REMOTE_SESSION node-b#9002 /root")
+    b_target=$(jq -r '.payload.message // ""' <<<"$create_out" \
+        | sed -n 's/^created remote session //p')
+    [ -n "$b_target" ] || die "CREATE_REMOTE_SESSION on A failed: $create_out"
+
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    row=""
+    while ((SECONDS < deadline)); do
+        row=$(node_command "$NODE_A" "$NODE_PORT_A" LIST_SESSIONS 2>/dev/null \
+            | jq -c --arg t "$b_target" '[.payload.data[]?
+                | select(.id == $t and .availability == "online")]
+                | first' 2>/dev/null || true)
+        if [ -n "$row" ] && [ "$row" != "null" ]; then
+            break
+        fi
+        row=""
+        sleep 2
+    done
+    [ -n "$row" ] || die "created session $b_target never came online on node A"
+    log "node A sees the created remote session: $row"
+
+    local activate_out resize_out paste_out
+    activate_out=$(node_command "$NODE_A" "$NODE_PORT_A" "ACTIVATE_TARGET $b_target")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$activate_out" >/dev/null \
+        || die "ACTIVATE_TARGET on A failed: $activate_out"
+    resize_out=$(node_command "$NODE_A" "$NODE_PORT_A" "RESIZE 80 24")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$resize_out" >/dev/null \
+        || die "RESIZE on A failed: $resize_out"
+
+    # Small file: a single __node-command argument is capped by
+    # MAX_ARG_STRLEN (~128 KiB), so multi-chunk transfers are covered by
+    # component tests, not this scenario.
+    local marker b64 cached
+    marker=WA37_PASTEFILE_MARKER_7f3d9b
+    b64=$(printf '%s\n' "$marker" | base64 -w0)
+    paste_out=$(node_command "$NODE_A" "$NODE_PORT_A" "PASTE_FILE $b_target e2e-paste.txt $b64")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$paste_out" >/dev/null \
+        || die "PASTE_FILE on A failed: $paste_out"
+
+    # The host (B) must reassemble the chunks, write the file into its
+    # clipboard cache, and feed the cached path into the hosted session.
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    cached=""
+    while ((SECONDS < deadline)); do
+        cached=$(docker exec "$NODE_B" sh -c \
+            "grep -rlF '$marker' /tmp/waitagent/ 2>/dev/null | head -n 1" 2>/dev/null || true)
+        if [ -n "$cached" ]; then
+            break
+        fi
+        sleep 2
+    done
+    [ -n "$cached" ] || die "pasted file never landed in node B's clipboard cache"
+    log "pasted file landed in node B's clipboard cache: $cached"
+
+    # The cached path reference is fed into the hosted session's PTY; its
+    # echo comes back over the mirror to A's observer. (The host's own local
+    # grid for the session is not backfilled by design, so the observable
+    # anchor for "the session received the reference" is the viewer side.)
+    local history=""
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        history=$(node_command "$NODE_A" "$NODE_PORT_A" "GET_HISTORY $b_target" 2>/dev/null || true)
+        if jq -e '[.payload.lines // [], .payload.styled_lines // []][]
+            | join(" ") | contains("/tmp/waitagent/")' <<<"$history" >/dev/null 2>&1; then
+            break
+        fi
+        history=""
+        sleep 2
+    done
+    [ -n "$history" ] || die "viewer never saw the cached file reference in the session"
+    log "viewer saw the cached file reference typed into the session"
+
+    rm -rf "$a_home" "$stage"
+    log "pastefile OK: file crossed the relay link into the host clipboard cache"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams direct)
+    scenarios=(smoke reconnect reregister streams direct pastefile)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -392,8 +561,11 @@ for scenario in "${scenarios[@]}"; do
         direct)
             scenario_direct
             ;;
+        pastefile)
+            scenario_pastefile
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile)"
             ;;
     esac
     log "scenario '$scenario' passed"
