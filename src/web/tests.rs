@@ -7,6 +7,7 @@
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,6 +21,7 @@ use crate::infra::relay_connection_table::{RelayLifecycleConfig, RelayLifecycleE
 use crate::infra::relay_server::{start, RelayServeConfig, RelayServerHandle, TokenTtlConfig};
 use crate::infra::relay_toml_store::RelayTomlConfig;
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncStream};
+use crate::web::dashboard::DashboardState;
 use crate::web::serve::{build_router, enroll_and_link, WebServeConfig};
 
 const NO_DEADLOCK: Duration = Duration::from_secs(10);
@@ -137,22 +139,66 @@ fn web_config(dir: &Path) -> WebServeConfig {
     }
 }
 
-/// Acceptance anchor (a): the axum skeleton answers `GET /healthz` with 200.
+/// Acceptance anchors over the enrolled link: `GET /healthz` answers 200
+/// and `GET /` renders the dashboard from relay status that traveled the
+/// authenticated node<->relay channel (no local admin socket, no
+/// in-process shortcut).
 #[tokio::test]
-async fn healthz_returns_200_ok() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+async fn dashboard_and_healthz_serve_over_the_enrolled_link() {
+    let relay = start_test_relay().await;
+    let fingerprint = relay_fingerprint(&relay);
+    let relay_address = format!("127.0.0.1:{}", relay.server.local_addr().port());
+
+    let dir = temp_dir("web-dashboard");
+    let config = web_config(&dir);
+    RelayTomlConfig {
+        address: relay_address.clone(),
+        relay_fingerprint: fingerprint,
+        heartbeat_interval_secs: None,
+    }
+    .save(&config.relay_toml_path)
+    .expect("pre-existing relay.toml should save");
+
+    let link = enroll_and_link(&config)
+        .await
+        .expect("web node should enroll and link");
+    let node_fingerprint = link.node_fingerprint.clone();
+    let state = Arc::new(DashboardState::new(link.client));
+
+    let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr");
     let server = tokio::spawn(async move {
-        axum::serve(listener, build_router())
+        axum::serve(listener, build_router(state))
             .await
             .expect("server should serve");
     });
 
-    let code = http_get_status(addr, "/healthz").await;
+    // The relay client registers asynchronously; poll the dashboard until
+    // the connection table shows this node, then pin the assertions.
+    let deadline = std::time::Instant::now() + NO_DEADLOCK;
+    let body = loop {
+        let (code, body) = http_get(addr, "/").await;
+        if code == 200 && body.contains(&node_fingerprint) {
+            break body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dashboard should list the web node (code {code}): {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(body.contains(&relay_address), "listen: {body}");
+    assert!(body.contains("Usage / capacity"), "sections: {body}");
+    assert!(body.contains("Connection table"), "sections: {body}");
+
+    // Anchor (a) still holds with the dashboard mounted.
+    let (code, _) = http_get(addr, "/healthz").await;
     assert_eq!(code, 200, "/healthz must answer 200");
+
     server.abort();
+    relay.server.shutdown().await;
 }
 
 /// Acceptance anchor (b): after `web serve` enrollment, the relay status
@@ -290,7 +336,8 @@ async fn web_enroll_requires_a_pinned_relay() {
     }
 }
 
-async fn http_get_status(addr: SocketAddr, path: &str) -> u16 {
+/// One raw HTTP GET returning the status code and body.
+async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     let mut stream = timeout(NO_DEADLOCK, tokio::net::TcpStream::connect(addr))
         .await
         .expect("connect within deadline")
@@ -306,12 +353,14 @@ async fn http_get_status(addr: SocketAddr, path: &str) -> u16 {
         .expect("read within deadline")
         .expect("response should read");
     let text = String::from_utf8_lossy(&response);
-    text.lines()
+    let code = text
+        .lines()
         .next()
         .expect("a status line")
         .split_whitespace()
         .nth(1)
         .expect("a status code")
         .parse()
-        .expect("a numeric status code")
+        .expect("a numeric status code");
+    (code, text.to_string())
 }

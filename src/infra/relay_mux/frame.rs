@@ -53,6 +53,11 @@
 //!                Watch:      UTF-8 node id (<= MAX_NODE_ID_LEN);
 //!                            node→relay only: subscribe to presence
 //!                            transitions of the node
+//!                AdminRequest:  u64 big-endian sequence + UTF-8 JSON command;
+//!                            node→relay, registered links only; the relay
+//!                            answers with AdminResponse on the same link
+//!                AdminResponse: u64 big-endian sequence (matches the
+//!                            request) + UTF-8 JSON body; relay→node only
 //! ```
 //!
 //! `Close` is the half-close: the sender will send no more `Data` on this
@@ -83,6 +88,8 @@ const TYPE_ENROLL: u8 = 0x0B;
 const TYPE_ENROLL_RESPONSE: u8 = 0x0C;
 const TYPE_PRESENCE: u8 = 0x0D;
 const TYPE_WATCH: u8 = 0x0E;
+const TYPE_ADMIN_REQUEST: u8 = 0x0F;
+const TYPE_ADMIN_RESPONSE: u8 = 0x10;
 
 /// Frame type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +108,8 @@ pub enum FrameType {
     EnrollResponse,
     Presence,
     Watch,
+    AdminRequest,
+    AdminResponse,
 }
 
 impl FrameType {
@@ -120,6 +129,8 @@ impl FrameType {
             FrameType::EnrollResponse => TYPE_ENROLL_RESPONSE,
             FrameType::Presence => TYPE_PRESENCE,
             FrameType::Watch => TYPE_WATCH,
+            FrameType::AdminRequest => TYPE_ADMIN_REQUEST,
+            FrameType::AdminResponse => TYPE_ADMIN_RESPONSE,
         }
     }
 
@@ -139,6 +150,8 @@ impl FrameType {
             TYPE_ENROLL_RESPONSE => Ok(FrameType::EnrollResponse),
             TYPE_PRESENCE => Ok(FrameType::Presence),
             TYPE_WATCH => Ok(FrameType::Watch),
+            TYPE_ADMIN_REQUEST => Ok(FrameType::AdminRequest),
+            TYPE_ADMIN_RESPONSE => Ok(FrameType::AdminResponse),
             other => Err(MuxError::InvalidFrameType(other)),
         }
     }
@@ -199,6 +212,24 @@ pub enum Frame {
         /// The node to watch (its certificate fingerprint).
         node_id: String,
     },
+    /// Relay control (node→relay, registered links only): administrative
+    /// request carrying a UTF-8 JSON command (same grammar as the local
+    /// admin socket). The relay answers on the same link with an
+    /// `AdminResponse` carrying the same `seq`.
+    AdminRequest {
+        /// Request sequence number; matches the response.
+        seq: u64,
+        /// The JSON command body, e.g. `{"command":"status"}`.
+        command: String,
+    },
+    /// Relay control (relay→node only): the answer to an `AdminRequest`;
+    /// `body` is the JSON response envelope.
+    AdminResponse {
+        /// The `seq` of the answered request.
+        seq: u64,
+        /// The JSON response envelope (`{"ok":true,...}` / `{"ok":false,...}`).
+        body: String,
+    },
 }
 
 impl Frame {
@@ -219,7 +250,9 @@ impl Frame {
             | Frame::Enroll { .. }
             | Frame::EnrollResponse { .. }
             | Frame::Presence { .. }
-            | Frame::Watch { .. } => 0,
+            | Frame::Watch { .. }
+            | Frame::AdminRequest { .. }
+            | Frame::AdminResponse { .. } => 0,
         }
     }
 
@@ -239,6 +272,8 @@ impl Frame {
             Frame::EnrollResponse { .. } => FrameType::EnrollResponse,
             Frame::Presence { .. } => FrameType::Presence,
             Frame::Watch { .. } => FrameType::Watch,
+            Frame::AdminRequest { .. } => FrameType::AdminRequest,
+            Frame::AdminResponse { .. } => FrameType::AdminResponse,
         }
     }
 
@@ -278,6 +313,9 @@ impl Frame {
             Frame::EnrollResponse { fingerprint } => fingerprint.len(),
             Frame::Presence { node_id, .. } => node_id.len() + 1,
             Frame::Watch { node_id } => node_id.len(),
+            Frame::AdminRequest { command, .. } | Frame::AdminResponse { body: command, .. } => {
+                8 + command.len()
+            }
         }
     }
 
@@ -301,6 +339,10 @@ impl Frame {
                 out.push(u8::from(*online));
             }
             Frame::Watch { node_id } => out.extend_from_slice(node_id.as_bytes()),
+            Frame::AdminRequest { seq, command } | Frame::AdminResponse { seq, body: command } => {
+                out.extend_from_slice(&seq.to_be_bytes());
+                out.extend_from_slice(command.as_bytes());
+            }
             Frame::Open { .. }
             | Frame::Close { .. }
             | Frame::Unregister
@@ -435,9 +477,45 @@ impl Frame {
                     .map_err(|_| MuxError::InvalidPayload(FrameType::Watch, length))?;
                 Ok(Frame::Watch { node_id })
             }
+            FrameType::AdminRequest => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(
+                        FrameType::AdminRequest,
+                        stream_id,
+                    ));
+                }
+                let (seq, text) = decode_admin_payload(payload, FrameType::AdminRequest)?;
+                Ok(Frame::AdminRequest { seq, command: text })
+            }
+            FrameType::AdminResponse => {
+                if stream_id != 0 {
+                    return Err(MuxError::InvalidStreamId(
+                        FrameType::AdminResponse,
+                        stream_id,
+                    ));
+                }
+                let (seq, text) = decode_admin_payload(payload, FrameType::AdminResponse)?;
+                Ok(Frame::AdminResponse { seq, body: text })
+            }
             other => Err(MuxError::InvalidPayload(other, length)),
         }
     }
+}
+
+/// Splits an admin payload into its u64 big-endian sequence prefix and the
+/// UTF-8 text body; anything shorter than the prefix is invalid.
+fn decode_admin_payload(payload: &[u8], frame_type: FrameType) -> Result<(u64, String), MuxError> {
+    if payload.len() < 8 {
+        return Err(MuxError::InvalidPayload(frame_type, payload.len() as u32));
+    }
+    let seq = u64::from_be_bytes(
+        payload[..8]
+            .try_into()
+            .map_err(|_| MuxError::InvalidPayload(frame_type, payload.len() as u32))?,
+    );
+    let text = String::from_utf8(payload[8..].to_vec())
+        .map_err(|_| MuxError::InvalidPayload(frame_type, payload.len() as u32))?;
+    Ok((seq, text))
 }
 
 /// Reads one frame from `reader`.
@@ -552,6 +630,14 @@ mod tests {
                 stream_id: 4,
                 credit: u64::MAX,
             },
+            Frame::AdminRequest {
+                seq: 0x0102_0304_0506_0708,
+                command: r#"{"command":"status"}"#.to_string(),
+            },
+            Frame::AdminResponse {
+                seq: 42,
+                body: r#"{"ok":true}"#.to_string(),
+            },
         ];
         for frame in frames {
             let bytes = encoded(&frame);
@@ -568,11 +654,59 @@ mod tests {
     }
 
     #[test]
+    fn admin_request_has_deterministic_golden_layout() {
+        let bytes = encoded(&Frame::AdminRequest {
+            seq: 0x0102_0304_0506_0708,
+            command: "hi".to_string(),
+        });
+        assert_eq!(
+            bytes,
+            vec![
+                0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x01, 0x02, 0x03, 0x04,
+                0x05, 0x06, 0x07, 0x08, b'h', b'i'
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_rejects_admin_frames_with_stream_id() {
+        // Admin frames are connection-level: a nonzero stream id is a
+        // protocol violation, same rule as Register/Enroll.
+        let header = [0x0fu8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09];
+        let payload = [0u8; 9];
+        let error = Frame::decode(&header, &payload).expect_err("stream id must fail");
+        assert!(
+            matches!(error, MuxError::InvalidStreamId(FrameType::AdminRequest, 1)),
+            "unexpected error: {error}"
+        );
+        let header = [0x10u8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09];
+        let error = Frame::decode(&header, &payload).expect_err("stream id must fail");
+        assert!(
+            matches!(
+                error,
+                MuxError::InvalidStreamId(FrameType::AdminResponse, 1)
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_admin_frames_with_short_payload() {
+        // The u64 seq prefix requires at least 8 payload bytes.
+        let header = [0x0fu8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04];
+        let error = Frame::decode(&header, &[0, 0, 0, 1]).expect_err("short seq must fail");
+        assert!(
+            matches!(error, MuxError::InvalidPayload(FrameType::AdminRequest, 4)),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn decode_rejects_unknown_frame_type() {
-        // 0x0F is unallocated; 0x01..=0x0E are all assigned frame types.
-        let header = [0x0fu8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
-        let error = Frame::decode(&header, &[]).expect_err("type 0x0F should be rejected");
-        assert!(matches!(error, MuxError::InvalidFrameType(0x0f)));
+        // 0x11 is unallocated; 0x01..=0x10 are all assigned frame types.
+        let header = [0x11u8, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let error = Frame::decode(&header, &[]).expect_err("type 0x11 should be rejected");
+        assert!(matches!(error, MuxError::InvalidFrameType(0x11)));
     }
 
     #[test]

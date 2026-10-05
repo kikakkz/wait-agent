@@ -3,6 +3,7 @@
 //! as a regular node: no in-process special casing, no dashboard data plane,
 //! no authentication (both land in later slices).
 
+pub mod dashboard;
 pub mod serve;
 
 #[cfg(test)]

@@ -427,6 +427,7 @@ const EVENT_QUEUE: usize = 128;
 /// register/heartbeat lifecycle and owns its connection-table entry until
 /// unregister, loss, replacement, or eviction.
 pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServerError> {
+    let started_at = std::time::Instant::now();
     let relay_fingerprint = node_credentials::ensure_credentials(&config.credentials)?;
     let cert_pem = fs::read_to_string(&config.credentials.cert_path)?;
     let key_pem = fs::read_to_string(&config.credentials.key_path)?;
@@ -574,7 +575,7 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                         };
                         crate::infra::relay_link::run_link(
                             tls, peer_addr, table, routing, events, lifecycle, capacity, meter,
-                            presence,
+                            presence, local_addr, started_at,
                         )
                         .await;
                     });

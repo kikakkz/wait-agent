@@ -392,10 +392,10 @@ impl MuxOpener {
     }
 
     /// Sends one relay control frame: only `Register` / `Unregister` /
-    /// `Heartbeat` / `Watch` are legal on a relay link, and only in
-    /// relay-link mode. Uses `try_send`; a full queue maps to an error (the
-    /// caller decides whether to retry — the heartbeat task skips a beat, the
-    /// node client reconnects).
+    /// `Heartbeat` / `Watch` / `AdminRequest` are legal on a relay link, and
+    /// only in relay-link mode. Uses `try_send`; a full queue maps to an
+    /// error (the caller decides whether to retry — the heartbeat task skips
+    /// a beat, the node client reconnects).
     pub fn send_control(&self, frame: Frame) -> Result<(), MuxError> {
         if !self.shared.is_relay_link() {
             return Err(MuxError::NotRelayLink);
@@ -409,8 +409,11 @@ impl MuxOpener {
                     node_id.len()
                 )));
             }
-            Frame::Register { .. } | Frame::Unregister | Frame::Heartbeat | Frame::Watch { .. } => {
-            }
+            Frame::Register { .. }
+            | Frame::Unregister
+            | Frame::Heartbeat
+            | Frame::Watch { .. }
+            | Frame::AdminRequest { .. } => {}
             other => {
                 return Err(MuxError::ProtocolViolation(format!(
                     "{other:?} is not a relay control frame"
@@ -582,6 +585,29 @@ async fn reader_loop(
                     return;
                 }
             }
+            // Node-channel admin answer: forward to the control channel and
+            // stay alive — the client (not the mux) matches the seq.
+            Frame::AdminResponse { seq, body } => {
+                if !relay_link_or_fail(&shared, &table) {
+                    return;
+                }
+                let Some(control) = &control else {
+                    fail_connection(&shared, &table, "admin response without a control channel");
+                    return;
+                };
+                if control
+                    .send(Frame::AdminResponse { seq, body })
+                    .await
+                    .is_err()
+                {
+                    fail_connection(
+                        &shared,
+                        &table,
+                        "relay control receiver dropped while forwarding an admin response",
+                    );
+                    return;
+                }
+            }
             Frame::Data { stream_id, payload } => {
                 let Some(entry) = lookup(&shared, &table, stream_id) else {
                     return;
@@ -664,13 +690,15 @@ async fn reader_loop(
             }
             // Node-to-relay control frames never travel node-to-relay in the
             // relay→node direction: the relay never sends them. The
-            // enrollment pair belongs on the enrollment listener only.
+            // enrollment pair belongs on the enrollment listener only, and
+            // `AdminRequest` is node→relay only (its answer is handled above).
             Frame::Register { .. }
             | Frame::Unregister
             | Frame::Heartbeat
             | Frame::Enroll { .. }
             | Frame::EnrollResponse { .. }
-            | Frame::Watch { .. } => {
+            | Frame::Watch { .. }
+            | Frame::AdminRequest { .. } => {
                 fail_connection(
                     &shared,
                     &table,

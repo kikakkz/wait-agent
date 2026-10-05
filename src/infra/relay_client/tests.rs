@@ -159,7 +159,14 @@ async fn death_reason_surfaces_control_frames_queued_before_link_death() {
         .expect("queue eviction error");
 
     let (event_tx, mut event_rx) = mpsc::channel(16);
-    let reason = pending_control_or_dead_reason(&mut control_rx, &conn, &event_tx);
+    let link_state = Arc::new(ClientLinkState {
+        opener_slot: Mutex::new(None),
+        inbound_tx: mpsc::channel(4).0,
+        watch_interests: Mutex::new(HashSet::new()),
+        admin_seq: AtomicU64::new(0),
+        pending_admin: Mutex::new(HashMap::new()),
+    });
+    let reason = pending_control_or_dead_reason(&mut control_rx, &conn, &event_tx, &link_state);
     assert_eq!(reason, "relay error 0x000a: evicted");
     assert!(matches!(
         event_rx.try_recv(),

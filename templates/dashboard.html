@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="10">
+<title>waitagent relay</title>
+<style>
+  :root {
+    --bg: #16161e;
+    --fg: #fcf7f4;
+    --dim: #ecd8d3;
+    --muted: #c98a5a;
+    --accent: #c91f24;
+    --line: #5a2a2a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 16px 20px 32px; }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 8px; margin-bottom: 16px;
+  }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: 1px; }
+  header h1 .mark { color: var(--accent); }
+  header .listen { color: var(--muted); }
+  header .uptime { color: var(--dim); margin-left: auto; }
+  section { margin-bottom: 20px; }
+  h2 {
+    font-size: 12px; font-weight: normal; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--muted); margin: 0 0 6px;
+  }
+  table { border-collapse: collapse; width: 100%; }
+  th, td {
+    text-align: left; padding: 3px 10px 3px 0;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  th { color: var(--muted); font-weight: normal; }
+  td.num, th.num { text-align: right; padding-right: 0; }
+  tr.empty td { color: var(--muted); border-bottom: none; }
+  dl.usage { display: flex; gap: 24px; margin: 0; flex-wrap: wrap; }
+  dl.usage div { min-width: 140px; }
+  dl.usage dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+  dl.usage dd { margin: 2px 0 0; font-size: 14px; }
+  footer { color: var(--muted); font-size: 11px; margin-top: 24px; }
+  .state { color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>waitagent <span class="mark">&#9632;</span> relay</h1>
+    <span class="listen">{{ listen }}</span>
+    <span class="uptime">up {{ uptime }}</span>
+  </header>
+
+  <section>
+    <h2>Usage / capacity</h2>
+    <dl class="usage">
+      <div><dt>registered nodes</dt><dd>{{ registered_nodes }} / {{ max_nodes }}</dd></div>
+      <div><dt>active streams</dt><dd>{{ active_streams }} / {{ max_streams }}</dd></div>
+      <div><dt>forwarded</dt><dd>{{ forwarded_bytes_per_sec }} B/s (cap {{ max_throughput_bytes_per_sec }} B/s)</dd></div>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Connection table</h2>
+    <table>
+      <thead>
+        <tr><th>node id</th><th class="num">idle ms</th><th>state</th></tr>
+      </thead>
+      <tbody>
+        {% for node in nodes %}
+        <tr>
+          <td>{{ node.node_id }}</td>
+          <td class="num">{{ node.idle_ms }}</td>
+          <td class="state">{% if node.online %}online{% else %}offline{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr class="empty"><td colspan="3">no nodes registered</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <footer>refreshes every 10s &middot; read-only &middot; issue #131 slice 2</footer>
+</main>
+</body>
+</html>

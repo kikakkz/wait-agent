@@ -18,6 +18,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -36,6 +37,7 @@ use crate::infra::relay_client::{
 use crate::infra::relay_join::{join_relay, parse_relay_address};
 use crate::infra::relay_toml_store::{RelayTomlConfig, RelayTomlStoreError};
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncStream};
+use crate::web::dashboard::{dashboard, DashboardState};
 
 /// Default web listen port; the default bind stays on loopback (issue #131
 /// keeps the unauthenticated skeleton loopback-only).
@@ -155,9 +157,14 @@ pub async fn enroll_and_link(config: &WebServeConfig) -> Result<WebRelayLink, We
 }
 
 /// The axum application: `GET /healthz` answers 200 (the slice-1 e2e
-/// anchor). Everything else 404s from the default fallback.
-pub fn build_router() -> Router {
-    Router::new().route("/healthz", get(healthz))
+/// anchor) and `GET /` renders the read-only relay dashboard from status
+/// fetched over the enrolled node channel (slice 2). Everything else 404s
+/// from the default fallback.
+pub fn build_router(state: Arc<DashboardState>) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/", get(dashboard))
+        .with_state(state)
 }
 
 async fn healthz() -> StatusCode {
@@ -173,10 +180,10 @@ pub async fn run(config: &WebServeConfig) -> Result<(), WebServeError> {
     println!("web node fingerprint: {}", link.node_fingerprint);
     println!("relay: {}", link.relay.address);
 
-    axum::serve(listener, build_router())
+    let state = Arc::new(DashboardState::new(link.client));
+    axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
-    drop(link);
     Ok(())
 }
 

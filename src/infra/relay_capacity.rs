@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_STREAMS: usize = 4096;
 pub const DEFAULT_MAX_THROUGHPUT_BYTES_PER_SEC: u64 = 64 * 1024 * 1024;
 
 /// Capacity knobs; every field is overridable (relay.toml with #35).
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RelayCapacityConfig {
     /// Maximum concurrent registered node links.
     pub max_nodes: usize,
@@ -39,7 +39,7 @@ impl Default for RelayCapacityConfig {
 }
 
 /// Usage snapshot for the admin surface and admission checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RelayUsage {
     pub registered_nodes: usize,
     pub active_streams: usize,

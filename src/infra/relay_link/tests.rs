@@ -29,6 +29,7 @@ mod ingress;
 mod join;
 mod pair;
 mod presence;
+mod remote_admin;
 mod routing;
 mod streams;
 mod via_connect;
