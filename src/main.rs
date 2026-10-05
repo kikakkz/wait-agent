@@ -16,6 +16,7 @@ mod ratatui_node;
 mod remote;
 mod terminal;
 mod ui;
+mod web;
 
 use std::process::ExitCode;
 

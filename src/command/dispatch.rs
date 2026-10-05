@@ -108,6 +108,7 @@ impl CommandDispatcher {
             Command::RelayInvite(command) => crate::command::relay_enroll::run_invite(command),
             Command::RelayJoin(command) => crate::command::relay_enroll::run_join(command),
             Command::RelayRemove(command) => crate::command::relay_enroll::run_remove(command),
+            Command::WebServe(command) => crate::command::web_serve::run(command),
             Command::GenerateNodeCredentials => {
                 let paths = match (&self.network.node_key_path, &self.network.node_cert_path) {
                     (Some(key_path), Some(cert_path)) => NodeCredentialPaths {
