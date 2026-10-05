@@ -8,10 +8,12 @@
 # The scenario walks the whole operator surface: unauthenticated redirect,
 # magic-link login, CSRF-gated dashboard invite, and asserts the relay
 # whitelist actually grows when a node redeems the minted token. The
-# enrolled node is then removed over the dashboard WHILE OFFLINE (issue
+# enrolled node is first removed over the dashboard WHILE OFFLINE (issue
 # #147: the remove prefix resolves against the relay whitelist, not just
-# the connection table), re-enrolled with a fresh token, and the whitelist
-# growth is asserted again.
+# the connection table) and re-enrolled with a fresh token; the remove
+# slice (issue #145) then brings it online, revokes it over the dashboard,
+# and asserts the whitelist shrinks and the revoked identity can no longer
+# establish a relay link.
 #
 # Usage: e2e-web.sh
 #   WA_E2E_BINARY=<path> overrides the binary (default: `cargo build` debug).
@@ -25,7 +27,11 @@ die() { log "ERROR: $*"; exit 1; }
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required (stub SMTP server)"
-command -v jq >/dev/null 2>&1 || die "jq is required for relay status parsing"
+command -v jq >/dev/null 2>&1 || die "jq is required for status/probe parsing"
+# The removed node's relay-link death is proven with a real node server; it
+# initializes the TUI and needs a pty, which script(1) provides on loopback
+# (the docker harness uses `docker run -t` for the same reason).
+command -v script >/dev/null 2>&1 || die "script(1) is required (util-linux) for the pty"
 
 if [ -n "${WA_E2E_BINARY:-}" ]; then
     [ -f "$WA_E2E_BINARY" ] || die "WA_E2E_BINARY not found: $WA_E2E_BINARY"
@@ -41,9 +47,12 @@ export WAITAGENT_HOME=$(mktemp -d "/tmp/waitagent-e2e-web-$RUN.XXXXXX")
 RELAY_PORT=$((18810 + RUN % 500))
 WEB_PORT=$((19810 + RUN % 500))
 SINK_PORT=$((17810 + RUN % 500))
+# Loopback port for the removed node's real node server (pty via script(1)).
+NODE2_PORT=$((20810 + RUN % 500))
 UA="waitagent-e2e-web/1.0"
 MAIL_FILE="$WAITAGENT_HOME/mail.txt"
 NODE2_HOME=""
+NODE2_SERVER_PID=""
 
 RELAY_PID=""
 WEB_PID=""
@@ -52,6 +61,12 @@ SINK_PID=""
 cleanup() {
     [ -n "$WEB_PID" ] && kill "$WEB_PID" >/dev/null 2>&1 || true
     [ -n "$SINK_PID" ] && kill "$SINK_PID" >/dev/null 2>&1 || true
+    if [ -n "$NODE2_SERVER_PID" ]; then
+        kill "$NODE2_SERVER_PID" >/dev/null 2>&1 || true
+        # script(1) may leave the shell/child behind; the port is unique to
+        # this run, so a targeted pkill is safe.
+        pkill -f -- "--port $NODE2_PORT" >/dev/null 2>&1 || true
+    fi
     if [ -n "$RELAY_PID" ]; then
         "$BIN" relay shutdown --listen "127.0.0.1:$RELAY_PORT" >/dev/null 2>&1 || true
         wait "$RELAY_PID" 2>/dev/null || true
@@ -201,10 +216,9 @@ code=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -o /dev/null -w '%{http_code}' 
 [ "$code" = "403" ] || die "invite without CSRF must be 403 (got $code)"
 
 # 5) Invite over the node channel: token shown once, relay whitelist grows
-#    when a node redeems it. Snapshot the whitelist names before the invite
-#    so the growth diff below can name node 2's entry.
-whitelist_before=$(ls "$WAITAGENT_HOME/authorized_nodes" | wc -l)
-mapfile -t whitelist_pre < <(ls "$WAITAGENT_HOME/authorized_nodes" | sort)
+#    when a node redeems it.
+mapfile -t whitelist_names_before < <(ls "$WAITAGENT_HOME/authorized_nodes" | sort)
+whitelist_before=$(printf '%s\n' "${whitelist_names_before[@]}" | grep -c .)
 invite_response=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -X POST "$BASE/api/invite" \
     --data "csrf=$CSRF&ttl_secs=3600")
 INVITE_TOKEN=$(printf '%s' "$invite_response" | grep -o 'token: [A-Za-z0-9_-]*' | head -1 | cut -d' ' -f2)
@@ -229,16 +243,18 @@ if [ "$whitelist_after" -ne $((whitelist_before + 1)) ]; then
 fi
 log "whitelist grew $whitelist_before -> $whitelist_after with the dashboard-minted token"
 
-# 6) Remove enrolled-but-offline (issue #147): node 2 never started a node
-#    server, so it has no relay link and the connection table holds only
-#    the web node — the dashboard's remove prefix must resolve against the
-#    relay whitelist to find it. This is the offline half of remove; the
-#    online half (live link dropped) rides the relay-side revoke e2e.
-mapfile -t whitelist_post < <(ls "$WAITAGENT_HOME/authorized_nodes" | sort)
+# Node 2's fingerprint: the whitelist entry that appeared with the invite.
+mapfile -t whitelist_names_after < <(ls "$WAITAGENT_HOME/authorized_nodes" | sort)
 node2_fp=$(comm -13 \
-    <(printf '%s\n' "${whitelist_pre[@]}") \
-    <(printf '%s\n' "${whitelist_post[@]}"))
+    <(printf '%s\n' "${whitelist_names_before[@]}") \
+    <(printf '%s\n' "${whitelist_names_after[@]}"))
 [ -n "$node2_fp" ] || die "could not derive node 2's fingerprint from the whitelist growth"
+
+# 6) Remove enrolled-but-offline (issue #147): node 2's server has not
+#    started yet, so it has no relay link and the connection table holds
+#    only the web node — the dashboard's remove prefix must resolve against
+#    the relay whitelist to find it. This is the offline half of remove;
+#    step 9 below covers the online half (live link dropped).
 dashboard=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" "$BASE/")
 case "$dashboard" in
     *"Connection table"*) ;;
@@ -271,5 +287,96 @@ WAITAGENT_HOME="$NODE2_HOME" "$BIN" relay join "127.0.0.1:$RELAY_PORT" "$INVITE_
 [ -f "$WAITAGENT_HOME/authorized_nodes/$node2_fp" ] \
     || die "node 2's re-enroll did not restore its whitelist entry"
 log "node 2 re-enrolled with a fresh token ($node2_fp)"
+
+# 8) Bring node 2 fully online. Enrollment alone does not connect: the node
+#    server (under a pty via script(1), mirroring the docker harness's
+#    `docker run -t`) opens the relay link with the identity node 2
+#    enrolled, so the relay's connection table — whose whitelist union the
+#    dashboard's remove resolves fingerprints against — holds node 2.
+WAITAGENT_HOME="$NODE2_HOME" script -qec "$BIN --port $NODE2_PORT" /dev/null \
+    >"$NODE2_HOME/server.stdout" 2>&1 &
+NODE2_SERVER_PID=$!
+node2_ready=""
+for _ in $(seq 1 150); do
+    if WAITAGENT_HOME="$NODE2_HOME" "$BIN" __node-command "$NODE2_PORT" STATUS 2>/dev/null \
+        | jq -e '.type == "Response" and .payload.ok == true' >/dev/null; then
+        node2_ready=1
+        break
+    fi
+    sleep 0.2
+done
+[ -n "$node2_ready" ] || { cat "$NODE2_HOME/server.stdout"; die "node 2's server never became ready"; }
+node2_registered=""
+for _ in $(seq 1 100); do
+    if "$BIN" relay status --listen "127.0.0.1:$RELAY_PORT" 2>/dev/null \
+        | jq -e --arg fp "$node2_fp" '.nodes[].node_id | select(. == $fp)' >/dev/null; then
+        node2_registered=1
+        break
+    fi
+    sleep 0.3
+done
+[ -n "$node2_registered" ] || { tail -10 "$WAITAGENT_HOME/relay.log"; die "node 2 never registered on the relay"; }
+log "node 2's server is up and registered on the relay"
+
+# 9) Remove over the dashboard (issue #145): the operator confirms by typing
+#    the fingerprint (or a unique prefix), which resolves against a fresh
+#    connection-table snapshot plus the whitelist; the write is CSRF-gated
+#    exactly like invite.
+# CSRF gate: a remove without the token is refused, session intact.
+code=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -o /dev/null -w '%{http_code}' \
+    -X POST "$BASE/api/remove" --data "fingerprint=$node2_fp")
+[ "$code" = "403" ] || die "remove without CSRF must be 403 (got $code)"
+
+# Fresh dashboard render for a fresh CSRF token, then the prefix-confirmation
+# happy path: 12 hex chars, as the dashboard's revoke button prefills. The
+# banner carries the admin channel's answer.
+dashboard=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" "$BASE/")
+case "$dashboard" in
+    *"Connection table"*) ;;
+    *) die "dashboard did not render before remove" ;;
+esac
+CSRF=$(printf '%s' "$dashboard" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//')
+[ -n "$CSRF" ] || die "dashboard rendered without a CSRF token"
+remove_page=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -X POST "$BASE/api/remove" \
+    --data "csrf=$CSRF&fingerprint=${node2_fp:0:12}")
+case "$remove_page" in
+    *"removed:"*) ;;
+    *) die "dashboard remove did not confirm: $(printf '%s' "$remove_page" | head -c 300)" ;;
+esac
+
+# Anchor (runtime truth): the connection table dropped node 2 and kept only
+# the web node's link, undisturbed.
+relay_status_json=$("$BIN" relay status --listen "127.0.0.1:$RELAY_PORT")
+web_fp=$(jq -r --arg z "$node2_fp" '[.nodes[].node_id | select(. != $z)] | first' <<<"$relay_status_json")
+[ -n "$web_fp" ] && [ "$web_fp" != "null" ] || die "no surviving node left in the connection table"
+jq -e --arg fp "$web_fp" \
+    '.registered_nodes == 1 and ([.nodes[].node_id] == [$fp])' <<<"$relay_status_json" >/dev/null \
+    || die "relay connection table wrong after remove: $relay_status_json"
+log "connection table shrank to the web node's link ($web_fp)"
+
+# Anchor (enrollment truth): the whitelist shrank by exactly node 2's entry.
+mapfile -t whitelist_names_final < <(ls "$WAITAGENT_HOME/authorized_nodes" | sort)
+for fp in "${whitelist_names_final[@]}"; do
+    [ "$fp" != "$node2_fp" ] || die "node 2's whitelist entry survived the dashboard remove"
+done
+[ "${#whitelist_names_final[@]}" = "$whitelist_before" ] \
+    || die "whitelist should be back to $whitelist_before entries after remove, got ${#whitelist_names_final[@]}"
+log "whitelist shrank $whitelist_after -> ${#whitelist_names_final[@]} (node 2 revoked)"
+
+# Anchor (the revoked node's relay link is dead at the process level): the
+# remove dropped node 2's live link with the NodeRevoked error frame, and
+# every reconnect now fails the data port's whitelist client-auth, so the
+# probe deterministically reports NotConnected while the local control
+# socket stays healthy. The connection table must not regain node 2 no
+# matter how long its client keeps retrying.
+probe=$(WAITAGENT_HOME="$NODE2_HOME" "$BIN" __node-command "$NODE2_PORT" \
+    "E2E_RELAY_PROBE $web_fp 1 1")
+jq -e '.type == "Response" and .payload.ok == false' <<<"$probe" >/dev/null \
+    || die "removed node 2 still has a working relay link: $probe"
+relay_status_json=$("$BIN" relay status --listen "127.0.0.1:$RELAY_PORT")
+jq -e --arg fp "$web_fp" \
+    '.registered_nodes == 1 and ([.nodes[].node_id] == [$fp])' <<<"$relay_status_json" >/dev/null \
+    || die "relay connection table changed after node 2's retries: $relay_status_json"
+log "node 2's relay link stays dead (probe NotConnected, reconnect refused)"
 
 log "OK: web e2e passed"
