@@ -11,6 +11,17 @@ Closes #
 
 ## How acceptance criteria are met
 
+## Acceptance (验收)
+
+<!-- Required when the PR adds a user-reachable surface (CLI flag, config
+     key, protocol message/rpc); enforced by .agents/tools/check_surface_e2e.py
+     (issue #136). Delete this section only when no surface changed. -->
+
+- Proof command(s) — exact commands a reviewer can run to see it work:
+- Executing CI layer — the job (or e2e script) that runs them:
+- Exemption (only if there is no e2e): surface id(s) + reason registered
+  in `.agents/tools/surface_e2e_exemptions.txt`:
+
 ## Checklist
 
 - [ ] An issue exists for this change (filed first if missing); the branch

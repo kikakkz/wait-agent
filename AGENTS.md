@@ -29,7 +29,16 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
    enter the repository, ever.
 5. **Generated artifacts are read-only.** Anything produced by codegen or
    automation is regenerated, never hand-edited.
-6. **Process authority.** If an external skill or methodology pack
+6. **New surfaces ship with process-level acceptance.** A PR that adds a
+   user-reachable surface — a CLI flag, a config key (`*.toml` schema), or
+   a protocol surface (`proto/`) — must land the process-level e2e that
+   exercises it in the same PR (a new or extended `scripts/e2e/` case
+   executed by CI) or register an explicit exemption with a reason in
+   `.agents/tools/surface_e2e_exemptions.txt`. `check_surface_e2e.py`
+   enforces this in pre-commit and CI (issue #136); exemptions are for
+   genuine harness gaps, never for skipping acceptance silently. Design-doc
+   task status updates ride with the landing PR.
+7. **Process authority.** If an external skill or methodology pack
    disagrees with this file on *process*, this file wins.
 
 ## Commands

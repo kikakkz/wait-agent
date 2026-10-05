@@ -45,6 +45,13 @@ jobs:
         if: github.event_name == 'pull_request'
         run: bash .agents/tools/check-trailers.sh --dco "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
+      - name: New-surface acceptance check (issue #136)
+        # Same check as hooks/pre-commit, over the whole PR range:
+        # a new CLI flag / config key / protocol surface needs a
+        # scripts/e2e/ change or a registered exemption.
+        if: github.event_name == 'pull_request'
+        run: python3 .agents/tools/check_surface_e2e.py --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
   build:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,15 @@
+# Exemptions for check_surface_e2e.py (issue #136).
+#
+# One surface per line: `<surface-id> <reason>` — the reason is mandatory;
+# id-only lines fail the check. Blank lines and `#` comments are ignored.
+#
+# Surface ids:
+#   --new-flag            a new CLI flag literal (as matched in src/cli*.rs)
+#   key:new_config_key    a new config key in a toml_store / src/web/config.rs
+#   proto:NewMessage      a new proto message or rpc name
+#
+# Register an exemption only when a new user-reachable surface genuinely
+# cannot be exercised by a process-level e2e in scripts/e2e/; record the
+# reason and, where applicable, the issue that will close the gap.
+#
+# (no exemptions yet — this file is the empty template)
