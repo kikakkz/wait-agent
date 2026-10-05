@@ -29,6 +29,11 @@ use crate::web::auth::routes::{SessionInfo, WebState};
 /// The `status` request body, identical to the local admin protocol.
 const STATUS_COMMAND: &str = r#"{"command":"status"}"#;
 
+/// The read-only whitelist listing (issue #147): the relay answers with the
+/// authorized_nodes directory entries, which is what lets the dashboard
+/// resolve a remove prefix against enrolled-but-offline nodes.
+const LIST_WHITELIST_COMMAND: &str = r#"{"command":"list-whitelist"}"#;
+
 /// Upper bound on one dashboard refresh: the relay answers on the same
 /// loopback link in milliseconds; anything beyond is a broken link.
 const ADMIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,7 +103,11 @@ pub(crate) async fn invite(
 
 /// `POST /api/remove`: revoke a node. The operator confirms by typing the
 /// fingerprint or a unique prefix; the prefix resolves against a fresh
-/// status snapshot, and exactly one match must exist.
+/// status snapshot PLUS the relay whitelist (issue #147 — enrolled-but-
+/// offline nodes are not in the connection table), and exactly one match
+/// must exist. The relay-side `remove` then revokes the whitelist entry and
+/// drops the live link when there is one, so one code path serves both
+/// online and offline targets.
 pub(crate) async fn remove(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<SessionInfo>,
@@ -122,27 +131,17 @@ pub(crate) async fn remove(
 
     let outcome = async {
         let status = fetch_status(&state.client).await?;
-        let matches: Vec<&str> = status
+        let whitelist = fetch_whitelist(&state.client).await?;
+        let online: Vec<String> = status
             .nodes
             .iter()
-            .map(|node| node.node_id.as_str())
-            .filter(|node_id| node_id.starts_with(&prefix))
+            .map(|node| node.node_id.clone())
             .collect();
-        match matches.as_slice() {
-            [unique] => {
-                let command =
-                    serde_json::json!({"command": "remove", "fingerprint": unique}).to_string();
-                let body = state.client.admin_request(&command).await?;
-                parse_envelope(&body)
-            }
-            [] => Err(DashboardError::Relay(format!(
-                "no registered node matches {prefix:?}"
-            ))),
-            many => Err(DashboardError::Relay(format!(
-                "{prefix:?} is ambiguous ({} nodes match); type more digits",
-                many.len()
-            ))),
-        }
+        let fingerprint = resolve_remove_target(&prefix, &online, &whitelist)?;
+        let command =
+            serde_json::json!({"command": "remove", "fingerprint": fingerprint}).to_string();
+        let body = state.client.admin_request(&command).await?;
+        parse_envelope(&body)
     }
     .await;
     let banner = match outcome {
@@ -159,6 +158,34 @@ pub(crate) async fn remove(
         }
     };
     render_dashboard(&state, &session, Some(banner)).await
+}
+
+/// Resolves an operator-typed prefix to exactly one node fingerprint across
+/// the connection table (`online`) and the whitelist (`whitelisted`). A node
+/// that is both online and whitelisted counts once. Pure; unit-tested.
+fn resolve_remove_target(
+    prefix: &str,
+    online: &[String],
+    whitelisted: &[String],
+) -> Result<String, DashboardError> {
+    let mut matches: Vec<&str> = online
+        .iter()
+        .map(String::as_str)
+        .chain(whitelisted.iter().map(String::as_str))
+        .filter(|node_id| node_id.starts_with(prefix))
+        .collect();
+    matches.sort_unstable();
+    matches.dedup();
+    match matches.as_slice() {
+        [unique] => Ok((*unique).to_string()),
+        [] => Err(DashboardError::Relay(format!(
+            "no enrolled node matches {prefix:?}"
+        ))),
+        many => Err(DashboardError::Relay(format!(
+            "{prefix:?} is ambiguous ({} nodes match); type more digits",
+            many.len()
+        ))),
+    }
 }
 
 /// Renders the dashboard page, banner included when a write just happened.
@@ -270,6 +297,35 @@ async fn fetch_status(client: &RelayClientHandle) -> Result<RemoteAdminStatus, D
             status: Some(status),
             ..
         } => Ok(status),
+        RemoteAdminResponse {
+            error: Some(message),
+            ..
+        } => Err(DashboardError::Relay(message)),
+        other => Err(DashboardError::Undecodable(format!(
+            "unexpected admin envelope: {other:?}"
+        ))),
+    }
+}
+
+/// Fetches the enrolled (whitelisted) node fingerprints over the node
+/// channel (issue #147). A failed listing fails the remove: prefix
+/// resolution without the whitelist could not see offline nodes, and the
+/// dashboard must not imply a resolution pool it did not actually read.
+async fn fetch_whitelist(client: &RelayClientHandle) -> Result<Vec<String>, DashboardError> {
+    let body = timeout(
+        ADMIN_REQUEST_TIMEOUT,
+        client.admin_request(LIST_WHITELIST_COMMAND),
+    )
+    .await
+    .map_err(|_| DashboardError::Timeout)??;
+    let response: RemoteAdminResponse = serde_json::from_str(&body)
+        .map_err(|error| DashboardError::Undecodable(error.to_string()))?;
+    match response {
+        RemoteAdminResponse {
+            ok: true,
+            whitelist: Some(entries),
+            ..
+        } => Ok(entries),
         RemoteAdminResponse {
             error: Some(message),
             ..
@@ -423,5 +479,69 @@ mod tests {
         assert_eq!(format_uptime(7_000), "00:00:07");
         assert_eq!(format_uptime(3_723_000), "01:02:03");
         assert_eq!(format_uptime(86_400_000 + 3_723_000), "1d 01:02:03");
+    }
+
+    fn fp(first: char, fill: char) -> String {
+        // A 64-hex-char fingerprint starting with `first`.
+        std::iter::once(first)
+            .chain(std::iter::repeat_n(fill, 63))
+            .collect()
+    }
+
+    #[test]
+    fn remove_prefix_resolves_an_offline_whitelisted_node() {
+        // Enrolled but NOT in the connection table (issue #147): resolvable
+        // only because the pool covers the whitelist.
+        let online = vec![fp('a', 'a')];
+        let whitelist = vec![fp('b', 'b')];
+        assert_eq!(
+            resolve_remove_target("bbbb", &online, &whitelist).expect("offline node resolves"),
+            fp('b', 'b')
+        );
+    }
+
+    #[test]
+    fn remove_prefix_resolves_an_online_node_against_the_connection_table() {
+        let online = vec![fp('a', 'a')];
+        let whitelist = vec![fp('b', 'b')];
+        assert_eq!(
+            resolve_remove_target("aaaa", &online, &whitelist).expect("online node resolves"),
+            fp('a', 'a')
+        );
+    }
+
+    #[test]
+    fn remove_prefix_counts_a_node_that_is_online_and_whitelisted_once() {
+        let id = fp('a', 'b');
+        let online = vec![id.clone()];
+        let whitelist = vec![id.clone()];
+        assert_eq!(
+            resolve_remove_target("abb", &online, &whitelist).expect("deduped node resolves"),
+            id
+        );
+    }
+
+    #[test]
+    fn remove_prefix_rejects_ambiguity_across_the_union() {
+        let shared = "ab".repeat(10);
+        let mut first = shared.clone();
+        first.push_str(&"0".repeat(44));
+        let mut second = shared.clone();
+        second.push_str(&"1".repeat(44));
+        let online = vec![first];
+        let whitelist = vec![second];
+        let error = resolve_remove_target("ab", &online, &whitelist).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+    }
+
+    #[test]
+    fn remove_prefix_rejects_no_match() {
+        let online = vec![fp('a', 'a')];
+        let whitelist = vec![fp('b', 'b')];
+        let error = resolve_remove_target("cccc", &online, &whitelist).unwrap_err();
+        assert!(
+            error.to_string().contains("no enrolled node matches"),
+            "{error}"
+        );
     }
 }

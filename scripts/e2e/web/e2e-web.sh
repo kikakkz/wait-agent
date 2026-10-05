@@ -7,10 +7,13 @@
 # protocol), and a scripted stub SMTP server that captures the magic link.
 # The scenario walks the whole operator surface: unauthenticated redirect,
 # magic-link login, CSRF-gated dashboard invite, and asserts the relay
-# whitelist actually grows when a node redeems the minted token. The remove
-# slice (issue #145) then revokes that node over the dashboard and asserts
-# the whitelist shrinks and the revoked identity can no longer establish a
-# relay link.
+# whitelist actually grows when a node redeems the minted token. The
+# enrolled node is first removed over the dashboard WHILE OFFLINE (issue
+# #147: the remove prefix resolves against the relay whitelist, not just
+# the connection table) and re-enrolled with a fresh token; the remove
+# slice (issue #145) then brings it online, revokes it over the dashboard,
+# and asserts the whitelist shrinks and the revoked identity can no longer
+# establish a relay link.
 #
 # Usage: e2e-web.sh
 #   WA_E2E_BINARY=<path> overrides the binary (default: `cargo build` debug).
@@ -247,11 +250,49 @@ node2_fp=$(comm -13 \
     <(printf '%s\n' "${whitelist_names_after[@]}"))
 [ -n "$node2_fp" ] || die "could not derive node 2's fingerprint from the whitelist growth"
 
-# 6) Bring node 2 fully online. Enrollment alone does not connect: the node
+# 6) Remove enrolled-but-offline (issue #147): node 2's server has not
+#    started yet, so it has no relay link and the connection table holds
+#    only the web node — the dashboard's remove prefix must resolve against
+#    the relay whitelist to find it. This is the offline half of remove;
+#    step 9 below covers the online half (live link dropped).
+dashboard=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" "$BASE/")
+case "$dashboard" in
+    *"Connection table"*) ;;
+    *) die "dashboard did not render before the offline remove" ;;
+esac
+CSRF=$(printf '%s' "$dashboard" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//')
+[ -n "$CSRF" ] || die "dashboard rendered without a CSRF token"
+remove_page=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -X POST "$BASE/api/remove" \
+    --data "csrf=$CSRF&fingerprint=${node2_fp:0:12}")
+case "$remove_page" in
+    *"removed:"*"no live link"*) ;;
+    *) die "offline remove did not confirm: $(printf '%s' "$remove_page" | head -c 300)" ;;
+esac
+[ ! -f "$WAITAGENT_HOME/authorized_nodes/$node2_fp" ] \
+    || die "offline remove left node 2's whitelist entry behind"
+relay_status_json=$("$BIN" relay status --listen "127.0.0.1:$RELAY_PORT")
+jq -e '.registered_nodes == 1' <<<"$relay_status_json" >/dev/null \
+    || die "offline remove disturbed the connection table: $relay_status_json"
+log "offline remove OK: enrolled-but-offline node 2 revoked via whitelist-resolved prefix"
+
+# 7) Re-enroll node 2 (same identity, fresh dashboard token) so enrollment
+#    with a previously-removed identity works and the whitelist regrows.
+invite_response=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -X POST "$BASE/api/invite" \
+    --data "csrf=$CSRF&ttl_secs=3600")
+INVITE_TOKEN=$(printf '%s' "$invite_response" | grep -o 'token: [A-Za-z0-9_-]*' | head -1 | cut -d' ' -f2)
+[ -n "$INVITE_TOKEN" ] || die "re-enroll invite response carried no token"
+WAITAGENT_HOME="$NODE2_HOME" "$BIN" relay join "127.0.0.1:$RELAY_PORT" "$INVITE_TOKEN" \
+    >"$NODE2_HOME/join.out" 2>&1 \
+    || { cat "$NODE2_HOME/join.out"; die "node 2 failed to re-join with the fresh token"; }
+[ -f "$WAITAGENT_HOME/authorized_nodes/$node2_fp" ] \
+    || die "node 2's re-enroll did not restore its whitelist entry"
+log "node 2 re-enrolled with a fresh token ($node2_fp)"
+
+# 8) Bring node 2 fully online. Enrollment alone does not connect: the node
 #    server (under a pty via script(1), mirroring the docker harness's
 #    `docker run -t`) opens the relay link with the identity node 2
-#    enrolled, so the relay's connection table — which the dashboard's
-#    remove resolves fingerprints against — holds node 2.
+#    enrolled, so the relay's connection table — whose whitelist union the
+#    dashboard's remove resolves fingerprints against — holds node 2.
 WAITAGENT_HOME="$NODE2_HOME" script -qec "$BIN --port $NODE2_PORT" /dev/null \
     >"$NODE2_HOME/server.stdout" 2>&1 &
 NODE2_SERVER_PID=$!
@@ -277,9 +318,10 @@ done
 [ -n "$node2_registered" ] || { tail -10 "$WAITAGENT_HOME/relay.log"; die "node 2 never registered on the relay"; }
 log "node 2's server is up and registered on the relay"
 
-# 7) Remove over the dashboard (issue #145): the operator confirms by typing
+# 9) Remove over the dashboard (issue #145): the operator confirms by typing
 #    the fingerprint (or a unique prefix), which resolves against a fresh
-#    connection-table snapshot; the write is CSRF-gated exactly like invite.
+#    connection-table snapshot plus the whitelist; the write is CSRF-gated
+#    exactly like invite.
 # CSRF gate: a remove without the token is refused, session intact.
 code=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -o /dev/null -w '%{http_code}' \
     -X POST "$BASE/api/remove" --data "fingerprint=$node2_fp")
