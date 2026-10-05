@@ -9,6 +9,12 @@ fi
 echo "==> Running governance checks..."
 python3 .agents/tools/check_branch_name.py
 
+# New user-reachable surfaces (CLI flag / config key / protocol) must
+# land with process-level acceptance in the same commit (issue #136);
+# CI re-runs this over the whole PR range.
+echo "==> Running new-surface acceptance check..."
+python3 .agents/tools/check_surface_e2e.py
+
 # Skip the Rust gate when the commit touches no Rust-relevant paths;
 # CI still enforces the full gate on every PR.
 if git diff --cached --name-only | grep -qE '\.rs$|\.toml$|^proto/|^tests/.*\.rs$'; then
