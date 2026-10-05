@@ -22,6 +22,7 @@ requires = "libevent, ncurses-libs"
 
 [dependencies]
 aes = "0.9"
+askama = "0.14"
 axum = "0.8"
 base64 = "0.22"
 cbc = "0.2"

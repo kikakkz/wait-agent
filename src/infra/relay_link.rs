@@ -16,6 +16,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::io::ReadHalf;
 use tokio::sync::mpsc;
@@ -28,6 +29,7 @@ use crate::infra::relay_connection_table::{
 };
 use crate::infra::relay_mux::frame::{read_frame, Frame};
 use crate::infra::relay_presence::PresenceHub;
+use crate::infra::relay_remote_admin::remote_admin_response;
 use crate::infra::relay_routing::{
     error_code::RelayErrorCode, CloseOutcome, Lookup, RouteKey, RoutingTable,
 };
@@ -55,6 +57,8 @@ pub(crate) async fn run_link(
     capacity: RelayCapacityConfig,
     meter: SharedUsageMeter,
     presence: Arc<PresenceHub>,
+    listen: SocketAddr,
+    started_at: Instant,
 ) {
     let peer_fingerprint = match peer_fingerprint(&tls, peer_addr) {
         Some(fingerprint) => fingerprint,
@@ -111,6 +115,8 @@ pub(crate) async fn run_link(
         &capacity,
         &meter,
         &presence,
+        listen,
+        started_at,
     )
     .await;
 
@@ -264,6 +270,8 @@ async fn dispatch_loop(
     capacity: &RelayCapacityConfig,
     meter: &SharedUsageMeter,
     presence: &Arc<PresenceHub>,
+    listen: SocketAddr,
+    started_at: Instant,
 ) {
     let node_id = &registered.node_id;
     let connection_id = registered.connection_id;
@@ -301,6 +309,23 @@ async fn dispatch_loop(
                             outbound_tx.clone(),
                             currently_online,
                         );
+                    }
+                    Ok(Frame::AdminRequest { seq, command }) => {
+                        // Node-channel admin (docs/relay-design.md 管理通道):
+                        // read-only in this build — status answers from the
+                        // same state the local admin socket reads; write
+                        // commands get a structured refusal. The response
+                        // rides this link's outbound queue, correlated by seq.
+                        let body = remote_admin_response(
+                            &command,
+                            table,
+                            routing,
+                            listen,
+                            capacity,
+                            meter,
+                            started_at,
+                        );
+                        let _ = outbound_tx.send(Frame::AdminResponse { seq, body }).await;
                     }
                     Ok(Frame::OpenStream { stream_id, target_node_id }) => {
                         if !handle_open_stream(

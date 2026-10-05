@@ -14,15 +14,16 @@
 //! the supervisor through the mux control channel and are fatal for the link
 //! (the retry loop re-registers), matching the server-side link loop.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_rustls::TlsConnector;
 
 use crate::infra::error_log::ERROR_LOG;
@@ -68,6 +69,20 @@ pub enum RelayClientError {
     /// The underlying mux rejected the operation.
     #[error("mux error: {0}")]
     Mux(#[from] MuxError),
+}
+
+/// Errors of the node-channel admin request API
+/// ([`RelayClientHandle::admin_request`]).
+#[derive(Debug, Error)]
+pub enum RelayAdminError {
+    /// No relay link is currently established (still connecting, between
+    /// retries, or after a connection-level refusal).
+    #[error("no relay link is currently established")]
+    NotConnected,
+    /// The request was in flight when the link dropped or was replaced;
+    /// the response can never arrive.
+    #[error("relay link was lost before the admin response arrived")]
+    LinkLost,
 }
 
 /// Configuration for [`RelayClient::spawn`].
@@ -189,6 +204,8 @@ impl RelayClient {
             opener_slot: Mutex::new(None),
             inbound_tx,
             watch_interests: Mutex::new(HashSet::new()),
+            admin_seq: AtomicU64::new(0),
+            pending_admin: Mutex::new(HashMap::new()),
         });
         let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
         let worker_state = link_state.clone();
@@ -239,6 +256,13 @@ struct ClientLinkState {
     /// watches per connection, so `serve_registered` re-declares every
     /// interest after each `Register`.
     watch_interests: Mutex<HashSet<String>>,
+    /// Sequence source for node-channel admin requests
+    /// ([`Frame::AdminRequest`]).
+    admin_seq: AtomicU64,
+    /// Admin requests awaiting their [`Frame::AdminResponse`], keyed by seq.
+    /// Lock order: this lock and `opener_slot` are leaf locks — never hold
+    /// one while acquiring the other, and never hold either across `.await`.
+    pending_admin: Mutex<HashMap<u64, oneshot::Sender<Result<String, RelayAdminError>>>>,
 }
 
 /// Handle to a running [`RelayClient`] thread. Dropping it (or calling
@@ -365,6 +389,50 @@ impl RelayClientHandle {
         inbound
             .blocking_recv()
             .map(|stream| Box::new(stream) as Box<dyn PeerConnection>)
+    }
+
+    /// Sends one node-channel admin command (same JSON grammar as the local
+    /// admin socket, e.g. `{"command":"status"}`) over the current
+    /// registered link and awaits the JSON response envelope. Async and
+    /// non-blocking: only the brief seq/opener registration takes the sync
+    /// locks; the response wait suspends. In-flight requests fail with
+    /// [`RelayAdminError::LinkLost`] when the link drops or is replaced.
+    pub async fn admin_request(&self, command: &str) -> Result<String, RelayAdminError> {
+        let seq = self.link_state.admin_seq.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self
+                .link_state
+                .pending_admin
+                .lock()
+                .map_err(|_| RelayAdminError::LinkLost)?;
+            pending.insert(seq, tx);
+        }
+        let send_outcome = {
+            let slot = self
+                .link_state
+                .opener_slot
+                .lock()
+                .map_err(|_| RelayAdminError::NotConnected)?;
+            match slot.as_ref() {
+                Some(opener) => opener.send_control(Frame::AdminRequest {
+                    seq,
+                    command: command.to_string(),
+                }),
+                None => Err(MuxError::ConnectionClosed(
+                    "no relay link is currently established".to_string(),
+                )),
+            }
+        };
+        if send_outcome.is_err() {
+            if let Ok(mut pending) = self.link_state.pending_admin.lock() {
+                pending.remove(&seq);
+            }
+            return Err(RelayAdminError::NotConnected);
+        }
+        // Lock-free from here: the response (or a reconnect drain) completes
+        // the oneshot; a dropped sender maps to LinkLost.
+        rx.await.unwrap_or(Err(RelayAdminError::LinkLost))
     }
 
     /// Stops the persistent link and waits for the client thread to exit.
@@ -537,6 +605,49 @@ enum ControlOutcome {
 }
 
 /// Handles one connection-level mux control frame, shared by the live select
+/// arm and the connection-death drain: an `AdminResponse` completes its
+/// pending request; everything else delegates to [`handle_control_frame`].
+fn dispatch_control_frame(
+    event_tx: &mpsc::Sender<RelayClientEvent>,
+    link_state: &Arc<ClientLinkState>,
+    frame: Frame,
+) -> ControlOutcome {
+    match frame {
+        Frame::AdminResponse { seq, body } => {
+            let sender = link_state
+                .pending_admin
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&seq));
+            match sender {
+                Some(sender) => {
+                    let _ = sender.send(Ok(body));
+                }
+                None => {
+                    ERROR_LOG.log_debug(format!(
+                        "[relay-client] admin response for unknown or stale seq {seq} ignored"
+                    ));
+                }
+            }
+            ControlOutcome::Continue
+        }
+        other => handle_control_frame(event_tx, other),
+    }
+}
+
+/// Fails every pending admin request: called when a fresh link takes over,
+/// because requests in flight on the previous link can never be answered.
+fn fail_pending_admin(link_state: &Arc<ClientLinkState>) {
+    let pending = match link_state.pending_admin.lock() {
+        Ok(mut pending) => std::mem::take(&mut *pending),
+        Err(_) => return,
+    };
+    for (_seq, sender) in pending {
+        let _ = sender.send(Err(RelayAdminError::LinkLost));
+    }
+}
+
+/// Handles one connection-level mux control frame, shared by the live select
 /// arm and the connection-death drain: a connection-level `Error` emits
 /// `RelayError` first and folds the reason; `Presence` is forwarded; anything
 /// else is logged and ignored.
@@ -582,9 +693,10 @@ fn pending_control_or_dead_reason(
     control_rx: &mut mpsc::Receiver<Frame>,
     conn: &MuxConnection,
     event_tx: &mpsc::Sender<RelayClientEvent>,
+    link_state: &Arc<ClientLinkState>,
 ) -> String {
     while let Ok(frame) = control_rx.try_recv() {
-        if let ControlOutcome::Break(reason) = handle_control_frame(event_tx, frame) {
+        if let ControlOutcome::Break(reason) = dispatch_control_frame(event_tx, link_state, frame) {
             return reason;
         }
     }
@@ -619,6 +731,10 @@ async fn serve_registered(
     if let Ok(mut slot) = link_state.opener_slot.lock() {
         *slot = Some(opener.clone());
     }
+    // A fresh link took over: requests in flight on the previous link can
+    // never be answered — fail them now so callers retry instead of waiting
+    // for their own timeout.
+    fail_pending_admin(link_state);
     // The relay forgets watches per connection: re-declare every persisted
     // interest now that Register is queued (the queue is FIFO, so the
     // watches follow the register on the wire).
@@ -654,12 +770,13 @@ async fn serve_registered(
                 &mut control_rx,
                 &conn,
                 event_tx,
+                link_state,
             ));
         }
         tokio::select! {
             _ = stop_rx.changed() => break None,
             frame = control_rx.recv() => match frame {
-                Some(frame) => match handle_control_frame(event_tx, frame) {
+                Some(frame) => match dispatch_control_frame(event_tx, link_state, frame) {
                     ControlOutcome::Continue => {}
                     ControlOutcome::Break(reason) => break Some(reason),
                 },
@@ -667,6 +784,7 @@ async fn serve_registered(
                     &mut control_rx,
                     &conn,
                     event_tx,
+                    link_state,
                 )),
             },
             accepted = conn.accept() => match accepted {
@@ -689,6 +807,7 @@ async fn serve_registered(
                     &mut control_rx,
                     &conn,
                     event_tx,
+                    link_state,
                 )),
             },
         }
