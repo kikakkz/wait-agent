@@ -8,6 +8,7 @@ pub mod relay_capacity;
 pub mod relay_client;
 pub mod relay_connection_table;
 pub mod relay_enrollment;
+pub mod relay_ingress;
 pub mod relay_join;
 pub mod relay_link;
 pub mod relay_mux;
