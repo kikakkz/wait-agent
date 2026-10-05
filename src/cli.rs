@@ -4,11 +4,13 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 pub mod relay;
+pub mod web;
 
 pub use relay::{
     RelayInviteCommand, RelayJoinCommand, RelayRemoveCommand, RelayServeCommand,
     RelayShutdownCommand, RelayStatusCommand,
 };
+pub use web::WebServeCommand;
 
 #[allow(dead_code)]
 pub const DEFAULT_REMOTE_NODE_PORT: u16 = 7474;
@@ -186,6 +188,7 @@ pub enum Command {
     RelayInvite(RelayInviteCommand),
     RelayJoin(RelayJoinCommand),
     RelayRemove(RelayRemoveCommand),
+    WebServe(WebServeCommand),
     GenerateNodeCredentials,
     ProvisionMsys,
     NodeControl(NodeControlCommand),
@@ -327,6 +330,10 @@ impl Cli {
             "relay" => {
                 args.remove(0);
                 relay::parse_relay(args)?
+            }
+            "web" => {
+                args.remove(0);
+                web::parse_web(args)?
             }
             "__ratatui-node-server" => {
                 args.remove(0);
@@ -604,6 +611,7 @@ fn help_text() -> String {
         "  waitagent relay remove <fingerprint> [--listen <addr>]",
         "  waitagent relay status [--listen <addr>]",
         "  waitagent relay shutdown [--listen <addr>]",
+        "  waitagent web serve [--listen <addr>]",
         "  waitagent version",
     ]
     .join("\n")
