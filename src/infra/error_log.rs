@@ -1,5 +1,11 @@
+//! The process-wide diagnostics log ([`ERROR_LOG`]): every entry lands in
+//! the fixed diag file (existing tooling reads it) and is mirrored to
+//! stderr whenever stderr is not an interactive terminal, so `docker logs`,
+//! systemd journals, and CI captures carry the same diagnostics that would
+//! otherwise exist only inside the container (issue #148).
+
 use std::fs::{read_to_string, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -132,6 +138,25 @@ fn debug_logging_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("WAITAGENT_DEBUG_LOG").is_some())
 }
 
+/// Whether entries are mirrored to stderr, cached for the process lifetime.
+/// The mirror exists so container and CI logs (`docker logs`, systemd
+/// journals) capture diagnostics that otherwise live only in the fixed diag
+/// file (issue #148). An interactive terminal keeps them in the file and
+/// the in-app viewer instead: stderr bytes would paint over the TUI
+/// screen there, while a non-terminal stderr is exactly the docker/CI
+/// case the mirror targets.
+fn stderr_mirror_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| !std::io::stderr().is_terminal())
+}
+
+/// Writes one rendered log buffer to a mirror sink. Best-effort by design,
+/// same as the file append; separated from [`ErrorLog::write`] so tests can
+/// capture the bytes with an in-memory sink.
+fn mirror_to(sink: &mut impl Write, buf: &[u8]) {
+    let _ = sink.write_all(buf);
+}
+
 impl ErrorLog {
     pub const fn new() -> Self {
         Self
@@ -166,7 +191,7 @@ impl ErrorLog {
             .as_millis();
 
         // Suppress consecutive repeats inside the mutex (no I/O held), then do
-        // the file append after releasing it. The mutex is a leaf: no other
+        // the sink writes after releasing it. The mutex is a leaf: no other
         // lock is acquired while it is held.
         let lines = {
             let mut last = last_entry().lock().unwrap_or_else(|e| e.into_inner());
@@ -175,15 +200,27 @@ impl ErrorLog {
         let Some(lines) = lines else {
             return;
         };
+        let mut buf = String::with_capacity(lines.iter().map(|line| line.len()).sum());
+        for line in &lines {
+            buf.push_str(line);
+        }
 
+        self.append_file(&buf);
+        if stderr_mirror_enabled() {
+            let mut stderr = std::io::stderr().lock();
+            mirror_to(&mut stderr, buf.as_bytes());
+        }
+    }
+
+    /// Appends `buf` to the diagnostics file. Rotate by truncating when the
+    /// log grows past the cap. Dropping old history is acceptable for a
+    /// diagnostics log and keeps the tail-based reader cheap.
+    fn append_file(&self, buf: &str) {
         if let Ok(file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_file())
         {
-            // Rotate by truncating when the log grows past the cap. Dropping
-            // old history is acceptable for a diagnostics log and keeps the
-            // tail-based reader cheap.
             let mut file = file;
             if file
                 .metadata()
@@ -191,10 +228,6 @@ impl ErrorLog {
                 .unwrap_or(false)
             {
                 let _ = file.set_len(0);
-            }
-            let mut buf = String::with_capacity(lines.iter().map(|line| line.len()).sum());
-            for line in &lines {
-                buf.push_str(line);
             }
             let _ = file.write_all(buf.as_bytes());
         }
@@ -364,5 +397,38 @@ mod tests {
     fn should_truncate_only_past_cap() {
         assert!(!should_truncate(MAX_LOG_BYTES));
         assert!(should_truncate(MAX_LOG_BYTES + 1));
+    }
+
+    #[test]
+    fn stderr_mirror_is_active_when_stderr_is_not_a_terminal() {
+        // cargo test runs the harness with stderr piped, which is exactly
+        // the docker/CI shape the mirror targets; an interactive terminal
+        // would gate it off to protect the TUI screen.
+        assert!(stderr_mirror_enabled());
+    }
+
+    #[test]
+    fn mirror_to_writes_the_rendered_buffer_to_the_sink() {
+        let mut sink: Vec<u8> = Vec::new();
+        mirror_to(&mut sink, b"[1234567890.000] [INFO] hello\n");
+        assert_eq!(
+            String::from_utf8(sink).expect("utf8"),
+            "[1234567890.000] [INFO] hello\n"
+        );
+    }
+
+    #[test]
+    fn log_entry_lands_in_the_diag_file() {
+        let marker = format!(
+            "diag-file-entry-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        );
+        ERROR_LOG.log(marker.clone());
+        let content = read_to_string(log_file()).expect("diag file is readable");
+        assert!(
+            content.contains(&marker),
+            "the file sink must carry the entry: {marker}"
+        );
     }
 }
