@@ -1,17 +1,24 @@
 #!/bin/bash
 # Relay docker e2e harness (issue #37).
 #
-# Topology: one relay container attached to TWO isolated bridges; node A only
-# to the first, node B only to the second. A and B have no network path to
-# each other by construction — every scenario exercises the relay as the
-# only route, which is the acceptance criterion's "no LAN shortcuts".
+# Relay topology: one relay container attached to TWO isolated bridges; node
+# A only to the first, node B only to the second. A and B have no network
+# path to each other by construction — every relay scenario exercises the
+# relay as the only route, which is the acceptance criterion's "no LAN
+# shortcuts".
+#
+# Direct-dial regression: the `direct` scenario brings up a separate
+# topology — one bridge, NO relay container. Node A (--node-id node-a
+# --connect node-b:9002) publishes its catalog to node B over the direct
+# dial; in a topology with no relay at all, any connectivity IS the direct
+# path (docs/relay-design.md compatibility promise).
 #
 # Images: by default the full Dockerfile builds the release binary inside
 # docker (works on any host with docker). Set WA_E2E_BINARY to a prebuilt
 # host binary to skip the in-docker build (CI and quick local runs).
 #
 # Usage: e2e-relay.sh [scenario ...]
-#   scenarios: smoke (default), reconnect, reregister, streams
+#   scenarios: smoke (default), reconnect, reregister, streams, direct
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -26,12 +33,13 @@ GATE_TIMEOUT_SECS=${GATE_TIMEOUT_SECS:-120}
 log() { printf '[e2e-relay] %s\n' "$*"; }
 die() {
     log "ERROR: $*"
-    log "relay logs (tail):"
-    docker logs --tail 20 "$RELAY" 2>&1 | sed 's/^/  /' || true
-    log "node-a logs (tail):"
-    docker logs --tail 20 "$NODE_A" 2>&1 | sed 's/^/  /' || true
-    log "node-b logs (tail):"
-    docker logs --tail 20 "$NODE_B" 2>&1 | sed 's/^/  /' || true
+    local name
+    for name in "$RELAY" "$NODE_A" "$NODE_B"; do
+        if docker inspect "$name" >/dev/null 2>&1; then
+            log "$name logs (tail):"
+            docker logs --tail 20 "$name" 2>&1 | sed 's/^/  /' || true
+        fi
+    done
     exit 1
 }
 
@@ -41,14 +49,16 @@ NODE_A="wa37-node-a-$RUN"
 NODE_B="wa37-node-b-$RUN"
 NET_A="wa37-net-a-$RUN"
 NET_B="wa37-net-b-$RUN"
+NET_DIRECT="wa37-net-direct-$RUN"
 FINGERPRINTS=()
 
 command -v docker >/dev/null 2>&1 || die "docker is required"
 command -v jq >/dev/null 2>&1 || die "jq is required for host-side status parsing"
+command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is required for the direct scenario"
 
 cleanup() {
     docker rm -f "$RELAY" "$NODE_A" "$NODE_B" >/dev/null 2>&1 || true
-    docker network rm "$NET_A" "$NET_B" >/dev/null 2>&1 || true
+    docker network rm "$NET_A" "$NET_B" "$NET_DIRECT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -97,6 +107,25 @@ assert_running() {
     local name=$1
     [ "$(docker inspect -f '{{.State.Running}}' "$name")" = "true" ] \
         || die "$name is not running"
+}
+
+node_command() {
+    local container=$1 port=$2 command=$3
+    docker exec "$container" waitagent __node-command "$port" "$command"
+}
+
+# Polls a node's control socket until it answers STATUS with ok=true.
+wait_node_ready() {
+    local container=$1 port=$2
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        if node_command "$container" "$port" STATUS 2>/dev/null \
+            | jq -e '.type == "Response" and .payload.ok == true' >/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    die "$container control socket never became ready"
 }
 
 # Brings up the topology and gates on both nodes being enrolled and online.
@@ -232,9 +261,115 @@ scenario_streams() {
     log "streams OK: 4 concurrent streams held through the relay"
 }
 
+scenario_direct() {
+    log "scenario: direct (direct-dial regression; no relay in topology)"
+    docker network create --internal "$NET_DIRECT" >/dev/null
+
+    # A's state dir is host-mounted so the harness can read back the
+    # operator key; --connect aims A's authority publication dial at node-b
+    # and the dial stays direct (no relay is even present). The dial retries
+    # with backoff until B is up and authorizes the key, so B may start last.
+    local a_home stage
+    a_home=$(mktemp -d)
+    stage=$(mktemp -d)
+    docker run -dt --name "$NODE_A" --network "$NET_DIRECT" \
+        --network-alias node-a \
+        -v "$a_home:/root/.waitagent" "$IMAGE" \
+        sh -c "exec waitagent --port $NODE_PORT_A --node-id node-a --connect node-b:$NODE_PORT_B" >/dev/null
+
+    # B authorizes A's operator public key. The key is generated inside A at
+    # first auth use; the bind mount leaves it root-owned, so copy it out via
+    # docker cp (daemon-side read) and derive the public key on the host.
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ -f "$a_home/operator.key" ] && break
+        assert_running "$NODE_A"
+        sleep 1
+    done
+    [ -f "$a_home/operator.key" ] || die "node A never generated its operator key"
+    docker cp "$NODE_A:/root/.waitagent/operator.key" "$stage/operator.key" >/dev/null
+    ssh-keygen -y -f "$stage/operator.key" >"$stage/node-a.pub" 2>/dev/null \
+        || die "could not derive node A's operator public key"
+
+    docker run -dt --name "$NODE_B" --network "$NET_DIRECT" \
+        --network-alias node-b \
+        -v "$stage/node-a.pub:/root/.waitagent/authorized_operators/node-a.pub:ro" "$IMAGE" \
+        sh -c "exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    # A is a peer-mode node (--node-id), so it hosts a default
+    # authority-host session for remote viewers and publishes it through the
+    # catalog; the row arriving at all is the "A dialed B directly"
+    # assertion — B records inbound authorities with via=None (direct).
+    wait_node_ready "$NODE_B" "$NODE_PORT_B"
+
+    local row=""
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        row=$(node_command "$NODE_B" "$NODE_PORT_B" LIST_SESSIONS 2>/dev/null \
+            | jq -c '[.payload.data[]?
+                | select(.id == "node-a:1"
+                    and .transport == "remote"
+                    and .authority_node_id == "node-a"
+                    and .availability == "online")]
+                | first' 2>/dev/null || true)
+        if [ -n "$row" ] && [ "$row" != "null" ]; then
+            break
+        fi
+        row=""
+        sleep 2
+    done
+    [ -n "$row" ] || die "node B never saw node-a's default session over the direct link"
+    log "node B sees node-a's published session row: $row"
+
+    # Data plane: B opens a viewer on A's session, sizes it (headless
+    # activation defaults to a 1x1 grid, which cannot show the marker), types
+    # an echo, and the history must come back over the same direct link.
+    # Activation mirrors the TUI select: a catalog row is only a published
+    # view until the live remote session is created.
+    local b_target marker b64 history="" activate_out resize_out paste_out
+    b_target=$(jq -r '.id' <<<"$row")
+    activate_out=$(node_command "$NODE_B" "$NODE_PORT_B" "ACTIVATE_TARGET $b_target")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$activate_out" >/dev/null \
+        || die "ACTIVATE_TARGET on B failed: $activate_out"
+    resize_out=$(node_command "$NODE_B" "$NODE_PORT_B" "RESIZE 80 24")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$resize_out" >/dev/null \
+        || die "RESIZE on B failed: $resize_out"
+
+    marker=WA37_DIRECT_OK
+    b64=$(printf 'echo %s\n' "$marker" | base64 -w0)
+    paste_out=$(node_command "$NODE_B" "$NODE_PORT_B" "PASTE_TEXT $b_target $b64")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$paste_out" >/dev/null \
+        || die "PASTE_TEXT on B failed: $paste_out"
+
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        history=$(node_command "$NODE_B" "$NODE_PORT_B" "GET_HISTORY $b_target" 2>/dev/null || true)
+        if jq -e --arg m "$marker" '
+            [(.payload.lines // [])[], (.payload.styled_lines // [])[]]
+            | any(contains($m))' <<<"$history" >/dev/null 2>&1; then
+            break
+        fi
+        history=""
+        sleep 2
+    done
+    [ -n "$history" ] || die "echo marker never came back over the direct link"
+    log "echo marker round-tripped through the direct session"
+
+    # Structural negative: A has no relay configured, so the relay probe must
+    # refuse; together with the relay-less topology this pins the session to
+    # the direct path.
+    local probe
+    probe=$(node_command "$NODE_A" "$NODE_PORT_A" "E2E_RELAY_PROBE node-b 1 1")
+    jq -e '.type == "Response" and .payload.ok == false' <<<"$probe" >/dev/null \
+        || die "node A has no relay but the probe did not refuse: $probe"
+
+    rm -rf "$a_home" "$stage"
+    log "direct OK: catalog + data plane over the direct dial, no relay involved"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams)
+    scenarios=(smoke reconnect reregister streams direct)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -254,8 +389,11 @@ for scenario in "${scenarios[@]}"; do
         streams)
             scenario_streams
             ;;
+        direct)
+            scenario_direct
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct)"
             ;;
     esac
     log "scenario '$scenario' passed"
