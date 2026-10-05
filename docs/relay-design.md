@@ -203,22 +203,64 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
 
 ## Phase 1 任务拆分
 
-1. mux 帧层 + `PeerConnection` seam（现有 TCP dial 收进 seam，行为不变）
-2. relay 守护进程与子命令：`relay serve`、本机 admin socket 与本地
-   admin 协议、远端控制流（node 侧发起 invite）、连接表、open/close
-   路由、心跳（10s / 3 次超时）、白名单认证（含 `relay remove` 吊销）
-3. `relay invite` / `relay join` 入网流程（双向自动钉扎）
-4. node relay client：长连接保活、按需开流、断线重注册、presence
-   事件接收入 console
-5. 逐流背压（window/ack）与公平调度
-6. 单机容量模型：usage 计量、max_nodes/max_streams 准入、压测标定
-7. 配置面：relay.toml、remote-hosts `via`、Ctrl-W 连接路径接入
-8. 结构化错误语义（relay → node → console）
-9. 测试：双 node + relay 的 docker 网络隔离 e2e、断连重连、多并发
-   session、Windows CI、直连回归
-10. WebUI：web 服务作为特殊 node 入网（浏览器 terminal 复用
-    OpenMirror/RawPty/Resize + 管理面：连接表、usage、invite、remove、
-    在线状态）；CLI 收敛为 bootstrap 最小集（serve、join、一行安装命令）
+状态标记约定（issue #137 对账，2026-10-05）：✅ 已落地 / 🔶 部分 /
+⬜ 未实现 / — 不在本期；锚点 = 落地 PR 或代码位置。状态随落地 PR 更新。
+
+1. ✅ 已落地 — mux 帧层 + `PeerConnection` seam（现有 TCP dial 收进
+   seam，行为不变）。锚点：#66（dial 收进 seam）、#69（mux 帧编解码与
+   流状态机）；`src/infra/peer_connection.rs`、`src/infra/relay_mux/`。
+   mux 模块只做流复用与 window 帧；relay 控制帧在
+   `src/infra/relay_link.rs` / `src/infra/relay_routing.rs`。
+2. ✅ 已落地（2026-10-05 补齐入站路径）— relay 守护进程与子命令：
+   `relay serve`、本机 admin socket 与本地 admin 协议（#81）、远端控制流
+   （node 侧管理通道，#135 读 / #140 写）、连接表（#75）、open/close
+   路由（#78）、心跳（10s / 3 次超时，#75）、白名单认证（#72，含
+   `relay remove` 吊销）。入站 relay 流接入 node ingress（#129 的
+   #130/#132，2026-10-05）后双向可用。锚点：`src/infra/relay_server.rs`、
+   `relay_admin.rs`、`relay_remote_admin.rs`、`relay_connection_table.rs`、
+   `relay_routing.rs`、`relay_ingress.rs`、`src/cli/relay.rs`。
+3. ✅ 已落地 — `relay invite` / `relay join` 入网流程（双向自动钉扎）。
+   锚点：#87；`src/infra/relay_enrollment.rs`、`relay_join.rs`、
+   `src/command/relay_enroll.rs`。
+4. ✅ 已落地（2026-10-05 补齐入站）— node relay client：长连接保活
+   （#90）、按需开流（#93，`via = "relay"` dial）、断线重注册（#90）、
+   presence 事件接收入 console（#96）。入站 accept 队列接进 ingress
+   （#130/#132）。锚点：`src/infra/relay_client.rs`、`relay_presence.rs`、
+   `src/ratatui_node/client_runtime.rs`（status line 渲染）。
+5. ✅ 已落地 — 逐流背压（window/ack）与公平调度。锚点：#101（背压 +
+   DRR 公平调度）、#110（控制帧旁路）、#123/#125（fairness 断言锚定）；
+   `src/infra/relay_scheduler.rs`、`src/infra/relay_mux/stream.rs`。
+6. 🔶 部分 — usage 计量、max_nodes / max_streams / 吞吐阈值准入已落地
+   （#84；`src/infra/relay_capacity.rs`，register 与 open_stream 两处
+   结构化拒绝）。压测标定 — 不在本期（默认值保守发布，实测后修订）。
+7. ✅ 已落地 — 配置面：relay.toml（#104；node 侧
+   `src/infra/relay_toml_store.rs`、relay 侧 `relay_serve_toml_store.rs`）、
+   remote-hosts `via`（#107；`src/host/ssh/remote_host_history_store.rs`）、
+   Ctrl-W 连接路径接入（`src/host/ssh/connect_remote_host_pane_runtime.rs`
+   的 via 选择与 "via relay" 标记，dial 走
+   `remote_host_connect_runtime.rs`）。
+8. ✅ 已落地 — 结构化错误语义（relay → node → console）。锚点：#111
+   （错误码定型）、#112（节点内传播）、#113（console 渲染）；
+   `src/infra/relay_routing/error_code.rs`、`src/ratatui_node/client_runtime.rs`。
+9. ✅ 已落地 — 双 node + relay 的 docker 网络隔离 e2e（#121 harness；
+   场景 smoke / reconnect / reregister / streams / direct / pastefile，
+   见 `scripts/e2e/relay/e2e-relay.sh`）、断连重连（#124）、多并发
+   stream（#126）、直连回归（#127）、relay 链路上的 paste-file
+   （#128→#133）；Windows CI（`ci.yaml` windows-check / windows-test 跑
+   全部 relay 单元套件；docker 场景天然 Linux-only）。
+10. 🔶 部分 — WebUI：web 服务作为特殊 node 入网（#134）、只读
+    dashboard 经 node 通道（#135）、magic-link 认证（#138）、invite /
+    remove 写操作 + CSRF + audit（#140），均 2026-10-05 落地；e2e 见
+    `scripts/e2e/web/e2e-web.sh`。⬜ 未实现：浏览器 terminal 复用
+    OpenMirror/RawPty/Resize；一行安装命令。另：部署形态当前为独立
+    `waitagent web serve` 子命令，`relay serve` 不自动拉起 web 面
+    （与上文"一体启动"表述的差异，随浏览器 terminal 一并定夺）。
+
+兼容性承诺（issue #137 核验，2026-10-05）：未配置 relay 时 relay client
+不安装（`src/ratatui_node/runtime.rs` 仅在 relay.toml 存在时建立长连接），
+直连 dial 收进 seam 行为逐字节保留（`src/infra/peer_connection.rs`），
+socks5 代理路径未动；session 协议全部运行在 seam 之上未改。直连回归有
+docker e2e（`scripts/e2e/relay/e2e-relay.sh` 的 direct 场景）。
 
 ## Phase 2 展望
 
