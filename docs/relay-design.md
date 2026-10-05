@@ -215,7 +215,8 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
    `relay serve`、本机 admin socket 与本地 admin 协议（#81）、远端控制流
    （node 侧管理通道，#135 读 / #140 写）、连接表（#75）、open/close
    路由（#78）、心跳（10s / 3 次超时，#75）、白名单认证（#72，含
-   `relay remove` 吊销）。入站 relay 流接入 node ingress（#129 的
+   `relay remove` 吊销，吊销的进程级 e2e 见 #145 revoke 场景）。入站
+   relay 流接入 node ingress（#129 的
    #130/#132，2026-10-05）后双向可用。锚点：`src/infra/relay_server.rs`、
    `relay_admin.rs`、`relay_remote_admin.rs`、`relay_connection_table.rs`、
    `relay_routing.rs`、`relay_ingress.rs`、`src/cli/relay.rs`。
@@ -232,7 +233,8 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
    `src/infra/relay_scheduler.rs`、`src/infra/relay_mux/stream.rs`。
 6. 🔶 部分 — usage 计量、max_nodes / max_streams / 吞吐阈值准入已落地
    （#84；`src/infra/relay_capacity.rs`，register 与 open_stream 两处
-   结构化拒绝）。压测标定 — 不在本期（默认值保守发布，实测后修订）。
+   结构化拒绝；max_nodes 准入拒绝的进程级 e2e 见 #145 capacity 场景）。
+   压测标定 — 不在本期（默认值保守发布，实测后修订）。
 7. ✅ 已落地 — 配置面：relay.toml（#104；node 侧
    `src/infra/relay_toml_store.rs`、relay 侧 `relay_serve_toml_store.rs`）、
    remote-hosts `via`（#107；`src/host/ssh/remote_host_history_store.rs`）、
@@ -242,16 +244,24 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
 8. ✅ 已落地 — 结构化错误语义（relay → node → console）。锚点：#111
    （错误码定型）、#112（节点内传播）、#113（console 渲染）；
    `src/infra/relay_routing/error_code.rs`、`src/ratatui_node/client_runtime.rs`。
+   console 渲染面（footer status line + 行内 relay-error 标记）无进程级
+   e2e 锚点——relay_error 只在 TUI snapshot 渲染，`__node-command` 控制面
+   跳过 push 消息，已按 #136 机制登记豁免（#145；错误帧传输层通道由
+   #145 revoke 场景覆盖）。
 9. ✅ 已落地 — 双 node + relay 的 docker 网络隔离 e2e（#121 harness；
    场景 smoke / reconnect / reregister / streams / direct / pastefile，
    见 `scripts/e2e/relay/e2e-relay.sh`）、断连重连（#124）、多并发
    stream（#126）、直连回归（#127）、relay 链路上的 paste-file
-   （#128→#133）；Windows CI（`ci.yaml` windows-check / windows-test 跑
+   （#128→#133）；#137 对账缺口补齐（#145）：revoke（remove 吊销 +
+   传输层重连拒绝 + token 不受影响）、capacity（max_nodes 准入拒绝）、
+   presence（peer liveness → sidebar availability online/offline 往返）；
+   Windows CI（`ci.yaml` windows-check / windows-test 跑
    全部 relay 单元套件；docker 场景天然 Linux-only）。
 10. 🔶 部分 — WebUI：web 服务作为特殊 node 入网（#134）、只读
     dashboard 经 node 通道（#135）、magic-link 认证（#138）、invite /
     remove 写操作 + CSRF + audit（#140），均 2026-10-05 落地；e2e 见
-    `scripts/e2e/web/e2e-web.sh`。⬜ 未实现：浏览器 terminal 复用
+    `scripts/e2e/web/e2e-web.sh`（invite + remove 全流程，含被删节点
+    relay link 死亡的进程级断言，#145）。⬜ 未实现：浏览器 terminal 复用
     OpenMirror/RawPty/Resize；一行安装命令。另：部署形态当前为独立
     `waitagent web serve` 子命令，`relay serve` 不自动拉起 web 面
     （与上文"一体启动"表述的差异，随浏览器 terminal 一并定夺）。

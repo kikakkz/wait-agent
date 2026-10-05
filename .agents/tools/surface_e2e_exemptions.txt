@@ -13,3 +13,15 @@
 # reason and, where applicable, the issue that will close the gap.
 #
 # (no exemptions yet — this file is the empty template)
+
+# console-render:relay-error-status-line — the console-rendered structured
+# error surface (footer "relay error 0x.." status line and per-row
+# "relay-error:" markers, issues #111/#112/#113) has no deterministic
+# process-level e2e anchor: relay_error renders only inside TUI snapshots
+# pushed to attached clients, and the __node-command control plane
+# explicitly skips pushed snapshot/history messages (local_ipc
+# read_response_line), so the rendered surface is unreachable without
+# product changes. The transport channel underneath (typed relay Error
+# frame -> node relay client -> link teardown) IS exercised by the revoke
+# scenario in scripts/e2e/relay/e2e-relay.sh. Registered per issue #145
+# (#137 backlog item 4).
