@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>waitagent relay — login</title>
+<style>
+  :root {
+    --bg: #16161e;
+    --fg: #fcf7f4;
+    --dim: #ecd8d3;
+    --muted: #c98a5a;
+    --accent: #c91f24;
+    --line: #5a2a2a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  main { max-width: 420px; margin: 0 auto; padding: 64px 20px; }
+  h1 { font-size: 15px; letter-spacing: 1px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  h1 .mark { color: var(--accent); }
+  label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 4px; }
+  input[type=email] {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--fg);
+    font: inherit;
+    padding: 6px 8px;
+  }
+  input[type=email]:focus { border-color: var(--muted); outline: none; }
+  button {
+    margin-top: 16px;
+    background: transparent;
+    border: 1px solid var(--muted);
+    color: var(--fg);
+    font: inherit;
+    padding: 6px 16px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--fg); }
+  .message { margin-top: 16px; color: var(--dim); }
+  .error { color: var(--accent); }
+  .hint { margin-top: 24px; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>waitagent <span class="mark">&#9632;</span> relay login</h1>
+  <form method="post" action="/auth/magic">
+    <input type="hidden" name="platform" id="platform">
+    <input type="hidden" name="timezone" id="timezone">
+    <input type="hidden" name="language" id="language">
+    <input type="hidden" name="screen" id="screen">
+    <label for="email">admin email</label>
+    <input type="email" id="email" name="email" autocomplete="username" required autofocus>
+    <button type="submit">email me a magic link</button>
+  </form>
+  {% if let Some(message) = message %}
+  <p class="message{% if error %} error{% endif %}">{{ message }}</p>
+  {% endif %}
+  <p class="hint">
+    The link works once, within 10 minutes, on the same machine, browser,
+    and network it was requested from. QQ/163 mailboxes need an app
+    authorization code; Outlook/Gmail need 2FA plus an app password.
+  </p>
+</main>
+<script>
+(function () {
+  function fill(id, value) {
+    var el = document.getElementById(id);
+    if (el) { el.value = value || ""; }
+  }
+  fill("platform", navigator.platform || "");
+  fill("timezone", (Intl.DateTimeFormat().resolvedOptions().timeZone) || "");
+  fill("language", navigator.language || "");
+  fill("screen", (window.screen ? (screen.width + "x" + screen.height) : ""));
+})();
+</script>
+</body>
+</html>

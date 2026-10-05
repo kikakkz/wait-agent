@@ -3625,6 +3625,7 @@ dependencies = [
  "rand_core 0.10.1",
  "ratatui",
  "rcgen",
+ "ring",
  "russh",
  "rustix",
  "rustix-openpty",
@@ -3646,6 +3647,7 @@ dependencies = [
  "tower 0.4.13",
  "unicode-width 0.1.14",
  "ureq",
+ "webpki-roots",
  "windows-sys 0.59.0",
  "xz2",
 ]

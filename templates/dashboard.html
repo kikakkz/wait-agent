@@ -94,5 +94,26 @@
 
   <footer>refreshes every 10s &middot; read-only &middot; issue #131 slice 2</footer>
 </main>
+<script>
+(function () {
+  function probe() {
+    return {
+      platform: navigator.platform || "",
+      timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone) || "",
+      language: navigator.language || "",
+      screen: (window.screen ? (screen.width + "x" + screen.height) : "")
+    };
+  }
+  function beat() {
+    fetch("/api/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(probe())
+    }).catch(function () {});
+  }
+  beat();
+  setInterval(beat, 30000);
+})();
+</script>
 </body>
 </html>
