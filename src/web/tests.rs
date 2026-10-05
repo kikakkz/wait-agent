@@ -565,6 +565,144 @@ async fn remove_revokes_a_registered_node_after_prefix_confirmation() {
     stack.relay.server.shutdown().await;
 }
 
+#[tokio::test]
+async fn remove_revokes_an_enrolled_but_offline_node() {
+    let stack = start_web_stack("write-remove-offline", "admin@example.com").await;
+    let session = mint_test_session(&stack.state.auth);
+    let cookie = format!("session={session}");
+    let admin_addr = stack.relay.server.admin_addr().clone();
+    registered_nodes_reaches(&admin_addr, 1).await;
+
+    let deadline = std::time::Instant::now() + NO_DEADLOCK;
+    let csrf = loop {
+        let (code, _, dashboard) = http(stack.addr, "GET", "/", &[("cookie", &cookie)], "").await;
+        if code == 200 {
+            break csrf_from_dashboard(&dashboard);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dashboard should serve over the session (code {code})"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Enrolled but offline: the whitelist entry exists while the node has
+    // no relay link, so the connection table (status.nodes) cannot resolve
+    // it — the dashboard must fall back to the whitelist listing (#147).
+    let offline_fingerprint = format!("e2e{:061x}", 1);
+    fs::write(
+        stack
+            .relay
+            .config
+            .authorized_nodes_dir
+            .join(&offline_fingerprint),
+        b"pem",
+    )
+    .expect("offline whitelist entry writes");
+
+    let prefix = offline_fingerprint[..20].to_string();
+    let (code, _, body) = http(
+        stack.addr,
+        "POST",
+        "/api/remove",
+        &[
+            ("cookie", &cookie),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        &format!("csrf={csrf}&fingerprint={prefix}"),
+    )
+    .await;
+    assert_eq!(code, 200, "remove should answer with the dashboard: {body}");
+    assert!(body.contains("removed"), "{body}");
+    assert!(
+        body.contains("no live link"),
+        "an offline remove reports the missing live link: {body}"
+    );
+
+    // The whitelist entry is gone; the live table (web node only) is
+    // untouched because the target was never registered.
+    assert!(
+        !stack
+            .relay
+            .config
+            .authorized_nodes_dir
+            .join(&offline_fingerprint)
+            .is_file(),
+        "offline remove must delete the whitelist entry"
+    );
+    registered_nodes_reaches(&admin_addr, 1).await;
+
+    stack.server.abort();
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn remove_rejects_an_ambiguous_prefix_across_enrolled_nodes() {
+    let stack = start_web_stack("write-remove-ambiguous", "admin@example.com").await;
+    let session = mint_test_session(&stack.state.auth);
+    let cookie = format!("session={session}");
+    let admin_addr = stack.relay.server.admin_addr().clone();
+    registered_nodes_reaches(&admin_addr, 1).await;
+
+    let deadline = std::time::Instant::now() + NO_DEADLOCK;
+    let csrf = loop {
+        let (code, _, dashboard) = http(stack.addr, "GET", "/", &[("cookie", &cookie)], "").await;
+        if code == 200 {
+            break csrf_from_dashboard(&dashboard);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dashboard should serve over the session (code {code})"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Two enrolled-but-offline nodes sharing their first 20 hex chars: the
+    // union pool (connection table + whitelist) must reject the prefix.
+    let shared = "e2e";
+    let first = format!("{shared}{:061x}", 2);
+    let second = format!("{shared}{:061x}", 3);
+    for fingerprint in [&first, &second] {
+        fs::write(
+            stack.relay.config.authorized_nodes_dir.join(fingerprint),
+            b"pem",
+        )
+        .expect("whitelist entry writes");
+    }
+
+    let prefix = first[..20].to_string();
+    assert_eq!(prefix, second[..20], "scenario needs a shared prefix");
+    let (code, _, body) = http(
+        stack.addr,
+        "POST",
+        "/api/remove",
+        &[
+            ("cookie", &cookie),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        &format!("csrf={csrf}&fingerprint={prefix}"),
+    )
+    .await;
+    assert_eq!(code, 200, "the dashboard answers with the banner: {body}");
+    assert!(body.contains("ambiguous"), "{body}");
+    for fingerprint in [&first, &second] {
+        assert!(
+            stack
+                .relay
+                .config
+                .authorized_nodes_dir
+                .join(fingerprint)
+                .is_file(),
+            "an ambiguous prefix must remove nothing: {fingerprint}"
+        );
+    }
+
+    stack.server.abort();
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
 // --- slice 1 anchors -------------------------------------------------------
 
 /// Acceptance anchor (b): after `web serve` enrollment, the relay status

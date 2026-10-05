@@ -1,6 +1,8 @@
 //! Node-channel relay administration (docs/relay-design.md 管理通道): the
 //! "远端控制流" — a registered node manages the relay over its authenticated
-//! link. Read path since slice 2 (`status`); write paths (`invite`/`remove`)
+//! link. Read paths since slice 2 (`status`) plus the `list-whitelist`
+//! directory listing (issue #147, so the dashboard can resolve a remove
+//! prefix against enrolled-but-offline nodes); write paths (`invite`/`remove`)
 //! opened in slice 4 with the exact `relay_admin` semantics (mint +
 //! persist; revoke whitelist entry + drop the live link). `shutdown` stays
 //! local-only forever: an emergency stop must not be reachable from a
@@ -57,7 +59,8 @@ pub struct RemoteAdminStatus {
 }
 
 /// The node-channel admin response envelope, same shape as the local admin
-/// protocol: `ok` plus at most one of `status` / `message` / `error`.
+/// protocol: `ok` plus at most one of `status` / `whitelist` / `message` /
+/// `error`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteAdminResponse {
     /// Whether the request succeeded.
@@ -65,6 +68,11 @@ pub struct RemoteAdminResponse {
     /// The status payload of a successful `status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<RemoteAdminStatus>,
+    /// The whitelist fingerprints of a successful `list-whitelist`: the
+    /// lowercase file names of the relay's authorized_nodes directory
+    /// (enrolled nodes, online or not — issue #147).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitelist: Option<Vec<String>>,
     /// The human-readable result of a successful write command (same text
     /// the local admin socket prints, e.g. the invite answer carrying the
     /// raw token on its `token: ` line).
@@ -101,6 +109,9 @@ pub(crate) struct RemoteAdminContext<'a> {
 pub(crate) enum RemoteAdminCommand {
     /// Read the status snapshot.
     Status,
+    /// List the enrolled (whitelisted) node fingerprints, online or not
+    /// (issue #147: the dashboard resolves remove prefixes against this).
+    ListWhitelist,
     /// Mint an enrollment token (one-time by default).
     Invite { ttl_secs: Option<u64>, deploy: bool },
     /// Revoke a whitelisted node and drop its live link.
@@ -109,8 +120,17 @@ pub(crate) enum RemoteAdminCommand {
     Unsupported(&'static str),
 }
 
-/// Parses one request body, reusing the local admin command grammar.
+/// Parses one request body. `list-whitelist` is a node-channel-only read of
+/// the authorized_nodes directory, so it is recognized here before falling
+/// back to the shared local admin grammar, which stays unchanged (issue
+/// #147).
 pub(crate) fn parse_remote_admin_command(body: &str) -> Result<RemoteAdminCommand, String> {
+    if let Ok(request) = serde_json::from_str::<crate::infra::relay_admin::RelayAdminRequest>(body)
+    {
+        if request.command == "list-whitelist" {
+            return Ok(RemoteAdminCommand::ListWhitelist);
+        }
+    }
     match parse_relay_admin_command(body)? {
         RelayAdminCommand::Status => Ok(RemoteAdminCommand::Status),
         RelayAdminCommand::Invite { ttl_secs, deploy } => {
@@ -122,7 +142,6 @@ pub(crate) fn parse_remote_admin_command(body: &str) -> Result<RemoteAdminComman
         )),
     }
 }
-
 /// Builds the status snapshot from the same state the local admin socket
 /// reads. `started_at` is captured by `relay_server::start`.
 pub(crate) fn build_status_snapshot(
@@ -162,6 +181,7 @@ pub(crate) fn remote_admin_response(
         Err(message) => encode(&RemoteAdminResponse {
             ok: false,
             status: None,
+            whitelist: None,
             message: None,
             error: Some(message),
         }),
@@ -186,9 +206,33 @@ pub(crate) fn handle_remote_admin_request(
                 context.meter,
                 context.started_at,
             )),
+            whitelist: None,
             message: None,
             error: None,
         },
+        RemoteAdminCommand::ListWhitelist => {
+            match crate::infra::relay_server::authorized_node_fingerprints(context.whitelist_dir) {
+                Ok(mut fingerprints) => {
+                    // Sorted so the answer is deterministic for the dashboard
+                    // and for tests; the directory scan order is unspecified.
+                    fingerprints.sort();
+                    RemoteAdminResponse {
+                        ok: true,
+                        status: None,
+                        whitelist: Some(fingerprints),
+                        message: None,
+                        error: None,
+                    }
+                }
+                Err(error) => RemoteAdminResponse {
+                    ok: false,
+                    status: None,
+                    whitelist: None,
+                    message: None,
+                    error: Some(format!("list-whitelist: {error}")),
+                },
+            }
+        }
         RemoteAdminCommand::Invite { ttl_secs, deploy } => {
             let local = handle_invite(
                 ttl_secs,
@@ -211,6 +255,7 @@ pub(crate) fn handle_remote_admin_request(
         RemoteAdminCommand::Unsupported(reason) => RemoteAdminResponse {
             ok: false,
             status: None,
+            whitelist: None,
             message: None,
             error: Some(reason.to_string()),
         },
@@ -225,6 +270,7 @@ fn message_envelope(local: crate::infra::relay_admin::RelayAdminResponse) -> Rem
     RemoteAdminResponse {
         ok: local.ok,
         status: None,
+        whitelist: None,
         message: local.message,
         error: local.error,
     }
@@ -247,6 +293,18 @@ mod tests {
         );
         let error = parse_remote_admin_command("{not json").expect_err("garbage fails");
         assert!(error.contains("invalid admin request"), "{error}");
+    }
+
+    #[test]
+    fn parses_list_whitelist_command() {
+        assert_eq!(
+            parse_remote_admin_command(r#"{"command":"list-whitelist"}"#),
+            Ok(RemoteAdminCommand::ListWhitelist)
+        );
+        // The node channel recognizes it; the shared local grammar (and so
+        // the local admin socket) still rejects it as unknown.
+        let local = parse_relay_admin_command(r#"{"command":"list-whitelist"}"#).unwrap_err();
+        assert!(local.contains("unknown admin command"), "{local}");
     }
 
     #[test]
@@ -305,6 +363,7 @@ mod tests {
         let response = RemoteAdminResponse {
             ok: true,
             status: Some(snapshot.clone()),
+            whitelist: None,
             message: None,
             error: None,
         };
@@ -321,11 +380,110 @@ mod tests {
         let response = RemoteAdminResponse {
             ok: false,
             status: None,
+            whitelist: None,
             message: None,
             error: Some("nope".to_string()),
         };
         let body = serde_json::to_string(&response).expect("envelope serializes");
         assert!(body.contains(r#""ok":false"#), "{body}");
         assert!(!body.contains("\"status\""), "{body}");
+    }
+
+    /// Owns everything a [`RemoteAdminContext`] borrows for the
+    /// `list-whitelist` tests (only `whitelist_dir` matters there).
+    struct TestContext {
+        table: Arc<RelayConnectionTable>,
+        routing: Arc<RoutingTable>,
+        meter: crate::infra::relay_capacity::SharedUsageMeter,
+        tokens: Arc<EnrollmentTokenStore>,
+        presence: Arc<PresenceHub>,
+    }
+
+    impl TestContext {
+        fn new() -> Self {
+            Self {
+                table: Arc::new(RelayConnectionTable::default()),
+                routing: Arc::new(RoutingTable::default()),
+                meter: Arc::new(crate::infra::relay_capacity::UsageMeter::new()),
+                tokens: Arc::new(EnrollmentTokenStore::new()),
+                presence: Arc::new(PresenceHub::new()),
+            }
+        }
+
+        fn context<'a>(&'a self, whitelist_dir: &'a std::path::Path) -> RemoteAdminContext<'a> {
+            RemoteAdminContext {
+                table: &self.table,
+                routing: &self.routing,
+                listen: SocketAddr::from(([127, 0, 0, 1], 7475)),
+                capacity: &RelayCapacityConfig {
+                    max_nodes: 8,
+                    max_streams: 16,
+                    max_throughput_bytes_per_sec: 1024,
+                },
+                meter: &self.meter,
+                started_at: Instant::now(),
+                tokens: &self.tokens,
+                tokens_path: std::path::Path::new("unused-tokens.json"),
+                token_ttls: TokenTtlConfig::default(),
+                whitelist_dir,
+                presence: &self.presence,
+            }
+        }
+    }
+
+    #[test]
+    fn list_whitelist_envelope_carries_sorted_directory_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "waitagent-remote-list-whitelist-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("whitelist dir");
+        std::fs::write(dir.join("fedcba9876543210"), b"pem").expect("entry");
+        std::fs::write(dir.join("abcdef0123456789"), b"pem").expect("entry");
+        std::fs::create_dir(dir.join("not-a-file-entry")).expect("subdir is skipped");
+
+        let holder = TestContext::new();
+        let body =
+            handle_remote_admin_request(RemoteAdminCommand::ListWhitelist, &holder.context(&dir));
+        let response: RemoteAdminResponse = serde_json::from_str(&body).expect("envelope parses");
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.whitelist,
+            Some(vec![
+                "abcdef0123456789".to_string(),
+                "fedcba9876543210".to_string()
+            ]),
+            "sorted lowercase entries, directory scan order unspecified: {response:?}"
+        );
+        assert!(
+            response.status.is_none() && response.message.is_none(),
+            "{response:?}"
+        );
+
+        // A missing directory means an empty whitelist, not an error.
+        let body = handle_remote_admin_request(
+            RemoteAdminCommand::ListWhitelist,
+            &holder.context(&dir.join("missing")),
+        );
+        let response: RemoteAdminResponse = serde_json::from_str(&body).expect("envelope parses");
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.whitelist, Some(Vec::new()), "{response:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_whitelist_response_survives_a_missing_field_round_trip() {
+        // Envelopes written before `whitelist` existed (or by a peer that
+        // never sets it) must still decode — the field is defaulted.
+        let body = r#"{"ok":true,"message":"removed: x"}"#;
+        let response: RemoteAdminResponse = serde_json::from_str(body).expect("envelope parses");
+        assert_eq!(response.whitelist, None);
+        assert_eq!(response.message.as_deref(), Some("removed: x"));
     }
 }
