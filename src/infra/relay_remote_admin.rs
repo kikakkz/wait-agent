@@ -1,24 +1,31 @@
 //! Node-channel relay administration (docs/relay-design.md 管理通道): the
-//! read-only half of the "远端控制流" — a registered node asks the relay
-//! for the status snapshot over its authenticated link, and the relay
-//! answers on the same link. Command names reuse the local admin socket
-//! semantics (`relay_admin`); only `status` is accepted in this slice —
-//! invite/remove/shutdown stay local-only until the write-operations slice.
+//! "远端控制流" — a registered node manages the relay over its authenticated
+//! link. Read path since slice 2 (`status`); write paths (`invite`/`remove`)
+//! opened in slice 4 with the exact `relay_admin` semantics (mint +
+//! persist; revoke whitelist entry + drop the live link). `shutdown` stays
+//! local-only forever: an emergency stop must not be reachable from a
+//! network-facing channel.
 //!
 //! The wire envelope mirrors the local admin protocol: one JSON request
-//! `{"command": ...}` and one JSON response, `{"ok": true, ...status}` or
+//! `{"command": ...}` and one JSON response, `{"ok": true, ...}` or
 //! `{"ok": false, "error": ...}`.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::relay_admin::{parse_relay_admin_command, RelayAdminCommand};
+use crate::infra::relay_admin::{
+    handle_invite, handle_remove, parse_relay_admin_command, RelayAdminCommand,
+};
 use crate::infra::relay_capacity::{RelayCapacityConfig, RelayUsage, SharedUsageMeter};
 use crate::infra::relay_connection_table::RelayConnectionTable;
+use crate::infra::relay_enrollment::EnrollmentTokenStore;
+use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::RoutingTable;
+use crate::infra::relay_server::TokenTtlConfig;
 
 /// One entry of the relay connection table as exposed over the node channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,42 +57,68 @@ pub struct RemoteAdminStatus {
 }
 
 /// The node-channel admin response envelope, same shape as the local admin
-/// protocol: `ok` plus exactly one of `status` / `error`.
+/// protocol: `ok` plus at most one of `status` / `message` / `error`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteAdminResponse {
     /// Whether the request succeeded.
     pub ok: bool,
-    /// The status payload when `ok`.
+    /// The status payload of a successful `status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<RemoteAdminStatus>,
+    /// The human-readable result of a successful write command (same text
+    /// the local admin socket prints, e.g. the invite answer carrying the
+    /// raw token on its `token: ` line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     /// The human-readable rejection when not `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// A parsed node-channel admin command. Write commands parse successfully
-/// but arrive as [`RemoteAdminCommand::Unsupported`] so the caller can give
-/// an actionable read-only rejection instead of "unknown command".
+/// Everything a link needs to answer one node-channel admin request:
+/// the read-side snapshot sources plus the write-side stores (`invite`
+/// mints+persist tokens, `remove` revokes the whitelist and drops live
+/// links). Constructed per request in the link loop from the server-wide
+/// arcs — no state lives here.
+pub(crate) struct RemoteAdminContext<'a> {
+    pub(crate) table: &'a Arc<RelayConnectionTable>,
+    pub(crate) routing: &'a Arc<RoutingTable>,
+    pub(crate) listen: SocketAddr,
+    pub(crate) capacity: &'a RelayCapacityConfig,
+    pub(crate) meter: &'a SharedUsageMeter,
+    pub(crate) started_at: Instant,
+    pub(crate) tokens: &'a Arc<EnrollmentTokenStore>,
+    pub(crate) tokens_path: &'a Path,
+    pub(crate) token_ttls: TokenTtlConfig,
+    pub(crate) whitelist_dir: &'a Path,
+    pub(crate) presence: &'a Arc<PresenceHub>,
+}
+
+/// A parsed node-channel admin command. `invite`/`remove` execute with the
+/// local admin semantics; only `shutdown` is refused (it stays on the local
+/// admin socket by design).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteAdminCommand {
     /// Read the status snapshot.
     Status,
-    /// A recognized command this channel does not serve (yet).
-    Unsupported(String),
+    /// Mint an enrollment token (one-time by default).
+    Invite { ttl_secs: Option<u64>, deploy: bool },
+    /// Revoke a whitelisted node and drop its live link.
+    Remove { fingerprint: String },
+    /// A recognized command this channel does not serve.
+    Unsupported(&'static str),
 }
 
 /// Parses one request body, reusing the local admin command grammar.
 pub(crate) fn parse_remote_admin_command(body: &str) -> Result<RemoteAdminCommand, String> {
     match parse_relay_admin_command(body)? {
         RelayAdminCommand::Status => Ok(RemoteAdminCommand::Status),
-        RelayAdminCommand::Invite { .. } | RelayAdminCommand::Remove { .. } => {
-            Ok(RemoteAdminCommand::Unsupported(
-                "write commands are not supported over the node channel".to_string(),
-            ))
+        RelayAdminCommand::Invite { ttl_secs, deploy } => {
+            Ok(RemoteAdminCommand::Invite { ttl_secs, deploy })
         }
+        RelayAdminCommand::Remove { fingerprint } => Ok(RemoteAdminCommand::Remove { fingerprint }),
         RelayAdminCommand::Shutdown => Ok(RemoteAdminCommand::Unsupported(
-            "shutdown is not supported over the node channel; use the local admin socket"
-                .to_string(),
+            "shutdown is not supported over the node channel; use the local admin socket",
         )),
     }
 }
@@ -122,57 +155,84 @@ pub(crate) fn build_status_snapshot(
 /// single call point for an `AdminRequest` frame.
 pub(crate) fn remote_admin_response(
     command_body: &str,
-    table: &Arc<RelayConnectionTable>,
-    routing: &Arc<RoutingTable>,
-    listen: SocketAddr,
-    capacity: &RelayCapacityConfig,
-    meter: &SharedUsageMeter,
-    started_at: Instant,
+    context: &RemoteAdminContext<'_>,
 ) -> String {
     match parse_remote_admin_command(command_body) {
-        Ok(command) => handle_remote_admin_request(
-            command, table, routing, listen, capacity, meter, started_at,
-        ),
-        Err(message) => serde_json::to_string(&RemoteAdminResponse {
+        Ok(command) => handle_remote_admin_request(command, context),
+        Err(message) => encode(&RemoteAdminResponse {
             ok: false,
             status: None,
+            message: None,
             error: Some(message),
-        })
-        .unwrap_or_else(|error| {
-            format!(r#"{{"ok":false,"error":"status encode failed: {error}"}}"#)
         }),
     }
 }
 
-/// Answers one parsed request against a freshly built snapshot. Pure apart
-/// from the snapshot build; the JSON encode failure path is defensive
-/// (serializing this shape cannot fail today).
+/// Answers one parsed request. Write commands reuse the local admin
+/// handlers verbatim, so the node channel cannot drift from the local
+/// semantics; their `message` text is the same text the CLI prints.
 pub(crate) fn handle_remote_admin_request(
     command: RemoteAdminCommand,
-    table: &Arc<RelayConnectionTable>,
-    routing: &Arc<RoutingTable>,
-    listen: SocketAddr,
-    capacity: &RelayCapacityConfig,
-    meter: &SharedUsageMeter,
-    started_at: Instant,
+    context: &RemoteAdminContext<'_>,
 ) -> String {
     let response = match command {
         RemoteAdminCommand::Status => RemoteAdminResponse {
             ok: true,
             status: Some(build_status_snapshot(
-                table, routing, listen, capacity, meter, started_at,
+                context.table,
+                context.routing,
+                context.listen,
+                context.capacity,
+                context.meter,
+                context.started_at,
             )),
+            message: None,
             error: None,
         },
+        RemoteAdminCommand::Invite { ttl_secs, deploy } => {
+            let local = handle_invite(
+                ttl_secs,
+                deploy,
+                context.tokens,
+                context.tokens_path,
+                &context.token_ttls,
+            );
+            message_envelope(local)
+        }
+        RemoteAdminCommand::Remove { fingerprint } => {
+            let local = handle_remove(
+                &fingerprint,
+                context.whitelist_dir,
+                context.table,
+                context.presence,
+            );
+            message_envelope(local)
+        }
         RemoteAdminCommand::Unsupported(reason) => RemoteAdminResponse {
             ok: false,
             status: None,
-            error: Some(reason),
+            message: None,
+            error: Some(reason.to_string()),
         },
     };
-    serde_json::to_string(&response).unwrap_or_else(|error| {
-        format!(r#"{{"ok":false,"error":"status encode failed: {error}"}}"#)
-    })
+    encode(&response)
+}
+
+/// Maps a local admin response onto the node-channel envelope: the
+/// human-readable `message` survives, the machine payload (listen/nodes)
+/// stays local-only.
+fn message_envelope(local: crate::infra::relay_admin::RelayAdminResponse) -> RemoteAdminResponse {
+    RemoteAdminResponse {
+        ok: local.ok,
+        status: None,
+        message: local.message,
+        error: local.error,
+    }
+}
+
+fn encode(response: &RemoteAdminResponse) -> String {
+    serde_json::to_string(response)
+        .unwrap_or_else(|error| format!(r#"{{"ok":false,"error":"encode failed: {error}"}}"#))
 }
 
 #[cfg(test)]
@@ -190,24 +250,31 @@ mod tests {
     }
 
     #[test]
-    fn write_commands_parse_as_unsupported() {
+    fn write_commands_parse_to_executable_variants() {
         assert_eq!(
             parse_remote_admin_command(r#"{"command":"invite"}"#),
-            Ok(RemoteAdminCommand::Unsupported(
-                "write commands are not supported over the node channel".to_string()
-            ))
+            Ok(RemoteAdminCommand::Invite {
+                ttl_secs: None,
+                deploy: false
+            })
+        );
+        assert_eq!(
+            parse_remote_admin_command(r#"{"command":"invite","ttl_secs":3600,"deploy":true}"#),
+            Ok(RemoteAdminCommand::Invite {
+                ttl_secs: Some(3600),
+                deploy: true
+            })
         );
         assert_eq!(
             parse_remote_admin_command(r#"{"command":"remove","fingerprint":"ab"}"#),
-            Ok(RemoteAdminCommand::Unsupported(
-                "write commands are not supported over the node channel".to_string()
-            ))
+            Ok(RemoteAdminCommand::Remove {
+                fingerprint: "ab".to_string()
+            })
         );
         assert_eq!(
             parse_remote_admin_command(r#"{"command":"shutdown"}"#),
             Ok(RemoteAdminCommand::Unsupported(
                 "shutdown is not supported over the node channel; use the local admin socket"
-                    .to_string()
             ))
         );
         let unknown = parse_remote_admin_command(r#"{"command":"bogus"}"#).expect_err("");
@@ -238,6 +305,7 @@ mod tests {
         let response = RemoteAdminResponse {
             ok: true,
             status: Some(snapshot.clone()),
+            message: None,
             error: None,
         };
         let body = serde_json::to_string(&response).expect("envelope serializes");
@@ -253,6 +321,7 @@ mod tests {
         let response = RemoteAdminResponse {
             ok: false,
             status: None,
+            message: None,
             error: Some("nope".to_string()),
         };
         let body = serde_json::to_string(&response).expect("envelope serializes");

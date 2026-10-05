@@ -116,6 +116,33 @@ jobs:
       - name: relay docker e2e (isolated topology)
         run: WA_E2E_BINARY=target/release/waitagent scripts/e2e/relay/e2e-relay.sh
 
+  # WebUI e2e (issue #131 slice 4, AGENTS.md constraint #6). Loopback-only,
+  # no docker: real relay + web processes with a stub SMTP server. Same
+  # observation-mode status as e2e-relay while runner stability is proven.
+  e2e-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison pkg-config libevent-dev libncurses-dev \
+            build-essential automake autoconf \
+            libdbus-1-dev libkeyutils-dev
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo build (release binary for the e2e)
+        run: cargo build --release
+
+      - name: web e2e (loopback processes + stub SMTP)
+        run: WA_E2E_BINARY=target/release/waitagent scripts/e2e/web/e2e-web.sh
+
   windows-check:
     runs-on: windows-latest
     env:
