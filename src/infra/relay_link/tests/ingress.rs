@@ -82,6 +82,23 @@ async fn next_listener_event(
         .unwrap_or_else(|| panic!("{context}: listener event stream should stay open"))
 }
 
+/// Bridges the listener's std event channel onto the async runtime so event
+/// waits never block the single-threaded test runtime (the relay server runs
+/// on it).
+fn forward_listener_events(
+    event_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
+) -> tokio_mpsc::UnboundedReceiver<RemoteNodeTransportEvent> {
+    let (listener_event_tx, listener_events) = tokio_mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(event) = event_rx.recv() {
+            if listener_event_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    listener_events
+}
+
 /// Spins until `handle`'s strong count reaches `expected`, so teardown can
 /// prove the listener's relay accept worker released its clone (the count
 /// includes `NodePair`'s own clone).
@@ -120,16 +137,7 @@ async fn relay_inbound_stream_reaches_ingress_listener_event_stream() {
     let listener_guard = transport
         .listen_inbound(bind_addr, event_tx)
         .expect("ingress listener should start");
-    // Forward listener events off the std channel so waits never block the
-    // test runtime.
-    let (listener_event_tx, mut listener_events) = tokio_mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(event) = event_rx.recv() {
-            if listener_event_tx.send(event).is_err() {
-                break;
-            }
-        }
-    });
+    let mut listener_events = forward_listener_events(event_rx);
 
     // Dial in through the relay with the production pinned connector. The
     // URI host is ignored on the relay path: the pin routes the stream to B
@@ -213,6 +221,80 @@ async fn relay_inbound_stream_reaches_ingress_listener_event_stream() {
     // its lifetime. Dropping the guard sets its stop flag; a final nudge
     // stream wakes the blocked accept so the exit (and Arc release) is
     // deterministic, then NodePair::finish's sole-owner check applies.
+    drop(inbound);
+    drop(client);
+    drop(listener_guard);
+    drop(transport);
+    let _nudge = open_stream_blocking(&pair.handle_a, &pair.fp_b);
+    wait_strong_count(&pair.handle_b, 1).await;
+    wait_strong_count(&pair.handle_a, 1).await;
+    pair.finish().await;
+}
+
+#[tokio::test]
+async fn relay_inbound_dial_presents_credential_identity_without_explicit_tls() {
+    let pair = spawn_connected_pair().await;
+
+    // The e2e topology starts nodes without --node-cert-path/--node-key-path,
+    // so the ingress listener has no explicit TLS identity. A relay-enrolled
+    // node is dialed in by pin (tls_pin_sha256 == the relay identity
+    // fingerprint == the SPKI hash of the node credential certificate), so
+    // the listener must fall back to the credential identity; a plaintext
+    // listener fails the pinned dial instantly (rustls InvalidContentType
+    // against the h2 preface). No with_tls here on purpose.
+    let auth_dir = temp_dir("relay-ingress-credential-auth");
+    let bind_addr = unused_local_addr();
+    let transport = GrpcRemoteNodeTransport::new()
+        .with_authorized_operators_dir(auth_dir)
+        .with_credential_tls_identity(pair.credentials_b.clone())
+        .with_relay_client(Some(pair.handle_b.clone()));
+    let (event_tx, event_rx) = mpsc::channel();
+    let listener_guard = transport
+        .listen_inbound(bind_addr, event_tx)
+        .expect("ingress listener should start");
+    let mut listener_events = forward_listener_events(event_rx);
+
+    let channel = timeout(
+        NO_DEADLOCK,
+        test_connect_channel(
+            "http://unused:443",
+            &pair.fp_b,
+            test_relay_dialer(pair.handle_a.clone()),
+        ),
+    )
+    .await
+    .expect("relay dial + inner TLS should complete within the deadline")
+    .expect("pinned TLS over the relay stream should verify the credential identity");
+    let mut client = NodeSessionServiceClient::new(channel);
+    let (hello_tx, hello_rx) = tokio_mpsc::channel(8);
+    hello_tx
+        .send(client_hello_envelope("peer-a"))
+        .await
+        .expect("client hello should send");
+    let response = client
+        .open_node_session(Request::new(ReceiverStream::new(hello_rx)))
+        .await
+        .expect("node session should open over the credential-TLS listener");
+    let mut inbound = response.into_inner();
+    let server_hello = inbound
+        .message()
+        .await
+        .expect("server hello should decode")
+        .expect("server hello should be present");
+    assert!(
+        matches!(server_hello.body, Some(Body::ServerHello(_))),
+        "the session must start with a server hello"
+    );
+
+    let opened = next_listener_event(&mut listener_events, "session opened").await;
+    match opened {
+        RemoteNodeTransportEvent::SessionOpened { session } => {
+            assert_eq!(session.node_id(), "peer-a");
+        }
+        other => panic!("unexpected transport event: {other:?}"),
+    }
+
+    // Teardown: same protocol as the explicit-TLS test.
     drop(inbound);
     drop(client);
     drop(listener_guard);

@@ -153,6 +153,14 @@ pub struct GrpcRemoteNodeTransport {
     tls_cert_path: Option<PathBuf>,
     /// Optional TLS private key path for inbound listeners.
     tls_key_path: Option<PathBuf>,
+    /// Optional fallback TLS identity (the node credential pair) for inbound
+    /// listeners with no explicit certificate configured. A relay-enrolled
+    /// node is dialed in by certificate fingerprint — the peer's
+    /// `tls_pin_sha256` is the relay identity fingerprint, i.e. the SPKI hash
+    /// of this certificate — so the listener must present it or the pinned
+    /// TLS dial hits a plaintext HTTP/2 listener and fails instantly with
+    /// `InvalidContentType` (issue #129 follow-up).
+    credential_tls_identity: Option<crate::infra::node_credentials::NodeCredentialPaths>,
     /// Optional authorized-operator keys directory for inbound listeners.
     /// When unset, the host default (`~/.waitagent/authorized_operators`) is
     /// used and inbound sessions skip operator authentication if it is empty.
@@ -186,6 +194,7 @@ impl GrpcRemoteNodeTransport {
         Self {
             tls_cert_path: None,
             tls_key_path: None,
+            credential_tls_identity: None,
             authorized_operators_dir: None,
             relay_client: None,
         }
@@ -209,9 +218,24 @@ impl GrpcRemoteNodeTransport {
         Self {
             tls_cert_path: Some(cert_path.into()),
             tls_key_path: Some(key_path.into()),
+            credential_tls_identity: None,
             authorized_operators_dir: None,
             relay_client: None,
         }
+    }
+
+    /// Serve inbound connections with the node credential identity when no
+    /// explicit certificate is configured. The node runtime attaches this for
+    /// relay-enrolled nodes: a peer dialing `via = "relay"` pins the relay
+    /// identity fingerprint (`tls_pin_sha256`), which is the SPKI hash of the
+    /// node credential certificate, so the listener must present that
+    /// certificate for the pinned TLS handshake to verify.
+    pub fn with_credential_tls_identity(
+        mut self,
+        identity: crate::infra::node_credentials::NodeCredentialPaths,
+    ) -> Self {
+        self.credential_tls_identity = Some(identity);
+        self
     }
 
     /// Serve inbound connections only to operator keys listed in the given
@@ -642,8 +666,25 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         let local_addr = listener
             .local_addr()
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?;
-        let tls_cert_path = self.tls_cert_path.clone();
-        let tls_key_path = self.tls_key_path.clone();
+        let (tls_cert_path, tls_key_path) = match (&self.tls_cert_path, &self.tls_key_path) {
+            (Some(cert_path), Some(key_path)) => (Some(cert_path.clone()), Some(key_path.clone())),
+            (None, None) => match &self.credential_tls_identity {
+                Some(identity) => {
+                    ERROR_LOG.log(format!(
+                        "[remote-ingress] listener presents the node credential identity \
+                         (no explicit node cert configured): cert={} key={}",
+                        identity.cert_path.display(),
+                        identity.key_path.display()
+                    ));
+                    (
+                        Some(identity.cert_path.clone()),
+                        Some(identity.key_path.clone()),
+                    )
+                }
+                None => (None, None),
+            },
+            _ => (None, None),
+        };
         let authorized_operators_dir = self
             .authorized_operators_dir
             .clone()
@@ -1172,11 +1213,14 @@ fn tls_endpoint_uri(endpoint_uri: &str, tls_pin_sha256: &Option<String>) -> Stri
     }
 }
 
+/// Renders an error and its `source()` chain as a single line, so the
+/// diagnostics log (which keys entries by line and drops continuations) keeps
+/// the whole chain. Shows each error's `Display`, not just its `Debug`.
 fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut message = format!("{error:#?}");
+    let mut message = format!("{error}");
     let mut source = error.source();
     while let Some(err) = source {
-        message.push_str(&format!("\n  caused by: {err:#?}"));
+        message.push_str(&format!("; caused by: {err}"));
         source = err.source();
     }
     message
