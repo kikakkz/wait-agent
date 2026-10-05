@@ -17,9 +17,21 @@
 # docker (works on any host with docker). Set WA_E2E_BINARY to a prebuilt
 # host binary to skip the in-docker build (CI and quick local runs).
 #
+# Coverage scenarios (issue #145, closing the #137 reconciliation backlog):
+#   revoke    — `relay remove` drops the whitelist entry AND the live link;
+#               the revoked node's relay client can never re-establish
+#               (data-port client auth checks the whitelist), while the
+#               deploy token stays valid for clean nodes.
+#   capacity  — relay.toml `capacity_max_nodes` admission: a third node's
+#               enroll succeeds but its register is refused with the
+#               NodeCapacity error frame; the connection table stays at cap.
+#   presence  — a peer's relay liveness drives the remote session row's
+#               availability on the observer node: online -> offline while
+#               the peer is partitioned, back online on heal.
+#
 # Usage: e2e-relay.sh [scenario ...]
 #   scenarios: smoke (default), reconnect, reregister, streams, direct,
-#   pastefile
+#   pastefile, revoke, capacity, presence
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -29,13 +41,14 @@ RELAY_LISTEN=0.0.0.0:7475
 RELAY_PORT=7475
 NODE_PORT_A=9001
 NODE_PORT_B=9002
+NODE_PORT_C=9003
 GATE_TIMEOUT_SECS=${GATE_TIMEOUT_SECS:-120}
 
 log() { printf '[e2e-relay] %s\n' "$*"; }
 die() {
     log "ERROR: $*"
     local name
-    for name in "$RELAY" "$NODE_A" "$NODE_B"; do
+    for name in "$RELAY" "$NODE_A" "$NODE_B" "$NODE_C"; do
         if docker inspect "$name" >/dev/null 2>&1; then
             log "$name logs (tail):"
             docker logs --tail 20 "$name" 2>&1 | sed 's/^/  /' || true
@@ -48,8 +61,10 @@ RUN=${RUN:-$RANDOM$RANDOM}
 RELAY="wa37-relay-$RUN"
 NODE_A="wa37-node-a-$RUN"
 NODE_B="wa37-node-b-$RUN"
+NODE_C="wa37-node-c-$RUN"
 NET_A="wa37-net-a-$RUN"
 NET_B="wa37-net-b-$RUN"
+NET_C="wa37-net-c-$RUN"
 NET_DIRECT="wa37-net-direct-$RUN"
 FINGERPRINTS=()
 
@@ -58,8 +73,8 @@ command -v jq >/dev/null 2>&1 || die "jq is required for host-side status parsin
 command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is required for the direct scenario"
 
 cleanup() {
-    docker rm -f "$RELAY" "$NODE_A" "$NODE_B" >/dev/null 2>&1 || true
-    docker network rm "$NET_A" "$NET_B" "$NET_DIRECT" >/dev/null 2>&1 || true
+    docker rm -f "$RELAY" "$NODE_A" "$NODE_B" "$NODE_C" >/dev/null 2>&1 || true
+    docker network rm "$NET_A" "$NET_B" "$NET_C" "$NET_DIRECT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -127,6 +142,51 @@ wait_node_ready() {
         sleep 1
     done
     die "$container control socket never became ready"
+}
+
+# Polls a node's relay probe until it is deterministically refused
+# (ok=false) and returns the refusal response. A node whose relay link can
+# never register — revoked (whitelist client-auth refuses the handshake) or
+# capacity-refused (NodeCapacity error frame tears the link down before any
+# usable opener exists) — has no relay opener for the probe's open_stream,
+# so NotConnected is the steady-state answer.
+wait_probe_refused() {
+    local container=$1 port=$2 peer=$3
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    local probe_out=""
+    while ((SECONDS < deadline)); do
+        probe_out=$(node_command "$container" "$port" "E2E_RELAY_PROBE $peer 1 1" 2>/dev/null || true)
+        if jq -e '.type == "Response" and .payload.ok == false' <<<"$probe_out" >/dev/null 2>&1; then
+            printf '%s\n' "$probe_out"
+            return 0
+        fi
+        probe_out=""
+        sleep 2
+    done
+    die "$container relay probe was not refused within ${GATE_TIMEOUT_SECS}s"
+}
+
+# Polls LIST_SESSIONS on a node until the row with the given target id
+# reports the wanted availability ("online"/"offline"/"exited") and returns
+# the row. The row keeps its catalog entry across a disconnect (the observer
+# screen is preserved for reconnect), so only the availability field moves.
+wait_row_availability() {
+    local container=$1 port=$2 target=$3 want=$4
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    local row=""
+    while ((SECONDS < deadline)); do
+        row=$(node_command "$container" "$port" LIST_SESSIONS 2>/dev/null \
+            | jq -c --arg t "$target" --arg a "$want" '[.payload.data[]?
+                | select(.id == $t and .availability == $a)]
+                | first' 2>/dev/null || true)
+        if [ -n "$row" ] && [ "$row" != "null" ]; then
+            printf '%s\n' "$row"
+            return 0
+        fi
+        row=""
+        sleep 2
+    done
+    die "$container never saw $target availability=$want within ${GATE_TIMEOUT_SECS}s"
 }
 
 # Brings up the topology and gates on both nodes being enrolled and online.
@@ -536,9 +596,289 @@ EOF
     log "pastefile OK: file crossed the relay link into the host clipboard cache"
 }
 
+scenario_revoke() {
+    log "scenario: revoke (relay remove drops the whitelist entry and the live link)"
+    bring_up_topology
+
+    # Identity comes from each node, not from the relay's ls order: the
+    # whitelist file names sort independently of which container enrolled
+    # first, and the scenario hinges on revoking the node we later probe.
+    local fp_a fp_b
+    fp_a=$(docker exec "$NODE_A" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_a" ] && [ -n "$fp_b" ] || die "could not read node fingerprints"
+
+    # The CLI remove surface answers with both halves named; asserting the
+    # message pins the admin-channel path end to end.
+    local remove_out
+    remove_out=$(docker exec "$RELAY" waitagent relay remove "$fp_a" --listen "$RELAY_LISTEN")
+    grep -q "removed: $fp_a (whitelist entry removed; live link dropped)" <<<"$remove_out" \
+        || die "relay remove did not report whitelist+link removal: $remove_out"
+    log "relay remove answered: $(head -n1 <<<"$remove_out")"
+
+    # Anchor (relay runtime truth): registered_nodes 2 -> 1 and only B remains.
+    # retire_notifying drops A's table entry synchronously with the admin
+    # command, so this converges as soon as the admin socket answers.
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS)) status=""
+    while ((SECONDS < deadline)); do
+        status=$(relay_status 2>/dev/null || true)
+        if [ "$(jq -r '.registered_nodes' <<<"$status" 2>/dev/null)" = "1" ] \
+            && [ "$(jq -r '[.nodes[].node_id] | sort | join(" ")' <<<"$status" 2>/dev/null)" = "$fp_b" ]; then
+            break
+        fi
+        status=""
+        sleep 2
+    done
+    [ -n "$status" ] || die "relay status did not converge to 1 node ($fp_b) after remove"
+
+    # Anchor (enrollment ground truth): A's whitelist entry is gone, so the
+    # data port's whitelist client-auth refuses every future TLS handshake.
+    if docker exec "$RELAY" sh -c "test -f '/root/.waitagent/authorized_nodes/$fp_a'" 2>/dev/null; then
+        die "A's whitelist entry survived relay remove"
+    fi
+
+    # Anchor (A's process-level death): the revoked link got a NodeRevoked
+    # Error frame and tore down; A's relay client retries forever, but with
+    # the whitelist entry gone the handshake is refused before Register, so
+    # no opener is ever installed and the probe deterministically reports
+    # NotConnected. Poll: the old link may still be draining right after
+    # remove.
+    wait_probe_refused "$NODE_A" "$NODE_PORT_A" "$fp_b"
+    log "node A's relay probe is refused after revocation"
+
+    # The deploy token minted at bring-up is NOT revoked by removing A (a
+    # fingerprint-scoped revocation): a clean node C enrolls with the same
+    # token and registers, while A stays locked out.
+    docker run -dt --name "$NODE_C" --network "$NET_A" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_C" >/dev/null
+
+    local fp_c
+    fp_c=$(docker exec "$NODE_C" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_c" ] || die "could not read node C's fingerprint"
+    [ "$fp_c" != "$fp_a" ] && [ "$fp_c" != "$fp_b" ] \
+        || die "node C reused an existing fingerprint: $fp_c"
+
+    wait_for_node_ids "$fp_b" "$fp_c"
+
+    # A is still refused after C registered: reconnect attempts keep failing
+    # the whitelist handshake, so the probe stays refused.
+    wait_probe_refused "$NODE_A" "$NODE_PORT_A" "$fp_b"
+    log "node A's relay probe still refused after C registered"
+
+    # The whitelist now holds exactly {B, C}.
+    local whitelist
+    whitelist=$(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes' | sort | paste -sd' ')
+    [ "$whitelist" = "$(printf '%s\n' "$fp_b" "$fp_c" | sort | paste -sd' ')" ] \
+        || die "whitelist should be {B, C}, got: $whitelist"
+
+    log "revoke OK: A revoked (whitelist + live link), token still enrolls C, A stays locked out"
+}
+
+scenario_capacity() {
+    log "scenario: capacity (relay.toml capacity_max_nodes refuses a third node)"
+    # Custom bring-up (not bring_up_topology): the relay must start with its
+    # own relay.toml setting the connection-table cap — the
+    # relay_serve_toml_store config surface (issue #35 wiring).
+    docker network create --internal "$NET_A" >/dev/null
+    docker network create --internal "$NET_B" >/dev/null
+    docker network create --internal "$NET_C" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        sh -c "mkdir -p /root/.waitagent \
+            && printf 'capacity_max_nodes = 2\n' > /root/.waitagent/relay.toml \
+            && exec waitagent relay serve --listen $RELAY_LISTEN" >/dev/null
+    docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
+    docker network connect --alias relay "$NET_C" "$RELAY" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    docker run -dt --name "$NODE_A" --network "$NET_A" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+    docker run -dt --name "$NODE_B" --network "$NET_B" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 2 ] \
+        || die "expected 2 whitelisted nodes, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+
+    # Anchor (config surface took effect): the admin status carries the
+    # capacity knob, so a wrong value here means relay.toml was not read.
+    local status
+    status=$(relay_status)
+    [ "$(jq -r '.capacity.max_nodes' <<<"$status")" = "2" ] \
+        || die "relay did not pick up capacity_max_nodes=2: $status"
+    log "relay admin status reports capacity.max_nodes=2"
+
+    # Node C enrolls with the same deploy token. Enrollment deliberately has
+    # no capacity check (the token authorizes, the whitelist is the
+    # enrollment truth); the refusal happens at register time on the data
+    # link, where admission control lives.
+    docker run -dt --name "$NODE_C" --network "$NET_C" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_C" >/dev/null
+    local fp_c
+    fp_c=$(docker exec "$NODE_C" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_c" ] || die "could not read node C's fingerprint"
+
+    # Anchor (typed refusal): register_link answers the at-cap register with
+    # the NodeCapacity error frame and logs the refusal. ERROR_LOG writes to
+    # the fixed diag file (/tmp/waitagent-diag.log) inside the relay
+    # container — docker logs only carries the startup banner — and the
+    # container is fresh per scenario, so a match cannot be stale. C's
+    # client retries forever, so the line lands within one retry cycle.
+    local diag
+    diag="grep -aq 'register refused, max_nodes reached' /tmp/waitagent-diag.log 2>/dev/null"
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        if docker exec "$RELAY" sh -c "$diag"; then
+            break
+        fi
+        sleep 2
+    done
+    docker exec "$RELAY" sh -c "$diag" \
+        || die "relay never logged the max_nodes register refusal"
+
+    # Anchor (runtime truth): the connection table holds exactly {A, B}
+    # through a settle window — C keeps retrying but never admits.
+    local want have
+    want=$(printf '%s\n' "${FINGERPRINTS[@]}" | sort | paste -sd' ')
+    local settle_end=$((SECONDS + 15))
+    while ((SECONDS < settle_end)); do
+        status=$(relay_status 2>/dev/null || true)
+        have=$(jq -r '[.nodes[].node_id] | sort | join(" ")' <<<"$status" 2>/dev/null || true)
+        if [ "$have" != "$want" ]; then
+            die "connection table changed past the cap: want [$want], got [$have]"
+        fi
+        sleep 2
+    done
+    log "connection table stayed at cap: [$want]"
+
+    # Anchor (C's process-level view): C's relay client gets the NodeCapacity
+    # Error frame and the link tears down before any opener is observable
+    # outside the register retry window, so the probe reports NotConnected.
+    wait_probe_refused "$NODE_C" "$NODE_PORT_C" "${FINGERPRINTS[0]}"
+    log "node C's relay probe is refused while the relay is at capacity"
+
+    log "capacity OK: max_nodes=2 admitted A+B, C's register refused (NodeCapacity), table stayed at cap"
+}
+
+scenario_presence() {
+    log "scenario: presence (peer relay liveness drives the remote row's availability)"
+    # Custom bring-up (mirrors pastefile): A's operator key is authorized on
+    # B and A reaches B through a remote-hosts profile (via=relay, tls_pin =
+    # B's enrolled fingerprint).
+    docker network create --internal "$NET_A" >/dev/null
+    docker network create --internal "$NET_B" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+    docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    local a_home stage
+    a_home=$(mktemp -d)
+    stage=$(mktemp -d)
+    docker run -dt --name "$NODE_A" --network "$NET_A" \
+        -v "$a_home:/root/.waitagent" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ -f "$a_home/operator.key" ] && break
+        assert_running "$NODE_A"
+        sleep 1
+    done
+    [ -f "$a_home/operator.key" ] || die "node A never generated its operator key"
+    docker cp "$NODE_A:/root/.waitagent/operator.key" "$stage/operator.key" >/dev/null
+    ssh-keygen -y -f "$stage/operator.key" >"$stage/node-a.pub" 2>/dev/null \
+        || die "could not derive node A's operator public key"
+
+    docker run -dt --name "$NODE_B" --network "$NET_B" \
+        -v "$stage/node-a.pub:/root/.waitagent/authorized_operators/node-a.pub:ro" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 2 ] \
+        || die "expected 2 whitelisted nodes, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+
+    local fp_b
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_b" ] || die "could not read node B's fingerprint"
+
+    cat >"$a_home/remote-hosts.toml" <<EOF
+[[hosts]]
+name = "node-b"
+host = "node-b"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/unused"
+remote_shell = "posix"
+last_remote_port = $NODE_PORT_B
+tls_pin_sha256 = "$fp_b"
+via = "relay"
+EOF
+
+    local connect_out
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CONNECT_REMOTE_HOST node-b")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "CONNECT_REMOTE_HOST on A failed: $connect_out"
+
+    # A live remote session row on A, observed through the control socket —
+    # the same SessionView data the console sidebar renders.
+    local b_target row
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CREATE_REMOTE_SESSION node-b#9002 /root")
+    b_target=$(jq -r '.payload.message // ""' <<<"$connect_out" \
+        | sed -n 's/^created remote session //p')
+    [ -n "$b_target" ] || die "CREATE_REMOTE_SESSION on A failed: $connect_out"
+
+    row=$(wait_row_availability "$NODE_A" "$NODE_PORT_A" "$b_target" "online")
+    log "node A sees $b_target online: $row"
+
+    local activate_out resize_out
+    activate_out=$(node_command "$NODE_A" "$NODE_PORT_A" "ACTIVATE_TARGET $b_target")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$activate_out" >/dev/null \
+        || die "ACTIVATE_TARGET on A failed: $activate_out"
+    resize_out=$(node_command "$NODE_A" "$NODE_PORT_A" "RESIZE 80 24")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$resize_out" >/dev/null \
+        || die "RESIZE on A failed: $resize_out"
+
+    # Partition B. The relay loses B's link (TCP read error, then worst case
+    # the heartbeat sweeper) and closes the A<->B relay streams with it;
+    # A's mirror observes the transport death and the state loop marks the
+    # row offline — the sidebar-rendered availability — while the presence
+    # frames from the relay's PresenceHub drive the per-row `relay:offline`
+    # console marker for the same event. Both flip on the same link loss, so
+    # the row availability is the deterministic control-socket anchor for
+    # presence reaching the console.
+    docker network disconnect "$NET_B" "$NODE_B" >/dev/null
+    row=$(wait_row_availability "$NODE_A" "$NODE_PORT_A" "$b_target" "offline")
+    log "partition observed: node A marks $b_target offline"
+
+    # Heal: B's relay client re-registers (backoff <= 5s), A's reconnect and
+    # outbound-dial workers re-establish through the relay, and the row
+    # flips back online.
+    docker network connect --alias node-b "$NET_B" "$NODE_B" >/dev/null
+    row=$(wait_row_availability "$NODE_A" "$NODE_PORT_A" "$b_target" "online")
+    log "heal observed: node A marks $b_target back online"
+
+    rm -rf "$a_home" "$stage"
+    log "presence OK: remote row availability followed B's relay liveness (online -> offline -> online)"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams direct pastefile)
+    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -564,8 +904,17 @@ for scenario in "${scenarios[@]}"; do
         pastefile)
             scenario_pastefile
             ;;
+        revoke)
+            scenario_revoke
+            ;;
+        capacity)
+            scenario_capacity
+            ;;
+        presence)
+            scenario_presence
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence)"
             ;;
     esac
     log "scenario '$scenario' passed"
