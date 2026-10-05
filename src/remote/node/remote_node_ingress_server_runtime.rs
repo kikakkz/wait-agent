@@ -438,13 +438,17 @@ where
         &self,
         local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     ) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
+        // Relay-routed inbound dials (via = "relay") reach the listener
+        // through the transport's relay accept worker (issue #129); attach
+        // the same client the outbound dial path uses.
         let transport = match (
             self.network.node_cert_path.as_ref(),
             self.network.node_key_path.as_ref(),
         ) {
             (Some(cert), Some(key)) => GrpcRemoteNodeTransport::with_tls(cert, key),
             _ => GrpcRemoteNodeTransport::new(),
-        };
+        }
+        .with_relay_client(self.relay_client.clone());
         let (transport_tx, transport_rx) = mpsc::channel();
         let (internal_tx, internal_rx) = mpsc::channel();
         let transport_guard = transport

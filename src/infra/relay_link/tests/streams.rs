@@ -13,147 +13,15 @@ use tokio::time::timeout;
 
 use super::admin::admin_request;
 use super::client::{
-    expect_connected, expect_disconnected, long_lived_lifecycle, next_client_event,
-    node_credentials_in, relay_client_config, relay_fingerprint, wait_admin_lists_node,
+    expect_connected, expect_disconnected, next_client_event, node_credentials_in,
+    relay_client_config,
+};
+use super::pair::{
+    accept_inbound_on_thread, cancel_handle, open_stream_blocking, recv_inbound,
+    spawn_connected_pair,
 };
 use super::*;
-use crate::infra::peer_connection::PeerConnection;
-use crate::infra::relay_client::{
-    RelayClient, RelayClientError, RelayClientEvent, RelayClientHandle,
-};
-
-const NO_DEADLOCK: Duration = Duration::from_secs(10);
-
-struct NodePair {
-    server: RunningServer,
-    handle_a: Arc<RelayClientHandle>,
-    handle_b: Arc<RelayClientHandle>,
-    event_rx_a: mpsc::Receiver<RelayClientEvent>,
-    // Held (not asserted on) so B's event channel stays open for the run.
-    _event_rx_b: mpsc::Receiver<RelayClientEvent>,
-    fp_a: String,
-    #[allow(dead_code)]
-    fp_b: String,
-}
-
-/// Spawns the relay plus two connected, registered clients. Both
-/// registrations are confirmed through the admin socket so an open cannot
-/// race a not-yet-registered target.
-async fn spawn_connected_pair() -> NodePair {
-    install_provider();
-    let node_a = TestNode::generate();
-    let node_b = TestNode::generate();
-    let server = start_test_server_with(
-        &[node_a.fingerprint(), node_b.fingerprint()],
-        long_lived_lifecycle(),
-    )
-    .await;
-    let admin_addr = server.server.admin_addr().clone();
-    let relay_fingerprint = relay_fingerprint(&server);
-    let addr = server.server.local_addr();
-    let dir_a = temp_dir("relay-streams-a");
-    let dir_b = temp_dir("relay-streams-b");
-    let credentials_a = node_credentials_in(&dir_a, &node_a);
-    let credentials_b = node_credentials_in(&dir_b, &node_b);
-
-    let (event_tx_a, mut event_rx_a) = mpsc::channel(16);
-    let handle_a = RelayClient::spawn(
-        relay_client_config(
-            addr,
-            relay_fingerprint.clone(),
-            credentials_a,
-            Duration::from_millis(50),
-        ),
-        event_tx_a,
-    );
-    let (event_tx_b, mut event_rx_b) = mpsc::channel(16);
-    let handle_b = RelayClient::spawn(
-        relay_client_config(
-            addr,
-            relay_fingerprint,
-            credentials_b,
-            Duration::from_millis(50),
-        ),
-        event_tx_b,
-    );
-
-    expect_connected(&mut event_rx_a).await;
-    expect_connected(&mut event_rx_b).await;
-    wait_admin_lists_node(&admin_addr, &node_a.fingerprint()).await;
-    wait_admin_lists_node(&admin_addr, &node_b.fingerprint()).await;
-
-    NodePair {
-        server,
-        handle_a: Arc::new(handle_a),
-        handle_b: Arc::new(handle_b),
-        event_rx_a,
-        _event_rx_b: event_rx_b,
-        fp_a: node_a.fingerprint(),
-        fp_b: node_b.fingerprint(),
-    }
-}
-
-impl NodePair {
-    async fn finish(self) {
-        cancel_handle(self.handle_a);
-        cancel_handle(self.handle_b);
-        self.server.server.shutdown().await;
-    }
-}
-
-fn cancel_handle(handle: Arc<RelayClientHandle>) {
-    match Arc::try_unwrap(handle) {
-        Ok(handle) => handle.cancel(),
-        Err(_) => panic!("handle is still shared with an accept thread at teardown"),
-    }
-}
-
-/// `open_stream` blocks its caller; run it on a scoped std thread so the
-/// async test runtime is never blocked.
-fn open_stream_blocking(
-    handle: &RelayClientHandle,
-    target_node_id: &str,
-) -> Box<dyn PeerConnection> {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| handle.open_stream(target_node_id).expect("open stream"))
-            .join()
-            .expect("open thread should not panic")
-    })
-}
-
-/// `accept_inbound` blocks until a relay-routed inbound stream arrives; run
-/// it on a std thread and hand the result back through a std channel.
-fn accept_inbound_on_thread(
-    handle: Arc<RelayClientHandle>,
-) -> std::sync::mpsc::Receiver<Option<Box<dyn PeerConnection>>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(handle.accept_inbound());
-    });
-    rx
-}
-
-/// Awaits the inbound accept result WITHOUT blocking the single-threaded
-/// test runtime (the relay server runs on it): the std-channel wait happens
-/// on the blocking thread pool. A blocked test thread would freeze the
-/// relay's link loops and starve every routed frame.
-async fn recv_inbound(
-    rx: std::sync::mpsc::Receiver<Option<Box<dyn PeerConnection>>>,
-    context: &str,
-) -> Box<dyn PeerConnection> {
-    let context = context.to_string();
-    tokio::task::spawn_blocking({
-        let context = context.clone();
-        move || {
-            rx.recv_timeout(NO_DEADLOCK)
-                .unwrap_or_else(|error| panic!("{context}: inbound accept should arrive: {error}"))
-                .unwrap_or_else(|| panic!("{context}: client stopped before accepting"))
-        }
-    })
-    .await
-    .unwrap_or_else(|error| panic!("{context}: accept waiter failed: {error}"))
-}
+use crate::infra::relay_client::{RelayClient, RelayClientError, RelayClientEvent};
 
 #[tokio::test]
 async fn open_stream_echoes_both_directions() {

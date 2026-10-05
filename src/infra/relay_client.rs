@@ -356,9 +356,10 @@ impl RelayClientHandle {
     ///
     /// The queue is client-wide and survives reconnects. Must not be called
     /// from an asynchronous execution context.
-    #[allow(dead_code)]
-    // Consumed by the relay stream/presence integration tests; the
-    // runtime consumer lands with the relay session-sync wiring.
+    ///
+    /// Consumed by the node ingress listener's relay accept worker
+    /// ([`crate::infra::relay_ingress`], issue #129) and the stream
+    /// integration tests.
     pub fn accept_inbound(&self) -> Option<Box<dyn PeerConnection>> {
         let mut inbound = self.inbound.lock().ok()?;
         inbound
