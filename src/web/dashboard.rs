@@ -22,6 +22,7 @@ use tokio::time::timeout;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::relay_client::{RelayAdminError, RelayClientHandle};
 use crate::infra::relay_remote_admin::{RemoteAdminResponse, RemoteAdminStatus};
+use crate::web::auth::routes::WebState;
 
 /// The `status` request body, identical to the local admin protocol.
 const STATUS_COMMAND: &str = r#"{"command":"status"}"#;
@@ -30,22 +31,11 @@ const STATUS_COMMAND: &str = r#"{"command":"status"}"#;
 /// loopback link in milliseconds; anything beyond is a broken link.
 const ADMIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Shared dashboard state (domain-web: state in the extractor).
-pub(crate) struct DashboardState {
-    /// The enrolled web node's persistent relay link.
-    client: RelayClientHandle,
-}
-
-impl DashboardState {
-    pub(crate) fn new(client: RelayClientHandle) -> Self {
-        Self { client }
-    }
-}
-
 /// `GET /`: fetch the relay status over the node channel and render it.
 /// A failed fetch answers 503 rather than a cached or partial page — the
-/// dashboard is read-only and must not imply stale truth.
-pub(crate) async fn dashboard(State(state): State<Arc<DashboardState>>) -> Response {
+/// dashboard is read-only and must not imply stale truth. The session
+/// middleware runs before this handler (see `auth::routes`).
+pub(crate) async fn dashboard(State(state): State<Arc<WebState>>) -> Response {
     match fetch_status(&state.client).await {
         Ok(status) => Html(render(status)).into_response(),
         Err(error) => {

@@ -42,11 +42,13 @@ prost-types = "0.13"
 rand = "0.8"
 ratatui = { version = "0.27.0", default-features = false, features = ["crossterm"] }
 rcgen = "0.12"
+ring = "0.17"
 russh = "0.61.2"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-pemfile = "2"
 ssh-key = { version = "0.7.0-rc.10", features = ["ed25519", "rsa", "encryption"] }
 tokio-rustls = "0.26"
+webpki-roots = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11"

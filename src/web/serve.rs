@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::middleware;
+use axum::routing::{get, post};
 use axum::Router;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,10 +38,17 @@ use crate::infra::relay_client::{
 use crate::infra::relay_join::{join_relay, parse_relay_address};
 use crate::infra::relay_toml_store::{RelayTomlConfig, RelayTomlStoreError};
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncStream};
-use crate::web::dashboard::{dashboard, DashboardState};
+use crate::web::auth::routes::{
+    auth_middleware, heartbeat, login_form, login_page, magic_link, AuthState, WebState,
+};
+use crate::web::auth::token::WebAuthKeys;
+use crate::web::config::{WebuiConfig, WebuiConfigError};
+use crate::web::dashboard::dashboard;
 
-/// Default web listen port; the default bind stays on loopback (issue #131
-/// keeps the unauthenticated skeleton loopback-only).
+/// Default web listen port. The default bind is `0.0.0.0` (issue #131 v2:
+/// public deployment; the magic-link auth from slice 3 protects the
+/// dashboard, and `web serve` prints an exposure warning for non-loopback
+/// binds).
 pub const DEFAULT_WEB_LISTEN_PORT: u16 = 8788;
 
 /// Capacity of the relay-client lifecycle event queue.
@@ -59,12 +67,12 @@ pub struct WebServeConfig {
 }
 
 impl WebServeConfig {
-    /// The CLI default: loopback listen, credentials and relay pin under
-    /// `waitagent_home()`.
+    /// The CLI default: the v2 default bind (0.0.0.0, public deployment with
+    /// magic-link auth), credentials and relay pin under `waitagent_home()`.
     pub fn from_waitagent_home() -> Self {
         let home = waitagent_home();
         Self {
-            listen: SocketAddr::from(([127, 0, 0, 1], DEFAULT_WEB_LISTEN_PORT)),
+            listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_WEB_LISTEN_PORT)),
             credentials: NodeCredentialPaths {
                 key_path: home.join("web-node.key"),
                 cert_path: home.join("web-node.crt"),
@@ -114,6 +122,10 @@ pub enum WebServeError {
     Admin(String),
     #[error("relay enrollment (join) error: {0}")]
     Join(#[from] crate::infra::relay_join::RelayJoinError),
+    #[error("webui config error: {0}")]
+    WebuiConfig(#[from] WebuiConfigError),
+    #[error("web auth keys error: {0}")]
+    AuthKey(#[from] crate::web::auth::token::AuthKeyError),
 }
 
 /// Enrolls this web service into the pinned relay and opens the persistent
@@ -156,14 +168,21 @@ pub async fn enroll_and_link(config: &WebServeConfig) -> Result<WebRelayLink, We
     })
 }
 
-/// The axum application: `GET /healthz` answers 200 (the slice-1 e2e
-/// anchor) and `GET /` renders the read-only relay dashboard from status
-/// fetched over the enrolled node channel (slice 2). Everything else 404s
-/// from the default fallback.
-pub fn build_router(state: Arc<DashboardState>) -> Router {
+/// The axum application: `GET /healthz` answers 200 (open, the slice-1 e2e
+/// anchor), `GET /` renders the dashboard, and `/login` + `/auth/magic` run
+/// the magic-link flow; the session middleware guards `/` and `/api/*`
+/// (slices 2-3). Everything else 404s from the default fallback.
+pub fn build_router(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/", get(dashboard))
+        .route("/login", get(login_page))
+        .route("/auth/magic", get(magic_link).post(login_form))
+        .route("/api/heartbeat", post(heartbeat))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -171,19 +190,36 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
-/// Enroll-then-serve, driven by the CLI: links the relay, binds the HTTP
-/// listener, and serves until Ctrl-C.
+/// Enroll-then-serve, driven by the CLI: loads the WebUI deployment config
+/// and the token keys, links the relay, binds the HTTP listener, and serves
+/// until Ctrl-C.
 pub async fn run(config: &WebServeConfig) -> Result<(), WebServeError> {
+    let webui_config = WebuiConfig::load(&WebuiConfig::default_path())?;
+    let keys = WebAuthKeys::load_or_generate(&waitagent_home().join("web-auth.key"))?;
     let link = enroll_and_link(config).await?;
     let listener = TcpListener::bind(config.listen).await?;
+    if !config.listen.ip().is_loopback() {
+        println!(
+            "WARNING: the dashboard listens on {} and is reachable from the network.",
+            listener.local_addr()?
+        );
+        println!(
+            "WARNING: access requires the admin mailbox magic link, but bind \
+             non-loopback only when you mean to expose this machine."
+        );
+    }
     println!("web listening on {}", listener.local_addr()?);
     println!("web node fingerprint: {}", link.node_fingerprint);
     println!("relay: {}", link.relay.address);
 
-    let state = Arc::new(DashboardState::new(link.client));
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let auth = AuthState::new(keys, webui_config);
+    let state = Arc::new(WebState::new(link.client, auth));
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
