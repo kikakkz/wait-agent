@@ -192,12 +192,12 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
-/// Enroll-then-serve, driven by the CLI: loads the WebUI deployment config
-/// and the token keys, links the relay, binds the HTTP listener, and serves
-/// until Ctrl-C.
+/// Enroll-then-serve, driven by the CLI: loads the WebUI deployment config,
+/// generates the ephemeral token keys (issue #143), links the relay, binds
+/// the HTTP listener, and serves until Ctrl-C.
 pub async fn run(config: &WebServeConfig) -> Result<(), WebServeError> {
     let webui_config = WebuiConfig::load(&WebuiConfig::default_path())?;
-    let keys = WebAuthKeys::load_or_generate(&waitagent_home().join("web-auth.key"))?;
+    let keys = WebAuthKeys::generate()?;
     let link = enroll_and_link(config).await?;
     let listener = TcpListener::bind(config.listen).await?;
     if !config.listen.ip().is_loopback() {

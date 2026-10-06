@@ -21,6 +21,10 @@
 # node enrolls over the loopback-standard protocol (fingerprint-asserted
 # against the relay's connection table), and `relay shutdown` ends the
 # whole supervised process — the web port closes with the relay.
+# Phase 3 (issue #143) restarts the standalone web process: the ephemeral
+# in-memory signing key rotates, the phase-1 session cookie turns
+# unauthenticated (303 to /login), no web-auth.key file exists on disk,
+# and the magic-link flow re-authenticates against the fresh key.
 #
 # Usage: e2e-web.sh
 #   WA_E2E_BINARY=<path> overrides the binary (default: `cargo build` debug).
@@ -186,6 +190,9 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/healthz")
 [ "$code" = "200" ] || die "/healthz must stay open (got $code)"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/login")
 [ "$code" = "200" ] || die "/login must render (got $code)"
+# The web-auth signing key is ephemeral in memory (issue #143): no key
+# file may exist under the deployment home.
+[ ! -f "$WAITAGENT_HOME/web-auth.key" ] || die "web-auth.key must not be written to disk"
 
 # 2) Magic-link login through the stub SMTP hop.
 curl -s -A "$UA" -X POST "$BASE/auth/magic" \
@@ -442,5 +449,59 @@ wait "$RELAY_PID" || relay_rc=$?
 RELAY_PID=""
 [ "$relay_rc" -eq 0 ] || die "relay serve --web exited with $relay_rc after relay shutdown"
 log "relay shutdown ended the whole supervised process (web port closed, exit 0)"
+
+# 11) Key-rotation anchor (issue #143): the web-auth signing key is an
+#     ephemeral in-memory keypair, so restarting the web process rotates
+#     it. The phase-1 session cookie was signed by a previous boot's key
+#     and must now be unauthenticated (redirect to /login, never an
+#     error), no key file may exist on disk, and a fresh magic link
+#     re-authenticates against the new key. Phase 2 shut the relay down,
+#     so bring it back up first — the standalone web enrolls at startup.
+log "phase 3: web restart rotates the ephemeral signing key"
+"$BIN" relay serve --listen "127.0.0.1:$RELAY_PORT" \
+    >"$WAITAGENT_HOME/relay-again.log" 2>&1 &
+RELAY_PID=$!
+wait_for_file "relay listening" "$WAITAGENT_HOME/relay-again.log" "the phase-3 relay"
+
+"$BIN" web serve --listen "127.0.0.1:$WEB_PORT" >"$WAITAGENT_HOME/web-restarted.log" 2>&1 &
+WEB_PID=$!
+wait_for_file "web listening" "$WAITAGENT_HOME/web-restarted.log" "the restarted web listener"
+[ ! -f "$WAITAGENT_HOME/web-auth.key" ] || die "web-auth.key must not be written to disk"
+
+code=$(curl -s -b "$WAITAGENT_HOME/jar" -A "$UA" -o /dev/null -w '%{http_code}' "$BASE/")
+[ "$code" = "303" ] || die "the pre-restart session must be unauthenticated after rotation (got $code)"
+log "pre-restart session is unauthenticated after the web restart"
+
+mails_before=$(grep -c "=== MESSAGE ===" "$MAIL_FILE" || true)
+curl -s -A "$UA" -X POST "$BASE/auth/magic" \
+    --data-urlencode "email=admin@example.com" \
+    --data-urlencode "platform=Linux x86_64" \
+    --data-urlencode "timezone=Asia/Shanghai" \
+    --data-urlencode "language=en-US" \
+    --data-urlencode "screen=1920x1080" >"$WAITAGENT_HOME/login-response-2.html"
+mails_after=$mails_before
+for _ in $(seq 1 50); do
+    mails_after=$(grep -c "=== MESSAGE ===" "$MAIL_FILE" || true)
+    [ "$mails_after" -gt "$mails_before" ] && break
+    sleep 0.2
+done
+[ "$mails_after" -gt "$mails_before" ] || die "no fresh magic mail after the restart"
+MAGIC=$(grep -o "http://127.0.0.1:$WEB_PORT/auth/magic?token=[A-Za-z0-9._-]*" "$MAIL_FILE" | tail -1)
+[ -n "$MAGIC" ] || die "no magic link in the captured mail"
+code=$(curl -s -c "$WAITAGENT_HOME/jar2" -A "$UA" -o /dev/null -w '%{http_code}' "$MAGIC")
+[ "$code" = "303" ] || die "post-restart magic redeem should redirect (got $code)"
+dashboard=""
+for _ in $(seq 1 50); do
+    dashboard=$(curl -s -b "$WAITAGENT_HOME/jar2" -A "$UA" "$BASE/")
+    case "$dashboard" in
+        *"Connection table"*) break ;;
+    esac
+    sleep 0.2
+done
+case "$dashboard" in
+    *"Connection table"*) ;;
+    *) die "post-restart dashboard did not render" ;;
+esac
+log "magic-link re-authentication recovered after the key rotation"
 
 log "OK: web e2e passed"

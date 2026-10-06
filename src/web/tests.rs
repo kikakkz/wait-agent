@@ -166,6 +166,7 @@ struct WebStack {
     server: JoinHandle<()>,
     stub: StubSmtp,
     node_fingerprint: String,
+    dir: PathBuf,
 }
 
 async fn start_web_stack(name: &str, admin_email: &str) -> WebStack {
@@ -201,8 +202,9 @@ async fn start_web_stack(name: &str, admin_email: &str) -> WebStack {
             user: admin_email.to_string(),
         }),
     };
-    let keys = WebAuthKeys::load_or_generate(&dir.join("web-auth.key"))
-        .expect("web auth keys should generate");
+    // Ephemeral signing keys (issue #143): generated in memory per boot,
+    // never persisted — see the no-key-file assertion below.
+    let keys = WebAuthKeys::generate().expect("web auth keys should generate");
     let auth = AuthState::new(keys, webui_config);
     let state = Arc::new(WebState::new(link.client, auth));
 
@@ -227,6 +229,7 @@ async fn start_web_stack(name: &str, admin_email: &str) -> WebStack {
         server,
         stub,
         node_fingerprint,
+        dir,
     }
 }
 
@@ -340,6 +343,12 @@ fn magic_token_from_mail(transcript_body: &str) -> String {
 /// Mints a live session directly (bypasses mail) for tests that focus on
 /// the dashboard rather than the login flow.
 fn mint_test_session(state: &AuthState) -> String {
+    mint_session_with_keys(state, &state.keys)
+}
+
+/// Mints a live session signed by an explicit keypair — `keys` other than
+/// the state's simulate a token carried over from before a key rotation.
+fn mint_session_with_keys(state: &AuthState, keys: &WebAuthKeys) -> String {
     let fp = fingerprint::compute("127.0.0.1", TEST_UA, &Probe::default());
     let jti = crate::web::auth::token::new_jti();
     let iat = crate::web::auth::token::now_unix();
@@ -349,16 +358,14 @@ fn mint_test_session(state: &AuthState) -> String {
         Probe::default(),
         Duration::from_secs(crate::web::auth::token::SESSION_TTL_SECS),
     );
-    state
-        .keys
-        .sign(&Claims {
-            sub: "session".to_string(),
-            jti,
-            iat,
-            exp: iat + crate::web::auth::token::SESSION_TTL_SECS,
-            fp,
-        })
-        .expect("session token signs")
+    keys.sign(&Claims {
+        sub: "session".to_string(),
+        jti,
+        iat,
+        exp: iat + crate::web::auth::token::SESSION_TTL_SECS,
+        fp,
+    })
+    .expect("session token signs")
 }
 
 // --- slice 4: dashboard write ops -------------------------------------------
@@ -1084,6 +1091,120 @@ async fn session_with_a_mismatched_fingerprint_is_invalidated() {
     let (code, headers, _) = http(stack.addr, "GET", "/", &[("cookie", &cookie)], "").await;
     assert_eq!(code, 303, "the revoked session redirects to login");
     assert_eq!(header(&headers, "location"), Some("/login"));
+
+    stack.server.abort();
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
+// --- slice 5: ephemeral signing keys (issue #143) ----------------------------
+
+/// The signing key never touches disk: starting the whole web stack leaves
+/// no key file behind, so there is nothing to back up or leak. (The old
+/// default path under waitagent_home is asserted in the process e2e, where
+/// WAITAGENT_HOME is a fresh directory.)
+#[tokio::test]
+async fn web_stack_persists_no_web_auth_key_file() {
+    let stack = start_web_stack("key-file", "admin@example.com").await;
+    assert!(
+        !stack.dir.join("web-auth.key").is_file(),
+        "no web-auth.key may be written under the web home"
+    );
+
+    stack.server.abort();
+    drop(stack.state);
+    stack.relay.server.shutdown().await;
+}
+
+/// Restart rotation semantics: a session signed by the previous boot's key
+/// is unauthenticated after the restart (redirect/403, never an error
+/// page), and the standard magic-link flow re-authenticates against the
+/// fresh key.
+#[tokio::test]
+async fn session_signed_by_a_rotated_key_is_unauthenticated_and_reauth_recovers() {
+    let stack = start_web_stack("key-rotation", "admin@example.com").await;
+
+    // A token minted under a DIFFERENT keypair (the retired pre-restart
+    // key) fails verification: / redirects to /login, /api answers 403.
+    let retired_keys = WebAuthKeys::generate().expect("retired keypair");
+    let stale_session = mint_session_with_keys(&stack.state.auth, &retired_keys);
+    let stale_cookie = format!("session={stale_session}");
+    let (code, headers, _) = http(stack.addr, "GET", "/", &[("cookie", &stale_cookie)], "").await;
+    assert_eq!(
+        code, 303,
+        "a pre-restart session is unauthenticated, not an error: {headers:?}"
+    );
+    assert_eq!(header(&headers, "location"), Some("/login"));
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/api/heartbeat",
+        &[
+            ("cookie", &stale_cookie),
+            ("content-type", "application/json"),
+        ],
+        "{}",
+    )
+    .await;
+    assert_eq!(code, 403, "a stale session must not reach the API");
+
+    // Re-authentication closes the loop with the current key: request a
+    // fresh magic link, redeem it, and the dashboard serves the session.
+    let form = format!(
+        "email={}&platform={}&timezone={}&language={}&screen={}",
+        form_escape("admin@example.com"),
+        form_escape(&test_probe().platform),
+        form_escape(&test_probe().timezone),
+        form_escape(&test_probe().language),
+        form_escape(&test_probe().screen),
+    );
+    let (code, _, body) = http(
+        stack.addr,
+        "POST",
+        "/auth/magic",
+        &[("content-type", "application/x-www-form-urlencoded")],
+        &form,
+    )
+    .await;
+    assert_eq!(code, 200, "magic request should answer 200: {body}");
+    let transcript = stack.stub.wait_for_data().await;
+    let magic = magic_token_from_mail(transcript.data_body().expect("body"));
+    let (code, headers, _) = http(
+        stack.addr,
+        "GET",
+        &format!("/auth/magic?token={magic}"),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(code, 303, "redeem should redirect to /");
+    let cookie = header(&headers, "set-cookie").expect("a fresh session cookie");
+    let session = cookie
+        .split(';')
+        .next()
+        .expect("cookie value")
+        .strip_prefix("session=")
+        .expect("session name")
+        .to_string();
+    let deadline = std::time::Instant::now() + NO_DEADLOCK;
+    loop {
+        let (code, _, body) = http(
+            stack.addr,
+            "GET",
+            "/",
+            &[("cookie", &format!("session={session}"))],
+            "",
+        )
+        .await;
+        if code == 200 && body.contains(&stack.node_fingerprint) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "re-authenticated dashboard should serve (code {code}): {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     stack.server.abort();
     drop(stack.state);
