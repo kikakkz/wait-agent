@@ -106,17 +106,16 @@ impl CommandDispatcher {
             Command::RelayStatus(command) => crate::command::relay_serve::run_status(command),
             Command::RelayShutdown(command) => crate::command::relay_serve::run_shutdown(command),
             Command::RelayInvite(command) => crate::command::relay_enroll::run_invite(command),
-            Command::RelayJoin(command) => crate::command::relay_enroll::run_join(command),
+            Command::RelayJoin(command) => {
+                crate::command::relay_enroll::run_join(command, &self.network)
+            }
             Command::RelayRemove(command) => crate::command::relay_enroll::run_remove(command),
             Command::WebServe(command) => crate::command::web_serve::run(command),
             Command::GenerateNodeCredentials => {
-                let paths = match (&self.network.node_key_path, &self.network.node_cert_path) {
-                    (Some(key_path), Some(cert_path)) => NodeCredentialPaths {
-                        key_path: key_path.into(),
-                        cert_path: cert_path.into(),
-                    },
-                    _ => NodeCredentialPaths::default_paths(),
-                };
+                let paths = NodeCredentialPaths::resolve_overrides(
+                    self.network.node_key_path.as_deref(),
+                    self.network.node_cert_path.as_deref(),
+                );
                 let fingerprint =
                     node_credentials::ensure_credentials(&paths).map_err(|error| {
                         AppError::Lifecycle(crate::lifecycle::LifecycleError::Protocol(

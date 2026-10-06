@@ -4,7 +4,7 @@
 //! runs the token-authenticated enrollment session and pins the relay
 //! identity into `~/.waitagent/relay.toml`.
 
-use crate::cli::{RelayInviteCommand, RelayJoinCommand, RelayRemoveCommand};
+use crate::cli::{RelayInviteCommand, RelayJoinCommand, RelayRemoveCommand, RemoteNetworkConfig};
 use crate::command::relay_serve::admin_request;
 use crate::error::AppError;
 use crate::infra::node_credentials::NodeCredentialPaths;
@@ -86,7 +86,7 @@ pub fn run_remove(command: RelayRemoveCommand) -> Result<(), AppError> {
     print_admin_response(&response)
 }
 
-pub fn run_join(command: RelayJoinCommand) -> Result<(), AppError> {
+pub fn run_join(command: RelayJoinCommand, network: &RemoteNetworkConfig) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -97,10 +97,19 @@ pub fn run_join(command: RelayJoinCommand) -> Result<(), AppError> {
             ))
         })?;
     runtime.block_on(async move {
+        // The enrollment cert and the whitelist identity fingerprint are
+        // both derived from these paths (issue #141): an explicit
+        // `--node-key-path`/`--node-cert-path` pair must win over the
+        // defaults, exactly like `relay serve` and
+        // `__generate-node-credentials`.
+        let credentials = NodeCredentialPaths::resolve_overrides(
+            network.node_key_path.as_deref(),
+            network.node_cert_path.as_deref(),
+        );
         let outcome = relay_join::join_relay(
             &command.address,
             &command.token,
-            &NodeCredentialPaths::default_paths(),
+            &credentials,
             &RelayTomlConfig::default_path(),
         )
         .await

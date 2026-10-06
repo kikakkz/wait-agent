@@ -122,12 +122,10 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
     }
     let mut config = build_serve_config(&command, file_config.as_ref())?;
 
-    if let (Some(key_path), Some(cert_path)) = (&network.node_key_path, &network.node_cert_path) {
-        config.credentials = NodeCredentialPaths {
-            key_path: key_path.into(),
-            cert_path: cert_path.into(),
-        };
-    }
+    config.credentials = NodeCredentialPaths::resolve_overrides(
+        network.node_key_path.as_deref(),
+        network.node_cert_path.as_deref(),
+    );
 
     // `--web` resolves the WebUI config up front so a bad `--web-listen`
     // fails before the relay binds anything.
