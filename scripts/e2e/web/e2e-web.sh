@@ -15,6 +15,13 @@
 # and asserts the whitelist shrinks and the revoked identity can no longer
 # establish a relay link.
 #
+# Phase 2 (issue #142) restarts the relay as `relay serve --web
+# --web-listen 127.0.0.1:$WEB_PORT`: the WebUI comes up in the same
+# process, /healthz and the unauthenticated redirect answer, the special
+# node enrolls over the loopback-standard protocol (fingerprint-asserted
+# against the relay's connection table), and `relay shutdown` ends the
+# whole supervised process — the web port closes with the relay.
+#
 # Usage: e2e-web.sh
 #   WA_E2E_BINARY=<path> overrides the binary (default: `cargo build` debug).
 set -euo pipefail
@@ -378,5 +385,62 @@ jq -e --arg fp "$web_fp" \
     '.registered_nodes == 1 and ([.nodes[].node_id] == [$fp])' <<<"$relay_status_json" >/dev/null \
     || die "relay connection table changed after node 2's retries: $relay_status_json"
 log "node 2's relay link stays dead (probe NotConnected, reconnect refused)"
+
+# 10) The integrated form (issue #142): `relay serve --web` launches the
+#     WebUI in the same process — one process lifetime for both halves.
+#     The web node still enrolls over the loopback-standard protocol and
+#     shows up in the relay's connection table as the special node.
+log "phase 2: relay serve --web launches the web surface"
+kill "$WEB_PID" >/dev/null 2>&1 || true
+wait "$WEB_PID" 2>/dev/null || true
+WEB_PID=""
+"$BIN" relay shutdown --listen "127.0.0.1:$RELAY_PORT" >/dev/null 2>&1 || true
+wait "$RELAY_PID" 2>/dev/null || true
+RELAY_PID=""
+
+"$BIN" relay serve --listen "127.0.0.1:$RELAY_PORT" --web \
+    --web-listen "127.0.0.1:$WEB_PORT" >"$WAITAGENT_HOME/relay-web.log" 2>&1 &
+RELAY_PID=$!
+wait_for_file "web listening" "$WAITAGENT_HOME/relay-web.log" "the integrated web listener"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/healthz")
+[ "$code" = "200" ] || die "integrated web /healthz must answer 200 (got $code)"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")
+[ "$code" = "303" ] || die "integrated web / must redirect when unauthenticated (got $code)"
+
+# The special node enrolled over the standard loopback protocol: the
+# connection table holds exactly the web node's link.
+web_fp=$(sed -n 's/^web node fingerprint: //p' "$WAITAGENT_HOME/relay-web.log" | head -1)
+[ -n "$web_fp" ] || die "integrated web did not print its node fingerprint"
+enrolled=""
+for _ in $(seq 1 100); do
+    relay_status_json=$("$BIN" relay status --listen "127.0.0.1:$RELAY_PORT" 2>/dev/null || true)
+    if jq -e --arg fp "$web_fp" '.registered_nodes == 1 and ([.nodes[].node_id] == [$fp])' \
+        <<<"$relay_status_json" >/dev/null 2>&1; then
+        enrolled=1
+        break
+    fi
+    sleep 0.2
+done
+[ -n "$enrolled" ] || die "special node did not enroll through relay serve --web: $relay_status_json"
+log "integrated web enrolled as $web_fp (registered_nodes == 1)"
+
+# Supervision anchor: `relay shutdown` ends the whole process — the web
+# listener closes with the relay instead of outliving it.
+"$BIN" relay shutdown --listen "127.0.0.1:$RELAY_PORT" >/dev/null
+web_dead=""
+for _ in $(seq 1 50); do
+    if ! curl -s -o /dev/null --max-time 1 "$BASE/healthz" 2>/dev/null; then
+        web_dead=1
+        break
+    fi
+    sleep 0.2
+done
+[ -n "$web_dead" ] || die "the web listener outlived the relay shutdown"
+relay_rc=0
+wait "$RELAY_PID" || relay_rc=$?
+RELAY_PID=""
+[ "$relay_rc" -eq 0 ] || die "relay serve --web exited with $relay_rc after relay shutdown"
+log "relay shutdown ended the whole supervised process (web port closed, exit 0)"
 
 log "OK: web e2e passed"

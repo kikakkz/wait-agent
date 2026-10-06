@@ -605,7 +605,7 @@ fn help_text() -> String {
         "  waitagent cleanup",
         "  waitagent detach [<index>]",
         "  waitagent stop [<index>]",
-        "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>]",
+        "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>] [--web] [--web-listen <addr>]",
         "  waitagent relay invite [--ttl <secs>] [--deploy] [--listen <addr>]",
         "  waitagent relay join <address> <token>",
         "  waitagent relay remove <fingerprint> [--listen <addr>]",
