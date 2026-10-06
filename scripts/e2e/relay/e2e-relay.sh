@@ -28,10 +28,14 @@
 #   presence  — a peer's relay liveness drives the remote session row's
 #               availability on the observer node: online -> offline while
 #               the peer is partitioned, back online on heal.
+#   joinkeypaths — `relay join` honors the global --node-key-path /
+#               --node-cert-path overrides: a node seeded with a default
+#               identity enrolls (and is whitelisted under) the custom
+#               certificate's fingerprint instead (issue #141).
 #
 # Usage: e2e-relay.sh [scenario ...]
 #   scenarios: smoke (default), reconnect, reregister, streams, direct,
-#   pastefile, revoke, capacity, presence
+#   pastefile, revoke, capacity, presence, joinkeypaths
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -232,6 +236,65 @@ scenario_smoke() {
 
     log "smoke OK: 2/2 nodes enrolled and online through the relay"
     jq . <<<"$status" | sed 's/^/  /'
+}
+
+scenario_joinkeypaths() {
+    log "scenario: joinkeypaths (relay join honors --node-key-path/--node-cert-path)"
+    docker network create --internal "$NET_A" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    # Seed the DEFAULT credential location with a distinct identity before
+    # joining through the custom paths. If join ignored the overrides, the
+    # whitelist entry would be the default identity's fingerprint and
+    # /tmp/custom would never be created. (The node runtime's own relay
+    # link still uses the default paths — issue #151 — so this scenario
+    # asserts the join-time ground truth, not a live registration.)
+    docker run -d --name "$NODE_A" --network "$NET_A" "$IMAGE" \
+        sh -c "waitagent __generate-node-credentials > /tmp/default-creds.txt && \
+            waitagent --node-key-path /tmp/custom/node.key --node-cert-path /tmp/custom/node.crt \
+                relay join relay:$RELAY_PORT '$token' && \
+            sleep 365d" >/dev/null
+
+    # The join must whitelist exactly one node: the custom identity.
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        mapfile -t FINGERPRINTS < <(docker exec "$RELAY" \
+            sh -c 'ls /root/.waitagent/authorized_nodes' 2>/dev/null)
+        [ "${#FINGERPRINTS[@]}" -eq 1 ] && break
+        sleep 1
+    done
+    [ "${#FINGERPRINTS[@]}" -eq 1 ] \
+        || die "expected exactly 1 whitelisted node, got ${#FINGERPRINTS[@]}"
+
+    # The custom files hold the enrolled identity; the seeded defaults were
+    # NOT what join presented to the relay.
+    docker exec "$NODE_A" test -f /tmp/custom/node.key || die "custom key was not created"
+    docker exec "$NODE_A" test -f /tmp/custom/node.crt || die "custom cert was not created"
+    docker exec "$NODE_A" test -f /root/.waitagent/node.key || die "default key seed missing"
+    docker exec "$NODE_A" test -f /root/.waitagent/node.crt || die "default cert seed missing"
+
+    local default_fp custom_fp
+    default_fp=$(docker exec "$NODE_A" \
+        sh -c "sed -n 's/^WAITAGENT_CREDENTIALS\\([0-9a-f]*\\):.*/\\1/p' /tmp/default-creds.txt")
+    [ -n "$default_fp" ] || die "could not parse the default identity fingerprint"
+    # `__generate-node-credentials` returns the existing cert's fingerprint,
+    # so this reads the fingerprint of the custom certificate.
+    custom_fp=$(docker exec "$NODE_A" \
+        sh -c "waitagent --node-key-path /tmp/custom/node.key --node-cert-path /tmp/custom/node.crt __generate-node-credentials" \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]*\):.*/\1/p')
+    [ -n "$custom_fp" ] || die "could not fingerprint the custom certificate"
+    [ "$custom_fp" = "${FINGERPRINTS[0]}" ] \
+        || die "whitelist entry ${FINGERPRINTS[0]} is not the custom cert's fingerprint $custom_fp"
+    [ "$custom_fp" != "$default_fp" ] \
+        || die "join enrolled the default identity despite the overrides"
+
+    log "joinkeypaths OK: join enrolled the custom identity ($custom_fp), not the seeded default ($default_fp)"
 }
 
 scenario_reconnect() {
@@ -878,7 +941,7 @@ EOF
 
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence)
+    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -913,8 +976,11 @@ for scenario in "${scenarios[@]}"; do
         presence)
             scenario_presence
             ;;
+        joinkeypaths)
+            scenario_joinkeypaths
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths)"
             ;;
     esac
     log "scenario '$scenario' passed"

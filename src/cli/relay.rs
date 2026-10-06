@@ -340,6 +340,39 @@ mod tests {
     }
 
     #[test]
+    fn relay_join_composes_with_global_credential_path_flags() {
+        // --node-key-path/--node-cert-path are global flags (parsed before
+        // the subcommand); relay join must see them through the network
+        // config (issue #141).
+        let cli = parse(&[
+            "waitagent",
+            "--node-key-path",
+            "/tmp/custom.key",
+            "--node-cert-path",
+            "/tmp/custom.crt",
+            "relay",
+            "join",
+            "relay.example",
+            "tok-1",
+        ]);
+        assert_eq!(
+            cli.network.node_key_path.as_deref(),
+            Some("/tmp/custom.key")
+        );
+        assert_eq!(
+            cli.network.node_cert_path.as_deref(),
+            Some("/tmp/custom.crt")
+        );
+        match cli.command {
+            Command::RelayJoin(command) => {
+                assert_eq!(command.address, "relay.example");
+                assert_eq!(command.token, "tok-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn relay_join_requires_address_and_token() {
         assert_eq!(
             parse_error(&["waitagent", "relay", "join"]),
