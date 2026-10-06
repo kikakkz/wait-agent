@@ -116,11 +116,11 @@ relay 只解外层 TLS 和 mux 帧头用于路由；node 间内容仍是内层 E
   在线状态）经它的已认证 node↔relay 长连接以远端控制流送达 relay；
   浏览器 terminal 同样复用现有 ControlPlane（OpenMirror/RawPty/Resize）
   作为又一个 observer 参与者接入各 node 的 session。
-- 部署形态：web 服务与 relay 同机、一体启动（`relay serve` 默认拉起
-  web 面），同仓库同二进制；两进程经 loopback 走标准 node↔relay 协议，
-  不开"同进程走内存"的特例路径（本地跳微秒级，相对广域网可忽略；单一
-  协议路径被所有 node 共同 dogfood；故障域与部署拓扑保持解耦，压测有
-  实测依据后再评估内存捷径）。
+- 部署形态：web 服务与 relay 同机、一体启动（`relay serve --web` 拉起 web
+  面，fail-stop 单 Lifetime：任一半退出则整进程退出），同仓库同二进制；
+  两进程经 loopback 走标准 node↔relay 协议，不开"同进程走内存"的特例
+  路径（本地跳微秒级，相对广域网可忽略；单一协议路径被所有 node 共同
+  dogfood；故障域与部署拓扑保持解耦，压测有实测依据后再评估内存捷径）。
 - **CLI 收敛为 bootstrap 最小集**：`relay serve`、`relay join`，以及
   供批量装机的一行安装命令（WebUI 生成 token → node 上 paste 执行）。
 - 本机 admin socket（照 `remote_node_ingress_owner_socket_path` 的
@@ -261,10 +261,13 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
     dashboard 经 node 通道（#135）、magic-link 认证（#138）、invite /
     remove 写操作 + CSRF + audit（#140），均 2026-10-05 落地；e2e 见
     `scripts/e2e/web/e2e-web.sh`（invite + remove 全流程，含被删节点
-    relay link 死亡的进程级断言，#145）。⬜ 未实现：浏览器 terminal 复用
-    OpenMirror/RawPty/Resize；一行安装命令。另：部署形态当前为独立
-    `waitagent web serve` 子命令，`relay serve` 不自动拉起 web 面
-    （与上文"一体启动"表述的差异，随浏览器 terminal 一并定夺）。
+    relay link 死亡的进程级断言，#145）。✅ 已落地（2026-10-06）— 部署
+    形态一体启动：`relay serve --web [--web-listen <addr>]` 在同进程内
+    拉起 web 面（#142），fail-stop 单 Lifetime（任一半退出整进程退出；
+    web 缺失部署配置时启动即失败而不是跑无头 relay）；web 半仍走
+    loopback 标准 node↔relay 协议入网。进程级 e2e 见
+    `scripts/e2e/web/e2e-web.sh` phase 2。⬜ 未实现：浏览器 terminal 复用
+    OpenMirror/RawPty/Resize；一行安装命令。
 
 兼容性承诺（issue #137 核验，2026-10-05）：未配置 relay 时 relay client
 不安装（`src/ratatui_node/runtime.rs` 仅在 relay.toml 存在时建立长连接），

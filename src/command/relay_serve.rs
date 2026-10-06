@@ -20,10 +20,11 @@ use crate::infra::node_credentials::{self, NodeCredentialPaths};
 use crate::infra::relay_admin::{relay_admin_addr, relay_not_running_guidance};
 use crate::infra::relay_serve_toml_store::RelayServeTomlConfig;
 use crate::infra::relay_server::{
-    self, RelayServeConfig, TokenTtlConfig, DEFAULT_RELAY_LISTEN_PORT,
+    self, RelayServeConfig, RelayServerHandle, TokenTtlConfig, DEFAULT_RELAY_LISTEN_PORT,
 };
 use crate::lifecycle::LifecycleError;
 use crate::platform::remote_ipc::RemoteControlAsyncStream;
+use crate::web::serve::WebServeConfig;
 
 fn default_listen_text() -> String {
     format!("0.0.0.0:{DEFAULT_RELAY_LISTEN_PORT}")
@@ -128,6 +129,14 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
         };
     }
 
+    // `--web` resolves the WebUI config up front so a bad `--web-listen`
+    // fails before the relay binds anything.
+    let web_config = if command.web {
+        Some(build_web_config(&command)?)
+    } else {
+        None
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -165,10 +174,81 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
         );
         println!("admin socket: {}", handle.admin_addr());
         println!("active connections: {}", handle.active_connections());
-        handle.wait_until_stopped().await;
-        println!("relay stopped");
-        Ok(())
+        match web_config {
+            Some(web_config) => run_web_supervised(handle, web_config).await,
+            None => {
+                handle.wait_until_stopped().await;
+                println!("relay stopped");
+                Ok(())
+            }
+        }
     })
+}
+
+/// Assembles the WebUI config for `relay serve --web`: the stock
+/// `waitagent web serve` defaults (WebServeConfig::from_waitagent_home),
+/// with the optional `--web-listen` override applied.
+fn build_web_config(command: &RelayServeCommand) -> Result<WebServeConfig, AppError> {
+    let mut config = WebServeConfig::from_waitagent_home();
+    if let Some(listen) = &command.web_listen {
+        config.listen = listen.parse().map_err(|error| {
+            AppError::Lifecycle(LifecycleError::Protocol(format!(
+                "invalid --web-listen address {listen:?}: {error}"
+            )))
+        })?;
+    }
+    Ok(config)
+}
+
+/// Runs the WebUI half alongside the relay under fail-stop supervision
+/// (issue #142): the two halves share one process lifetime, and either
+/// half ending ends the whole unit.
+///
+/// * Relay ends first (admin `shutdown` or a listener error) -> the web
+///   task is aborted and the process exits.
+/// * Web ends first (startup failure, runtime crash, or a Ctrl-C that
+///   drains the axum server) -> the relay is shut down through the cloned
+///   shutdown sender; a web failure propagates as the process error, so
+///   `relay serve --web` without a deployment config (webui.toml, pinned
+///   relay.toml) dies at startup with the web error instead of running a
+///   headless relay.
+///
+/// No mutable state crosses the halves: the web service talks to the relay
+/// over the loopback-standard node<->relay protocol, and the only coupling
+/// is the shutdown channel.
+async fn run_web_supervised(
+    handle: RelayServerHandle,
+    web_config: WebServeConfig,
+) -> Result<(), AppError> {
+    let relay_shutdown = handle.shutdown_sender();
+    let relay_wait = handle.wait_until_stopped();
+    tokio::pin!(relay_wait);
+    let mut web_task = tokio::spawn(async move { crate::web::serve::run(&web_config).await });
+    tokio::select! {
+        _ = &mut relay_wait => {
+            // Relay first: the web half exits with the process.
+            web_task.abort();
+            let _ = web_task.await;
+            println!("relay stopped");
+            Ok(())
+        }
+        outcome = &mut web_task => {
+            // Web first: bring the relay down for a single clean exit, then
+            // propagate the web outcome.
+            let _ = relay_shutdown.send(true);
+            relay_wait.await;
+            println!("relay stopped");
+            match outcome {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(AppError::Lifecycle(LifecycleError::Protocol(
+                    format!("web service stopped: {error}"),
+                ))),
+                Err(join_error) => Err(AppError::Lifecycle(LifecycleError::Protocol(
+                    format!("web service task failed: {join_error}"),
+                ))),
+            }
+        }
+    }
 }
 
 pub fn run_status(command: RelayStatusCommand) -> Result<(), AppError> {
@@ -327,12 +407,51 @@ mod tests {
         let command = RelayServeCommand {
             listen: Some("127.0.0.1:1111".to_string()),
             authorized_nodes_dir: Some("/tmp/cli-whitelist".to_string()),
+            ..RelayServeCommand::default()
         };
         let config = build_serve_config(&command, Some(&file)).expect("assembly should succeed");
         assert_eq!(config.listen.to_string(), "127.0.0.1:1111");
         assert_eq!(
             config.authorized_nodes_dir,
             PathBuf::from("/tmp/cli-whitelist")
+        );
+    }
+
+    #[test]
+    fn web_config_defaults_match_standalone_web_serve() {
+        let config = build_web_config(&RelayServeCommand {
+            web: true,
+            ..RelayServeCommand::default()
+        })
+        .expect("assembly should succeed");
+        let standalone = WebServeConfig::from_waitagent_home();
+        assert_eq!(config.listen, standalone.listen);
+        assert_eq!(config.credentials, standalone.credentials);
+        assert_eq!(config.relay_toml_path, standalone.relay_toml_path);
+    }
+
+    #[test]
+    fn web_config_applies_the_web_listen_override() {
+        let config = build_web_config(&RelayServeCommand {
+            web: true,
+            web_listen: Some("127.0.0.1:9999".to_string()),
+            ..RelayServeCommand::default()
+        })
+        .expect("assembly should succeed");
+        assert_eq!(config.listen.to_string(), "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn web_config_rejects_a_bad_web_listen_address() {
+        let error = build_web_config(&RelayServeCommand {
+            web: true,
+            web_listen: Some("not-an-addr".to_string()),
+            ..RelayServeCommand::default()
+        })
+        .expect_err("a bad --web-listen must fail");
+        assert!(
+            error.to_string().contains("--web-listen"),
+            "the error names the flag: {error}"
         );
     }
 
