@@ -10,6 +10,11 @@ pub struct RelayServeCommand {
     pub listen: Option<String>,
     /// authorized_nodes whitelist directory override.
     pub authorized_nodes_dir: Option<String>,
+    /// Launch the WebUI service alongside the relay (issue #142): one
+    /// process, still the loopback-standard node<->relay protocol.
+    pub web: bool,
+    /// WebUI listen address override for `--web` (default `0.0.0.0:8788`).
+    pub web_listen: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -146,6 +151,22 @@ fn parse_relay_serve(mut args: Vec<String>) -> Result<RelayServeCommand, CliErro
                 args.remove(0);
                 command.authorized_nodes_dir = Some(value);
             }
+            "--web" => {
+                args.remove(0);
+                command.web = true;
+            }
+            "--web-listen" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--web-listen".to_string()))?;
+                args.remove(0);
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidValue("--web-listen".to_string(), value));
+                }
+                command.web_listen = Some(value);
+            }
             "--help" | "-h" => return Ok(command),
             _ => return Err(CliError::UnexpectedArgument(flag)),
         }
@@ -264,9 +285,43 @@ mod tests {
             Command::RelayServe(command) => {
                 assert_eq!(command.listen, None);
                 assert_eq!(command.authorized_nodes_dir, None);
+                assert!(!command.web);
+                assert_eq!(command.web_listen, None);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_relay_serve_web_flags() {
+        match parse(&[
+            "waitagent",
+            "relay",
+            "serve",
+            "--web",
+            "--web-listen",
+            "127.0.0.1:9999",
+        ])
+        .command
+        {
+            Command::RelayServe(command) => {
+                assert!(command.web);
+                assert_eq!(command.web_listen.as_deref(), Some("127.0.0.1:9999"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_serve_web_listen_requires_a_value() {
+        assert_eq!(
+            parse_error(&["waitagent", "relay", "serve", "--web-listen"]),
+            "missing value for --web-listen"
+        );
+        assert_eq!(
+            parse_error(&["waitagent", "relay", "serve", "--web-listen", " "]),
+            "invalid value for --web-listen:  "
+        );
     }
 
     #[test]

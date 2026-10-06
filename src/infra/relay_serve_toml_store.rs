@@ -1,7 +1,10 @@
 //! The relay's own `relay.toml`: static configuration for `relay serve`
 //! (~/.waitagent/relay.toml). Hand-rolled two-column TOML-lines, same idiom
 //! as `relay_toml_store` / `settings_store`: `key = value` lines, `#`
-//! comments, unknown keys rejected naming the key.
+//! comments, unknown keys rejected naming the key — except the node-side
+//! pin keys (`address`, `relay_fingerprint`, `heartbeat_interval_secs`),
+//! which share this file by design and are ignored here (see
+//! [`default_path`]).
 //!
 //! Every key is optional — the file may set any subset and `relay serve`
 //! fills the rest from CLI flags and defaults (precedence: CLI > file >
@@ -59,8 +62,9 @@ pub struct RelayServeTomlConfig {
 }
 
 /// The default path: `waitagent_home()/relay.toml` — the same file the node
-/// side pins its relay into; a host runs either the node or the relay, so
-/// the shared name stays unambiguous.
+/// side pins its relay into. The two schemas share the path by design; the
+/// parser ignores the other schema's keys, so a host running both the relay
+/// and a node (e.g. `relay serve --web`) keeps one file (issue #142).
 pub(crate) fn default_path() -> PathBuf {
     waitagent_home().join("relay.toml")
 }
@@ -225,6 +229,13 @@ fn parse_serve_toml(text: &str) -> Result<RelayServeTomlConfig, RelayServeTomlSt
                 config.capacity_max_throughput_bytes_per_sec =
                     Some(parse_positive_secs(&key, &value)?);
             }
+            // The node-side pin schema shares this file by design
+            // (relay_serve_toml_store::default_path): a host running
+            // `relay serve --web` holds BOTH the relay config keys and the
+            // web node's pin (`relay join` output). Relay serve consumes
+            // only its own keys; the pin keys are ignored here and stay
+            // meaningful to the node side (issue #142).
+            "address" | "relay_fingerprint" | "heartbeat_interval_secs" => {}
             other => {
                 return Err(RelayServeTomlStoreError::new(format!(
                     "unknown relay.toml field `{other}`"
@@ -374,6 +385,41 @@ mod tests {
             ..RelayServeTomlConfig::default()
         };
         assert_eq!(loaded, Some(expected));
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn ignores_the_node_pin_schema_sharing_the_file() {
+        // `relay join` writes the node-side pin to the same default path; a
+        // host running `relay serve --web` holds both schemas in one file,
+        // and relay serve must start from it (issue #142).
+        let path = unique_path("node-pin");
+        fs::write(
+            &path,
+            "address = \"127.0.0.1:7475\"\nrelay_fingerprint = \"ab12\"\nheartbeat_interval_secs = 10\n",
+        )
+        .expect("write should succeed");
+        let loaded = RelayServeTomlConfig::load(&path).expect("load should succeed");
+        assert_eq!(loaded, Some(RelayServeTomlConfig::default()));
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn node_pin_keys_do_not_mask_relay_config_keys() {
+        let path = unique_path("mixed");
+        fs::write(
+            &path,
+            "address = \"127.0.0.1:7475\"\nrelay_fingerprint = \"ab12\"\nlisten = \"127.0.0.1:9999\"\n",
+        )
+        .expect("write should succeed");
+        let loaded = RelayServeTomlConfig::load(&path).expect("load should succeed");
+        assert_eq!(
+            loaded,
+            Some(RelayServeTomlConfig {
+                listen: Some("127.0.0.1:9999".parse().expect("socket addr")),
+                ..RelayServeTomlConfig::default()
+            })
+        );
         crate::infra::best_effort::remove_file(&path);
     }
 

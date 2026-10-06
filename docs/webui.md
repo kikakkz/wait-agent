@@ -8,7 +8,13 @@ remove)全部经它的已认证长连接送达 relay——同机也不开进程�
 
 ## 启动形态
 
-- 默认监听 `0.0.0.0:8788`(公网部署形态);启动时会打印暴露告警。
+- 一体启动(issue #142):`waitagent relay serve --web [--web-listen <addr>]`
+  在同进程内拉起 web 面——fail-stop 单 Lifetime,relay 退出 web 即退出,
+  web 启动失败/崩溃 relay 也随之退出(web 缺部署配置时启动即失败,不会
+  跑无头 relay)。web 半仍经 loopback 标准 node↔relay 协议入网,不开
+  进程内特例。
+- 独立启动:`waitagent web serve [--listen <addr>]`(默认
+  `0.0.0.0:8788`,公网部署形态;启动时会打印暴露告警)。
 - 纯本机使用:`--listen 127.0.0.1:8788` 回环绑定,无告警。
 - 前置条件:本机已 `relay join` 过(`~/.waitagent/relay.toml` 存在),
   且 `~/.waitagent/webui.toml` 已配置(缺失时启动报错并指引)。

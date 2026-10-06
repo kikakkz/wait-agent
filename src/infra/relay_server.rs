@@ -397,6 +397,15 @@ impl RelayServerHandle {
         let _ = self.task.await;
     }
 
+    /// Returns a clone of the shutdown sender: sending `true` stops the
+    /// accept loop, the sweeper, and every link task — the same path as the
+    /// admin `shutdown` command — after which [`wait_until_stopped`](Self::wait_until_stopped)
+    /// completes. Lets a co-runtime supervisor (e.g. the WebUI half of
+    /// `relay serve --web`) bring the relay down without owning the handle.
+    pub fn shutdown_sender(&self) -> watch::Sender<bool> {
+        self.shutdown_tx.clone()
+    }
+
     /// Stops the accept loop, the sweeper, and every link task.
     ///
     /// Dropping the handle without calling `shutdown` has the same effect:
