@@ -48,8 +48,11 @@ SMTP host/port/TLS 按邮箱域名从内置服务商表选择,用户只填邮箱
    admin_email 才发信**(其余地址得到相同的中性回答,防轰炸/探测);
    限流 3 次/10 分钟/IP。
 2. 邮件内含 `public_base_url + /auth/magic?token=...`。token 为
-   Ed25519 签名的 JWT(服务端密钥 `~/.waitagent/web-auth.key`,首启
-   生成,0600;备份它,轮换命令另立项),magic TTL 10 分钟、一次性
+   Ed25519 签名的 JWT(**服务端密钥为内存临时 Ed25519 keypair**,每次启动
+   新生成、不落盘——issue #143;重启天然轮换,旧 token 验签失败即视为未
+   认证,重新走 magic link 即可;没有 key 文件需要备份,原轮换命令诉求
+   由此消解。注意与 relay 节点凭据不同:节点证书指纹绑定白名单身份,必须
+   持久),magic TTL 10 分钟、一次性
    (任何兑换尝试即消耗)。
 3. 兑换时校验设备指纹:SHA-256(客户端IP[经 trusted_proxies 取真值]
    + User-Agent + JS 探针 platform/timezone/language/screen)。**同机

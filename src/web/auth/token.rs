@@ -6,16 +6,16 @@
 //! new transitive crates): the JWT envelope is 20 lines and fully unit
 //! tested, and `jsonwebtoken` would pull in the same primitives plus more.
 //!
-//! The server keypair is generated on first start at
-//! `waitagent_home()/web-auth.key` (PKCS#8 PEM, 0600 on unix) and derived
-//! from `rcgen`'s Ed25519 facility; the public half is re-derived on every
-//! load, so the file is the single secret to back up (rotation command:
-//! separate issue, per #131).
+//! The server keypair is EPHEMERAL (issue #143): a fresh in-memory Ed25519
+//! keypair is generated on every boot — nothing is ever written to disk, so
+//! there is no key file to back up or rotate, and a restart naturally
+//! rotates the key (every session logs out; an old JWT fails verification,
+//! which the auth layer treats as unauthenticated and the operator simply
+//! walks the magic-link flow again). This is deliberately different from the
+//! relay node credentials: those bind the whitelist identity and MUST
+//! persist.
 
 use std::fmt;
-use std::fs;
-use std::io;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -56,24 +56,17 @@ pub struct WebAuthKeys {
 }
 
 impl WebAuthKeys {
-    /// Loads the keypair at `path`, generating and persisting it (0600 on
-    /// unix, raw PKCS#8 DER) when absent.
-    pub fn load_or_generate(path: &Path) -> Result<Self, AuthKeyError> {
-        if path.is_file() {
-            let pkcs8 = fs::read(path)?;
-            let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|_| {
-                AuthKeyError::Parse(format!("{} is not valid Ed25519 PKCS#8", path.display()))
-            })?;
-            return Ok(Self { key_pair });
-        }
+    /// Generates a fresh in-memory keypair (issue #143). Every boot gets a
+    /// new key: no file touches disk, old tokens fail verification, and the
+    /// operator re-authenticates through the magic-link flow.
+    pub fn generate() -> Result<Self, AuthKeyError> {
         let rng = SystemRandom::new();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
             .map_err(|_| AuthKeyError::Generate("ring key generation failed".to_string()))?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        write_private_key(path, pkcs8.as_ref())?;
-        Self::load_or_generate(path)
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| {
+            AuthKeyError::Parse("freshly generated key is not valid Ed25519 PKCS#8".to_string())
+        })?;
+        Ok(Self { key_pair })
     }
 
     /// Signs `claims` into a compact JWT.
@@ -152,7 +145,6 @@ pub fn now_unix() -> u64 {
 /// Errors of the web auth keys and JWT envelope.
 #[derive(Debug)]
 pub enum AuthKeyError {
-    Io(io::Error),
     Generate(String),
     Parse(String),
     Encode(String),
@@ -165,7 +157,6 @@ pub enum AuthKeyError {
 impl fmt::Display for AuthKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(f, "io error: {error}"),
             Self::Generate(message) => write!(f, "key generation failed: {message}"),
             Self::Parse(message) => write!(f, "key parse failed: {message}"),
             Self::Encode(message) => write!(f, "claims encode failed: {message}"),
@@ -179,49 +170,9 @@ impl fmt::Display for AuthKeyError {
 
 impl std::error::Error for AuthKeyError {}
 
-impl From<io::Error> for AuthKeyError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-fn write_private_key(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(contents)?;
-        file.flush()?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, contents)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_key_path(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "waitagent-web-auth-{name}-{}-{}.key",
-            std::process::id(),
-            std::thread::current()
-                .name()
-                .unwrap_or("test")
-                .replace(":", "_")
-        ));
-        let _ = fs::remove_file(&path);
-        path
-    }
 
     fn claims(sub: &str, fp: &str, iat: u64, ttl: u64) -> Claims {
         Claims {
@@ -234,38 +185,40 @@ mod tests {
     }
 
     #[test]
-    fn sign_verify_round_trip_and_regeneration_keeps_identity() {
-        let path = temp_key_path("round-trip");
-        let keys = WebAuthKeys::load_or_generate(&path).expect("generate");
+    fn sign_verify_round_trip() {
+        let keys = WebAuthKeys::generate().expect("generate");
         let token = keys
             .sign(&claims("magic", "fp-1", now_unix(), MAGIC_TTL_SECS))
             .expect("sign");
         let verified = keys.verify(&token, "magic").expect("verify");
         assert_eq!(verified.sub, "magic");
         assert_eq!(verified.fp, "fp-1");
-
-        // A second process loading the same file sees the same keypair.
-        let reloaded = WebAuthKeys::load_or_generate(&path).expect("reload");
-        let verified = reloaded.verify(&token, "magic").expect("reloaded verifies");
-        assert_eq!(verified.fp, "fp-1");
-        crate::infra::best_effort::remove_file(&path);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn key_file_has_600_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = temp_key_path("perms");
-        WebAuthKeys::load_or_generate(&path).expect("generate");
-        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        crate::infra::best_effort::remove_file(&path);
+    fn every_generation_rotates_the_key_and_old_tokens_stop_verifying() {
+        // Restart rotation (issue #143): a fresh boot signs with a new
+        // keypair, so tokens from before the restart fail verification and
+        // the operator re-authenticates via the magic link.
+        let before = WebAuthKeys::generate().expect("generate before");
+        let token = before
+            .sign(&claims("session", "fp", now_unix(), SESSION_TTL_SECS))
+            .expect("sign");
+        let after = WebAuthKeys::generate().expect("generate after");
+        assert!(matches!(
+            after.verify(&token, "session"),
+            Err(AuthKeyError::BadSignature)
+        ));
+        // The same-boot key still verifies its own token.
+        let fresh = after
+            .sign(&claims("session", "fp", now_unix(), SESSION_TTL_SECS))
+            .expect("sign");
+        assert!(after.verify(&fresh, "session").is_ok());
     }
 
     #[test]
     fn tampered_signature_and_payload_are_rejected() {
-        let path = temp_key_path("tamper");
-        let keys = WebAuthKeys::load_or_generate(&path).expect("generate");
+        let keys = WebAuthKeys::generate().expect("generate");
         let token = keys
             .sign(&claims("session", "fp", now_unix(), SESSION_TTL_SECS))
             .expect("sign");
@@ -289,13 +242,11 @@ mod tests {
             keys.verify(&bad_sig, "session"),
             Err(AuthKeyError::BadSignature)
         ));
-        crate::infra::best_effort::remove_file(&path);
     }
 
     #[test]
     fn wrong_subject_expired_and_malformed_are_rejected() {
-        let path = temp_key_path("subjects");
-        let keys = WebAuthKeys::load_or_generate(&path).expect("generate");
+        let keys = WebAuthKeys::generate().expect("generate");
         let magic = keys
             .sign(&claims("magic", "fp", now_unix(), MAGIC_TTL_SECS))
             .expect("sign");
@@ -327,7 +278,6 @@ mod tests {
             keys.verify(&extra, "magic"),
             Err(AuthKeyError::Malformed)
         ));
-        crate::infra::best_effort::remove_file(&path);
     }
 
     #[test]
