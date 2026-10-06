@@ -28,10 +28,11 @@
 #   presence  — a peer's relay liveness drives the remote session row's
 #               availability on the observer node: online -> offline while
 #               the peer is partitioned, back online on heal.
-#   joinkeypaths — `relay join` honors the global --node-key-path /
-#               --node-cert-path overrides: a node seeded with a default
-#               identity enrolls (and is whitelisted under) the custom
-#               certificate's fingerprint instead (issue #141).
+#   joinkeypaths — the global --node-key-path/--node-cert-path overrides
+#               are honored end to end: a node seeded with a default
+#               identity enrolls (and comes fully ONLINE) under the custom
+#               certificate's fingerprint instead — join (#141) and the
+#               runtime relay link (#151) share one identity source.
 #
 # Usage: e2e-relay.sh [scenario ...]
 #   scenarios: smoke (default), reconnect, reregister, streams, direct,
@@ -252,14 +253,13 @@ scenario_joinkeypaths() {
     # Seed the DEFAULT credential location with a distinct identity before
     # joining through the custom paths. If join ignored the overrides, the
     # whitelist entry would be the default identity's fingerprint and
-    # /tmp/custom would never be created. (The node runtime's own relay
-    # link still uses the default paths — issue #151 — so this scenario
-    # asserts the join-time ground truth, not a live registration.)
-    docker run -d --name "$NODE_A" --network "$NET_A" "$IMAGE" \
+    # /tmp/custom would never be created.
+    docker run -dt --name "$NODE_A" --network "$NET_A" "$IMAGE" \
         sh -c "waitagent __generate-node-credentials > /tmp/default-creds.txt && \
             waitagent --node-key-path /tmp/custom/node.key --node-cert-path /tmp/custom/node.crt \
                 relay join relay:$RELAY_PORT '$token' && \
-            sleep 365d" >/dev/null
+            exec waitagent --node-key-path /tmp/custom/node.key --node-cert-path /tmp/custom/node.crt \
+                --port $NODE_PORT_A" >/dev/null
 
     # The join must whitelist exactly one node: the custom identity.
     local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
@@ -294,7 +294,15 @@ scenario_joinkeypaths() {
     [ "$custom_fp" != "$default_fp" ] \
         || die "join enrolled the default identity despite the overrides"
 
-    log "joinkeypaths OK: join enrolled the custom identity ($custom_fp), not the seeded default ($default_fp)"
+    # Full-online anchor (issue #151): the node server registers its relay
+    # link under the SAME custom identity (not the seeded default), so the
+    # relay's connection table must show exactly the whitelisted
+    # fingerprint online. Before the runtime honored the overrides this
+    # steady-stated as whitelist client-auth refusals (UnknownIssuer).
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+    assert_running "$NODE_A"
+
+    log "joinkeypaths OK: custom identity ($custom_fp) enrolled AND online, not the seeded default ($default_fp)"
 }
 
 scenario_reconnect() {
