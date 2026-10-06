@@ -1174,7 +1174,7 @@ impl RatatuiNodeRuntime {
             });
         let mut _relay_forwarder = None;
         if let Some(relay) = relay_config {
-            let credentials = NodeCredentialPaths::default_paths();
+            let credentials = relay_link_credentials(&self.network);
             if let Err(error) = crate::infra::node_credentials::ensure_credentials(&credentials) {
                 ERROR_LOG.log(format!(
                     "[ratatui-node] relay client credentials failed: {error}"
@@ -1500,6 +1500,19 @@ fn forward_relay_link_events(
     }
 }
 
+/// The identity the persistent relay link enrolls/registers under. This
+/// MUST be the same credential source the ingress server presents, so the
+/// relay link honors the `--node-key-path`/`--node-cert-path` overrides
+/// exactly like `relay join` does (issue #151); a node enrolled through
+/// custom paths would otherwise register under the default identity and
+/// get refused by the relay's whitelist.
+fn relay_link_credentials(network: &RemoteNetworkConfig) -> NodeCredentialPaths {
+    NodeCredentialPaths::resolve_overrides(
+        network.node_key_path.as_deref(),
+        network.node_cert_path.as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod forwarder_tests {
     use super::*;
@@ -1684,6 +1697,30 @@ mod runtime_tests {
 
         shared.clients.client_count.fetch_sub(1, Ordering::SeqCst);
         assert_eq!(shared.clients.client_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn relay_link_credentials_follow_the_network_overrides() {
+        // The relay link must enroll/register under the SAME identity the
+        // ingress server presents (issue #151): an explicit
+        // --node-key-path/--node-cert-path pair wins, otherwise the
+        // defaults apply — the same resolution `relay join` uses.
+        let custom = relay_link_credentials(&RemoteNetworkConfig {
+            node_key_path: Some("/tmp/custom.key".to_string()),
+            node_cert_path: Some("/tmp/custom.crt".to_string()),
+            ..RemoteNetworkConfig::default()
+        });
+        assert_eq!(
+            custom,
+            NodeCredentialPaths {
+                key_path: "/tmp/custom.key".into(),
+                cert_path: "/tmp/custom.crt".into(),
+            }
+        );
+        assert_eq!(
+            relay_link_credentials(&RemoteNetworkConfig::default()),
+            NodeCredentialPaths::default_paths()
+        );
     }
 
     #[test]
