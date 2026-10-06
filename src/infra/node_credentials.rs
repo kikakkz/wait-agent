@@ -37,6 +37,19 @@ impl NodeCredentialPaths {
             cert_path: PathBuf::from("$HOME/.waitagent/node.crt"),
         }
     }
+
+    /// Resolves the credential paths from the optional `--node-key-path` /
+    /// `--node-cert-path` overrides: both present win, any other combination
+    /// falls back to [`default_paths`].
+    pub fn resolve_overrides(node_key_path: Option<&str>, node_cert_path: Option<&str>) -> Self {
+        match (node_key_path, node_cert_path) {
+            (Some(key_path), Some(cert_path)) => Self {
+                key_path: PathBuf::from(key_path),
+                cert_path: PathBuf::from(cert_path),
+            },
+            _ => Self::default_paths(),
+        }
+    }
 }
 
 /// Errors that can occur while generating or loading node credentials.
@@ -272,6 +285,32 @@ mod tests {
             key_path: dir.join("node.key"),
             cert_path: dir.join("node.crt"),
         }
+    }
+
+    #[test]
+    fn resolve_overrides_prefers_the_pair_and_defaults_otherwise() {
+        let both = NodeCredentialPaths::resolve_overrides(Some("/tmp/k"), Some("/tmp/c"));
+        assert_eq!(
+            both,
+            NodeCredentialPaths {
+                key_path: PathBuf::from("/tmp/k"),
+                cert_path: PathBuf::from("/tmp/c"),
+            }
+        );
+        // A lone override is not a usable pair: the defaults win, exactly
+        // like `relay serve` and `__generate-node-credentials` treat it.
+        assert_eq!(
+            NodeCredentialPaths::resolve_overrides(Some("/tmp/k"), None),
+            NodeCredentialPaths::default_paths()
+        );
+        assert_eq!(
+            NodeCredentialPaths::resolve_overrides(None, Some("/tmp/c")),
+            NodeCredentialPaths::default_paths()
+        );
+        assert_eq!(
+            NodeCredentialPaths::resolve_overrides(None, None),
+            NodeCredentialPaths::default_paths()
+        );
     }
 
     #[test]
