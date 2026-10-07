@@ -2273,7 +2273,10 @@ fn perform_remote_host_connect(
         tls_pin_sha256: profile.tls_pin_sha256.clone().unwrap_or_default(),
         profile_name: profile.name.clone(),
         server_can_reach_peer: true,
-        via: profile.via(),
+        // The path that actually took effect: the explicit choice, or —
+        // for auto — the path remembered by the last successful connect
+        // (issue #156 slice 2).
+        via: profile.effective_via(),
     });
 
     remote_owner
@@ -2371,11 +2374,21 @@ fn dial_sibling_nodes(
         ERROR_LOG.log(format!(
             "[ratatui-state-loop] dialing sibling node {node_id}"
         ));
+        let endpoint_uri = format!("tls://{}:{}", profile.host, port);
+        // Sibling nodes share the host but not the port, so an auto profile
+        // re-probes per port: direct first, relay fallback (issue #156
+        // slice 2).
+        let resolved_via = crate::infra::remote_grpc_transport::resolve_via_for_dial(
+            profile.via(),
+            &endpoint_uri,
+            Some(tls_pin_sha256.as_str()).filter(|pin| !pin.is_empty()),
+            crate::infra::remote_grpc_transport::auto_direct_probe_timeout(),
+        );
         let request = OutboundNodeSessionRequest {
             node_id,
-            endpoint_uri: format!("tls://{}:{}", profile.host, port),
+            endpoint_uri,
             tls_pin_sha256: Some(tls_pin_sha256.clone()).filter(|pin| !pin.is_empty()),
-            via: profile.via(),
+            via: resolved_via.to_request_via(),
         };
         if ingress_tx
             .send(InternalEvent::InitiateOutboundConnection { request })
@@ -2397,6 +2410,15 @@ fn apply_remote_host_connect_outcome(
     activate: bool,
     outcome: RemoteHostConnectedOutcome,
 ) -> CommandOutcome {
+    // Name the dial path that took effect so an auto connect reports, e.g.,
+    // "connected node-b#9002 via relay" — the visible anchor for the
+    // direct-first/relay-fallback outcome (issue #156 slice 2).
+    let via_suffix = outcome
+        .connection_info
+        .as_ref()
+        .and_then(|info| info.via)
+        .map(|via| format!(" via {}", via.as_str()))
+        .unwrap_or_default();
     if let Some(info) = outcome.connection_info {
         shared.record_remote_node_connection(&outcome.authority_node_id, info);
     }
@@ -2439,7 +2461,7 @@ fn apply_remote_host_connect_outcome(
         ));
     }
 
-    CommandOutcome::Message(format!("connected {target}"))
+    CommandOutcome::Message(format!("connected {target}{via_suffix}"))
 }
 
 #[allow(clippy::too_many_arguments)]

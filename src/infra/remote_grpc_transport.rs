@@ -43,14 +43,23 @@ const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const OPERATOR_AUTH_CHALLENGE_SIZE: usize = 32;
 
-/// How an outbound node session reaches its peer (issue #35 PR-B).
+/// How an outbound node session reaches its peer (issue #35 PR-B; `Auto`
+/// added by issue #156 slice 2).
 ///
 /// `Direct` dials the peer's listening TCP port as before. `Relay` routes the
 /// inner-TLS connection through the pinned relay as a routed stream opened by
 /// the peer's certificate fingerprint (the same `tls_pin_sha256` the direct
-/// dial pins). Profiles store the choice as the `via` string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// dial pins). `Auto` is a profile-level choice only: the connect runtime
+/// resolves it to `Direct` or `Relay` before dialing (direct probe first,
+/// relay fallback), so dial requests themselves never carry `Auto`.
+/// Profiles store the choice as the `via` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemoteNodeVia {
+    /// Probe a direct dial first, fall back to the relay when the probe
+    /// fails. The default for profiles with no `via` key (legacy entries
+    /// migrate from implicit-direct to auto; issue #156 slice 2).
+    #[default]
+    Auto,
     /// Dial the peer directly over TCP (today's behavior).
     Direct,
     /// Reach the peer through the pinned relay's routed streams.
@@ -62,10 +71,11 @@ impl RemoteNodeVia {
     /// time; consumers of already-validated profiles may use the `Ok` arm.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "auto" => Ok(Self::Auto),
             "direct" => Ok(Self::Direct),
             "relay" => Ok(Self::Relay),
             other => Err(format!(
-                "unknown via value {other:?}; expected \"relay\" or \"direct\""
+                "unknown via value {other:?}; expected \"auto\", \"relay\" or \"direct\""
             )),
         }
     }
@@ -73,8 +83,39 @@ impl RemoteNodeVia {
     /// The profile-file spelling.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Direct => "direct",
             Self::Relay => "relay",
+        }
+    }
+
+    /// Short UI label for the connect-popup choice row.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Direct => "Direct",
+            Self::Relay => "Relay",
+        }
+    }
+
+    /// Cycles Auto -> Direct -> Relay (and back), matching the two-value
+    /// `RemoteHostKind::shift` interaction used by the choice rows.
+    pub fn shift(self, step: i32) -> Self {
+        let values = [Self::Auto, Self::Direct, Self::Relay];
+        let index = values.iter().position(|value| *value == self).unwrap_or(0) as i32;
+        let len = values.len() as i32;
+        values[((index + step).rem_euclid(len)) as usize]
+    }
+
+    /// How this concrete path appears on an [`OutboundNodeSessionRequest`]:
+    /// `None` preserves the pre-auto convention that an absent `via` means
+    /// direct. `Auto` never reaches a dial request (the connect runtime
+    /// resolves it first), so it maps to `Some(Auto)` where the transport
+    /// rejects it with the resolution-invariant error.
+    pub fn to_request_via(self) -> Option<Self> {
+        match self {
+            Self::Direct => None,
+            other => Some(other),
         }
     }
 }
@@ -94,6 +135,136 @@ pub(crate) enum PeerDialer {
 /// Error message for a relay-via dial when this node never enrolled a relay
 /// (kept verbatim: the connect UI surfaces it to the operator).
 const NO_RELAY_CONFIGURED: &str = "via = \"relay\" but no relay is configured — run waitagent relay join <address> <token> or set via = \"direct\"";
+
+/// Default cap on the `via = "auto"` direct probe (issue #156 slice 2). A
+/// reachable peer's TCP connect plus pinned TLS handshake lands well under a
+/// second on a LAN; 5s absorbs cross-subnet/NAT jitter while keeping the
+/// relay fallback snappy. Both auto attempts are bounded (probe plus the
+/// existing per-leg wait budgets), so the stacked worst case stays a few
+/// seconds over a plain connect.
+const DEFAULT_AUTO_DIRECT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Test/tuning override for the auto direct probe, in milliseconds.
+/// Values that parse to zero fall back to the default.
+const AUTO_PROBE_TIMEOUT_ENV: &str = "WAITAGENT_AUTO_DIRECT_PROBE_TIMEOUT_MS";
+
+/// The dial-path timeout the `via = "auto"` direct probe is capped at.
+pub fn auto_direct_probe_timeout() -> Duration {
+    std::env::var(AUTO_PROBE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_AUTO_DIRECT_PROBE_TIMEOUT)
+}
+
+/// Resolves the profile `via` for one concrete dial attempt (issue #156
+/// slice 2). Explicit `direct`/`relay` pass through untouched (no silent
+/// fallback, so misconfigurations stay diagnosable). `auto` probes the
+/// direct path first — TCP connect plus the pinned TLS handshake, capped at
+/// `probe_timeout` — and falls back to `relay` when the probe fails. A
+/// missing pin keeps the legacy direct behavior: an unpinned relay dial has
+/// no routed target anyway, so direct is the only path that can work.
+///
+/// The probe runs the handshake on its own short-lived runtime in the
+/// caller's thread; the caller is expected to be a connect worker thread,
+/// never `StateEventLoop`.
+pub fn resolve_via_for_dial(
+    via: RemoteNodeVia,
+    endpoint_uri: &str,
+    tls_pin_sha256: Option<&str>,
+    probe_timeout: Duration,
+) -> RemoteNodeVia {
+    match via {
+        RemoteNodeVia::Auto => {
+            let pin = tls_pin_sha256.filter(|pin| !pin.is_empty());
+            match pin {
+                Some(pin) => {
+                    ERROR_LOG.log(format!(
+                        "[via-auto] trying direct dial to {endpoint_uri} (probe cap {probe_timeout:?})"
+                    ));
+                    match probe_direct_dial(endpoint_uri, Some(pin), probe_timeout) {
+                        Ok(()) => {
+                            ERROR_LOG.log(format!(
+                                "[via-auto] direct probe to {endpoint_uri} succeeded; dialing direct"
+                            ));
+                            RemoteNodeVia::Direct
+                        }
+                        Err(error) => {
+                            ERROR_LOG.log(format!(
+                                "[via-auto] direct probe to {endpoint_uri} failed ({error}); falling back to relay"
+                            ));
+                            RemoteNodeVia::Relay
+                        }
+                    }
+                }
+                None => {
+                    ERROR_LOG.log(format!(
+                        "[via-auto] no TLS pin for {endpoint_uri}; dialing direct (unpinned relay dial has no target)"
+                    ));
+                    RemoteNodeVia::Direct
+                }
+            }
+        }
+        concrete => concrete,
+    }
+}
+
+/// Probes whether a peer is directly reachable without opening a session:
+/// TCP connect plus — when a pin is present — the pinned TLS handshake,
+/// exactly the leg a direct dial would have to clear. Capped at `timeout`.
+/// The established channel is dropped on success; nothing is left pending in
+/// the ingress, so a subsequent relay dial cannot race this probe.
+pub fn probe_direct_dial(
+    endpoint_uri: &str,
+    tls_pin_sha256: Option<&str>,
+    timeout: Duration,
+) -> Result<(), RemoteNodeTransportError> {
+    let bare = endpoint_uri
+        .strip_prefix("tls://")
+        .or_else(|| endpoint_uri.strip_prefix("https://"))
+        .or_else(|| endpoint_uri.strip_prefix("http://"))
+        .unwrap_or(endpoint_uri);
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            RemoteNodeTransportError::new(format!("failed to build direct-probe runtime: {error}"))
+        })?;
+    runtime.block_on(async move {
+        let attempt = async {
+            let endpoint = Endpoint::from_shared(format!("http://{bare}"))
+                .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?
+                .tcp_nodelay(true)
+                .connect_timeout(timeout);
+            match tls_pin_sha256 {
+                Some(pin) => {
+                    let connector =
+                        TlsPinConnector::new_with_dialer(pin.to_string(), PeerDialer::Direct)?;
+                    // `connect_with_connector` resolves only after the TCP
+                    // connect, the pinned TLS handshake, and the HTTP/2
+                    // preface complete, so reaching this point proves the
+                    // direct leg works. The channel is dropped immediately.
+                    endpoint
+                        .connect_with_connector(connector)
+                        .await
+                        .map(|_channel| ())
+                        .map_err(|error| RemoteNodeTransportError::new(error.to_string()))
+                }
+                None => endpoint
+                    .connect()
+                    .await
+                    .map(|_channel| ())
+                    .map_err(|error| RemoteNodeTransportError::new(error.to_string())),
+            }
+        };
+        match tokio::time::timeout(timeout, attempt).await {
+            Ok(result) => result,
+            Err(_) => Err(RemoteNodeTransportError::new(format!(
+                "direct probe timed out after {timeout:?}"
+            ))),
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNodeSessionRequest {
@@ -339,6 +510,15 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 }
             },
             Some(RemoteNodeVia::Direct) | None => PeerDialer::Direct,
+            // Invariant: `via = "auto"` is resolved to a concrete path by the
+            // connect runtime before a dial request is built. Reaching this
+            // arm means a caller skipped the resolution — fail loudly rather
+            // than guess, so the bug surfaces in the connect UI and logs.
+            Some(RemoteNodeVia::Auto) => {
+                return Err(RemoteNodeTransportError::new(
+                    "via = \"auto\" must be resolved to \"direct\" or \"relay\" before dialing",
+                ));
+            }
         };
         let endpoint = self.endpoint(&tls_endpoint_uri(
             &request.endpoint_uri,
@@ -2174,5 +2354,240 @@ mod tests {
             assert_eq!(&buf, b"pong");
             server.await.expect("server task");
         });
+    }
+
+    #[test]
+    fn via_parse_accepts_three_values_and_rejects_unknown() {
+        assert_eq!(
+            super::RemoteNodeVia::parse("auto"),
+            Ok(super::RemoteNodeVia::Auto)
+        );
+        assert_eq!(
+            super::RemoteNodeVia::parse("direct"),
+            Ok(super::RemoteNodeVia::Direct)
+        );
+        assert_eq!(
+            super::RemoteNodeVia::parse("relay"),
+            Ok(super::RemoteNodeVia::Relay)
+        );
+        let error = super::RemoteNodeVia::parse("relays").expect_err("typo must fail");
+        let message = error.to_string();
+        for expected in ["\"auto\"", "\"relay\"", "\"direct\""] {
+            assert!(
+                message.contains(expected),
+                "the error names all legal values, missing {expected}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn via_defaults_to_auto_and_cycles_through_shift() {
+        assert_eq!(super::RemoteNodeVia::default(), super::RemoteNodeVia::Auto);
+        let via = super::RemoteNodeVia::Auto;
+        assert_eq!(via.shift(1), super::RemoteNodeVia::Direct);
+        assert_eq!(via.shift(2), super::RemoteNodeVia::Relay);
+        assert_eq!(via.shift(3), super::RemoteNodeVia::Auto);
+        assert_eq!(
+            super::RemoteNodeVia::Relay.shift(1),
+            super::RemoteNodeVia::Auto
+        );
+        assert_eq!(
+            super::RemoteNodeVia::Direct.shift(-1),
+            super::RemoteNodeVia::Auto
+        );
+        assert_eq!(super::RemoteNodeVia::Auto.as_str(), "auto");
+        assert_eq!(super::RemoteNodeVia::Auto.label(), "Auto");
+    }
+
+    #[test]
+    fn auto_via_request_fails_with_the_resolution_invariant() {
+        let transport = GrpcRemoteNodeTransport::new();
+        let (event_tx, _event_rx) = mpsc::channel::<RemoteNodeTransportEvent>();
+        let error = match transport.connect_outbound(
+            OutboundNodeSessionRequest {
+                node_id: "peer".to_string(),
+                endpoint_uri: "tls://127.0.0.1:7474".to_string(),
+                tls_pin_sha256: Some("deadbeef".to_string()),
+                via: Some(super::RemoteNodeVia::Auto),
+            },
+            event_tx,
+        ) {
+            Ok(_guard) => panic!("an unresolved auto via must fail before dialing"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("must be resolved"),
+            "the error names the skipped resolution step: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_via_keeps_explicit_choices_without_probing() {
+        // Unroutable endpoint: if these probed, they would come back as
+        // relay. Passing them through untouched proves explicit choices
+        // never fall back (issue #156: auto only).
+        let unroutable = format!("tls://{}", unused_local_addr());
+        for via in [super::RemoteNodeVia::Direct, super::RemoteNodeVia::Relay] {
+            assert_eq!(
+                super::resolve_via_for_dial(
+                    via,
+                    &unroutable,
+                    Some("deadbeef"),
+                    Duration::from_millis(200),
+                ),
+                via
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_via_auto_without_a_pin_stays_direct() {
+        let unroutable = format!("tls://{}", unused_local_addr());
+        assert_eq!(
+            super::resolve_via_for_dial(
+                super::RemoteNodeVia::Auto,
+                &unroutable,
+                None,
+                Duration::from_millis(200),
+            ),
+            super::RemoteNodeVia::Direct
+        );
+        // An empty pin behaves like no pin.
+        assert_eq!(
+            super::resolve_via_for_dial(
+                super::RemoteNodeVia::Auto,
+                &unroutable,
+                Some(""),
+                Duration::from_millis(200),
+            ),
+            super::RemoteNodeVia::Direct
+        );
+    }
+
+    #[test]
+    fn resolve_via_auto_probes_direct_and_falls_back_to_relay() {
+        // Nothing listens on the address: the direct probe fails fast and
+        // auto must fall back to relay.
+        let unroutable = format!("tls://{}", unused_local_addr());
+        assert_eq!(
+            super::resolve_via_for_dial(
+                super::RemoteNodeVia::Auto,
+                &unroutable,
+                Some("deadbeef"),
+                Duration::from_millis(500),
+            ),
+            super::RemoteNodeVia::Relay
+        );
+    }
+
+    #[test]
+    fn probe_direct_dial_succeeds_against_a_pinned_h2_listener() {
+        use sha2::Digest;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut params = rcgen::CertificateParams::new(vec!["waitagent".to_string()]);
+        params.alg = &rcgen::PKCS_ED25519;
+        let cert = rcgen::Certificate::from_params(params).expect("cert should generate");
+        let cert_der = cert.serialize_der().expect("cert should serialize");
+        let cert_pem = cert.serialize_pem().expect("cert pem should serialize");
+        let key_pem = cert.serialize_private_key_pem();
+        let spki = crate::infra::node_credentials::extract_spki_from_cert_der(&cert_der)
+            .expect("spki should extract");
+        let pin = super::hex_encode(&super::Sha256::digest(&spki));
+
+        let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let tls = tonic::transport::ServerTlsConfig::new().identity(identity);
+        let bind_addr = unused_local_addr();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        // Detached by design: tonic's serve_with_shutdown waits for accepted
+        // connections to drain, so the thread is never joined (same policy
+        // as the transport guard's Drop).
+        let _server_thread = std::thread::spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build");
+            runtime.block_on(async move {
+                tonic::transport::Server::builder()
+                    .tls_config(tls)
+                    .expect("tls config should build")
+                    .add_service(NodeSessionServiceServer::new(SilentHelloNodeSessionService))
+                    .serve_with_shutdown(bind_addr, async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("pinned h2 server should serve");
+            });
+        });
+
+        // Give the listener a moment to bind before probing.
+        std::thread::sleep(Duration::from_millis(200));
+        super::probe_direct_dial(
+            &format!("tls://{bind_addr}"),
+            Some(&pin),
+            Duration::from_secs(5),
+        )
+        .expect("the pinned direct probe should succeed against the real listener");
+        let _ = shutdown_tx.send(());
+    }
+
+    #[test]
+    fn probe_direct_dial_fails_against_wrong_pin_or_refused_tcp() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // TCP refused: nothing listens.
+        let unroutable = unused_local_addr();
+        let error = super::probe_direct_dial(
+            &format!("tls://{unroutable}"),
+            Some("deadbeef"),
+            Duration::from_secs(2),
+        )
+        .expect_err("a refused TCP connect must fail the probe");
+        assert!(
+            !error.to_string().is_empty(),
+            "the probe error should be descriptive"
+        );
+
+        // Plain h2 listener (no TLS) with a pin: the TLS handshake fails.
+        let transport = GrpcRemoteNodeTransport::new();
+        let (event_tx, _event_rx) = mpsc::channel::<RemoteNodeTransportEvent>();
+        let bind_addr = unused_local_addr();
+        let _guard = transport
+            .listen_inbound(bind_addr, event_tx)
+            .expect("plain listener should start");
+        super::probe_direct_dial(
+            &format!("tls://{bind_addr}"),
+            Some("deadbeef"),
+            Duration::from_secs(5),
+        )
+        .expect_err("a pinned probe against a plaintext listener must fail");
+    }
+
+    #[test]
+    fn auto_probe_timeout_env_override_parses_and_falls_back() {
+        // Serializes with every other test that reads the variable (none):
+        // this is the only reader in the process.
+        std::env::set_var(super::AUTO_PROBE_TIMEOUT_ENV, "250");
+        assert_eq!(
+            super::auto_direct_probe_timeout(),
+            Duration::from_millis(250)
+        );
+        std::env::set_var(super::AUTO_PROBE_TIMEOUT_ENV, "not-a-number");
+        assert_eq!(
+            super::auto_direct_probe_timeout(),
+            super::DEFAULT_AUTO_DIRECT_PROBE_TIMEOUT
+        );
+        std::env::set_var(super::AUTO_PROBE_TIMEOUT_ENV, "0");
+        assert_eq!(
+            super::auto_direct_probe_timeout(),
+            super::DEFAULT_AUTO_DIRECT_PROBE_TIMEOUT
+        );
+        std::env::remove_var(super::AUTO_PROBE_TIMEOUT_ENV);
+        assert_eq!(
+            super::auto_direct_probe_timeout(),
+            super::DEFAULT_AUTO_DIRECT_PROBE_TIMEOUT
+        );
     }
 }
