@@ -6868,9 +6868,30 @@ mod tests {
 
     #[test]
     fn sync_selected_profile_syncs_via_and_defaults_new_entries_to_auto() {
+        // Build the profile explicitly: `load()` reads the real waitagent
+        // home, which has no profiles in CI (an empty Vec would panic on
+        // indexing), so tests must not depend on the user's history file.
         let mut state = ConnectRemoteHostState::load();
-        let mut profile = state.profiles[0].clone();
-        profile.via = Some("relay".to_string());
+        let profile = RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("~/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: None,
+            host_kind: RemoteHostKind::Lan,
+            remote_shell: None,
+            via: Some("relay".to_string()),
+            last_via_used: None,
+        };
         state.profiles = vec![profile];
         state.selected = 0;
         let _ = state.sync_selected_profile();
@@ -6965,9 +6986,30 @@ mod tests {
 
     #[test]
     fn profile_matches_state_includes_via() {
+        // Explicit profile construction: see
+        // sync_selected_profile_syncs_via_and_defaults_new_entries_to_auto
+        // for why tests must not index the user's loaded history.
         let mut state = ConnectRemoteHostState::load();
-        let mut profile = state.profiles[0].clone();
-        profile.via = Some("relay".to_string());
+        let profile = RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("~/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: None,
+            host_kind: RemoteHostKind::Lan,
+            remote_shell: None,
+            via: Some("relay".to_string()),
+            last_via_used: None,
+        };
         state.profiles = vec![profile.clone()];
         state.selected = 0;
         let _ = state.sync_selected_profile();
