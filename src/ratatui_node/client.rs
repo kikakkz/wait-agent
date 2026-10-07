@@ -210,6 +210,36 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                     }),
                     _ => None,
                 }
+            } else if let Some(args) = trimmed.strip_prefix("RELAY_JOIN ") {
+                let mut parts = args.split_whitespace();
+                let address = parts
+                    .next()
+                    .and_then(|encoded| general_purpose::STANDARD.decode(encoded).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .filter(|address| !address.trim().is_empty());
+                let token = parts
+                    .next()
+                    .and_then(|encoded| general_purpose::STANDARD.decode(encoded).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .filter(|token| !token.trim().is_empty());
+                let force = match parts.next() {
+                    None => false,
+                    Some("FORCE") => true,
+                    Some(_) => return None,
+                };
+                if parts.next().is_some() {
+                    return None;
+                }
+                match (address, token) {
+                    (Some(address), Some(token)) => Some(ClientCommand::RelayJoin {
+                        address,
+                        token,
+                        force,
+                    }),
+                    _ => None,
+                }
+            } else if trimmed == "RELAY_REMOVE" {
+                Some(ClientCommand::RelayRemove)
             } else if let Some(cwd) = trimmed.strip_prefix("CREATE_LOCAL_SESSION ") {
                 Some(ClientCommand::CreateLocalSession {
                     cwd: Some(cwd.to_string()),
@@ -320,6 +350,48 @@ mod tests {
         assert!(parse_command("E2E_RELAY_PROBE deadbeef").is_none());
         assert!(parse_command("E2E_RELAY_PROBE deadbeef x 10").is_none());
         assert!(parse_command("E2E_RELAY_PROBE  deadbeef 4 10").is_some());
+    }
+
+    #[test]
+    fn parse_relay_join_command_decodes_base64_fields() {
+        let address = general_purpose::STANDARD.encode("relay.example:7475");
+        let token = general_purpose::STANDARD.encode("invite token/with+chars=");
+        let line = format!("RELAY_JOIN {address} {token}");
+        let command = parse_command(&line);
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::RelayJoin {
+                    ref address,
+                    ref token,
+                    force: false,
+                }) if address == "relay.example:7475" && token == "invite token/with+chars="
+            ),
+            "unexpected command: {command:?}"
+        );
+
+        let forced = format!("RELAY_JOIN {address} {token} FORCE");
+        assert!(matches!(
+            parse_command(&forced),
+            Some(ClientCommand::RelayJoin { force: true, .. })
+        ));
+
+        // Missing, empty, or trailing-garbage arguments reject the command.
+        assert!(parse_command("RELAY_JOIN").is_none());
+        assert!(parse_command(&format!("RELAY_JOIN {address}")).is_none());
+        let empty = general_purpose::STANDARD.encode("   ");
+        assert!(parse_command(&format!("RELAY_JOIN {address} {empty}")).is_none());
+        assert!(parse_command(&format!("RELAY_JOIN {address} {token} Nope")).is_none());
+        assert!(parse_command(&format!("RELAY_JOIN {address} {token} FORCE extra")).is_none());
+    }
+
+    #[test]
+    fn parse_relay_remove_command() {
+        assert!(matches!(
+            parse_command("RELAY_REMOVE"),
+            Some(ClientCommand::RelayRemove)
+        ));
+        assert!(parse_command("RELAY_REMOVE now").is_none());
     }
 
     #[test]

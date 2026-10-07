@@ -202,6 +202,22 @@ pub(crate) enum StateEvent {
         client_id: u64,
         result: Box<Result<String, String>>,
     },
+    /// The asynchronous relay join finished. The state loop applies the
+    /// outcome on its single-writer thread: restart the persistent relay
+    /// link when the pin changed, clear stale relay errors, broadcast, and
+    /// report back to the originating client.
+    RelayJoinResult {
+        client_id: u64,
+        address: String,
+        result: Box<Result<RelayJoinApplied, String>>,
+    },
+    /// The asynchronous relay removal finished; the state loop stops the
+    /// persistent relay link, clears relay presence/error state, broadcasts,
+    /// and reports back to the originating client.
+    RelayRemoveResult {
+        client_id: u64,
+        result: Box<Result<String, String>>,
+    },
     /// Timer tick telling the state loop to flush a pending output-driven
     /// snapshot broadcast. Sent by a detached interval thread; only the state
     /// loop consumes it. PTY output events only set a dirty flag and are
@@ -270,6 +286,19 @@ pub(crate) enum ClientCommand {
         streams: u32,
         hold_secs: u32,
     },
+    /// Enroll this node at the relay `address` (base64-decoded on the wire)
+    /// with the invite/deploy `token`, pin the learned fingerprint into
+    /// `relay.toml`, and (re)start the persistent relay link. `force`
+    /// confirms a pin mismatch after the TUI's explicit operator warning
+    /// (issue #156 slice 1).
+    RelayJoin {
+        address: String,
+        token: String,
+        force: bool,
+    },
+    /// Remove the pinned relay: delete `relay.toml`, stop the persistent
+    /// relay link, and reset relay state (issue #156 slice 1).
+    RelayRemove,
 }
 
 /// Reply returned by `StateEventLoop` for control commands.
@@ -288,4 +317,16 @@ pub(crate) enum CommandOutcome {
 pub(crate) struct CreatedAuthorityHostTarget {
     pub session_id: String,
     pub target_id: String,
+}
+
+/// What a successful relay join established, as applied by the state loop.
+#[derive(Debug, Clone)]
+pub(crate) struct RelayJoinApplied {
+    /// The pin `join_relay` just wrote, carried here so the state loop can
+    /// restart the link without re-reading the file on its thread.
+    pub pinned: crate::infra::relay_toml_store::RelayTomlConfig,
+    /// True when the pin replaced a different address/fingerprint (or no
+    /// link is currently installed) and the persistent relay link must be
+    /// (re)started; false when the re-pinned config was already in place.
+    pub link_restarted: bool,
 }

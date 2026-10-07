@@ -177,9 +177,11 @@ pub(crate) struct SharedState {
     /// by `StateEventLoop`; a leaf lock (no ordering constraints against
     /// other SharedState locks).
     pub(crate) relay_error: Mutex<Option<RelayLinkErrorSnapshot>>,
-    /// Relay client handle for `via = "relay"` dials. Installed once at
-    /// startup (before the state loop and any dial can observe it) and only
-    /// taken back at shutdown; a leaf lock, read-only afterwards.
+    /// Relay client handle for `via = "relay"` dials. Installed at startup
+    /// (before the state loop and any dial can observe it), restarted by
+    /// `StateEventLoop` when a TUI-driven join re-pins the relay, and taken
+    /// at removal/shutdown; a leaf lock, cloned per use so a dial never
+    /// holds the guard across IO.
     pub(crate) relay_client: Mutex<Option<Arc<crate::infra::relay_client::RelayClientHandle>>>,
 }
 
@@ -1172,30 +1174,10 @@ impl RatatuiNodeRuntime {
                 ));
                 None
             });
-        let mut _relay_forwarder = None;
         if let Some(relay) = relay_config {
-            let credentials = relay_link_credentials(&self.network);
-            if let Err(error) = crate::infra::node_credentials::ensure_credentials(&credentials) {
-                ERROR_LOG.log(format!(
-                    "[ratatui-node] relay client credentials failed: {error}"
-                ));
-            } else {
-                let (relay_event_tx, relay_event_rx) =
-                    tokio::sync::mpsc::channel::<RelayClientEvent>(16);
-                let handle = RelayClient::spawn(
-                    RelayClientConfig::from_relay_toml(relay, credentials),
-                    relay_event_tx,
-                );
-                // Install the shared handle for relay-via dials before any
-                // consumer can look it up; taken back at shutdown below.
-                if let Ok(mut slot) = self.shared.relay_client.lock() {
-                    *slot = Some(Arc::new(handle));
-                }
-                let state_tx = state_event_loop.sender();
-                _relay_forwarder = Some(std::thread::spawn(move || {
-                    forward_relay_link_events(relay_event_rx, state_tx);
-                }));
-            }
+            // Install the shared handle for relay-via dials before any
+            // consumer can look it up; taken back at shutdown below.
+            start_relay_link(&self.shared, relay);
         }
 
         // Peer node servers host a default authority-host session for remote
@@ -1429,24 +1411,8 @@ impl RatatuiNodeRuntime {
             }
         }
 
-        // Stop the persistent relay link: taking the slot drops the last Arc
-        // in the common case, and RelayClientHandle::cancel signals the stop
-        // watch and joins the client thread. A dial still holding a clone
-        // keeps it alive; its drop cancels later.
-        let relay_handle = {
-            let mut slot = self
-                .shared
-                .relay_client
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            slot.take()
-        };
-        if let Some(arc) = relay_handle {
-            match Arc::try_unwrap(arc) {
-                Ok(handle) => handle.cancel(),
-                Err(arc) => drop(arc),
-            }
-        }
+        // Stop the persistent relay link.
+        stop_relay_link(&self.shared.relay_client);
         if let Some(signal_server) = signal_server {
             signal_server.cleanup();
         }
@@ -1498,6 +1464,51 @@ fn forward_relay_link_events(
         };
         let _ = state_tx.send(state_event);
     }
+}
+
+/// Stops the persistent relay link, when one is installed. The slot is a
+/// leaf lock: the guard is dropped before `cancel` joins the client thread,
+/// so no lock is ever held across thread joins (m07). A dial still holding
+/// a clone keeps the handle alive; its drop cancels later.
+pub(crate) fn stop_relay_link(
+    relay_client: &Mutex<Option<Arc<crate::infra::relay_client::RelayClientHandle>>>,
+) {
+    let handle = {
+        let mut slot = relay_client
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        slot.take()
+    };
+    if let Some(arc) = handle {
+        match Arc::try_unwrap(arc) {
+            Ok(handle) => handle.cancel(),
+            Err(arc) => drop(arc),
+        }
+    }
+}
+
+/// Starts (or restarts) the persistent relay link for `relay` and installs
+/// the handle into `shared.relay_client` for via-relay dials and the node
+/// channel. Mirrors the startup wiring: credential failures are logged and
+/// leave no link, never a panic.
+pub(crate) fn start_relay_link(shared: &Arc<SharedState>, relay: RelayTomlConfig) {
+    let credentials = relay_link_credentials(&shared.network);
+    if let Err(error) = crate::infra::node_credentials::ensure_credentials(&credentials) {
+        ERROR_LOG.log(format!(
+            "[ratatui-node] relay client credentials failed: {error}"
+        ));
+        return;
+    }
+    let (relay_event_tx, relay_event_rx) = tokio::sync::mpsc::channel::<RelayClientEvent>(16);
+    let handle = RelayClient::spawn(
+        RelayClientConfig::from_relay_toml(relay, credentials),
+        relay_event_tx,
+    );
+    if let Ok(mut slot) = shared.relay_client.lock() {
+        *slot = Some(Arc::new(handle));
+    }
+    let state_tx = shared.state_sender();
+    std::thread::spawn(move || forward_relay_link_events(relay_event_rx, state_tx));
 }
 
 /// The identity the persistent relay link enrolls/registers under. This
