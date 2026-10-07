@@ -39,10 +39,17 @@
 #               quiet re-pin on an unchanged fingerprint, pin-mismatch
 #               refusal that restores the previous pin, forced switch, and
 #               removal that tears the link down.
+#   viaautodirect — issue #156 slice 2 (via = auto): one bridge with the
+#               relay present, so BOTH paths exist; the auto profile must
+#               pick the direct path (probe succeeds) and remember it.
+#   viaautorelay — issue #156 slice 2 (via = auto): the isolated two-bridge
+#               topology (direct path impossible by construction); the auto
+#               profile must fall back to the relay and remember it.
 #
 # Usage: e2e-relay.sh [scenario ...]
 #   scenarios: smoke (default), reconnect, reregister, streams, direct,
-#   pastefile, revoke, capacity, presence, joinkeypaths, relaymgmt
+#   pastefile, revoke, capacity, presence, joinkeypaths, relaymgmt,
+#   viaautodirect, viaautorelay
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -229,6 +236,29 @@ wait_row_availability() {
         sleep 2
     done
     die "$container never saw $target availability=$want within ${GATE_TIMEOUT_SECS}s"
+}
+
+# Polls LIST_SESSIONS on a node until a row with the given authority node
+# id reports availability=online and returns the row. Used by the via-auto
+# scenarios as the data-plane anchor for "the auto connect really
+# established a session".
+wait_authority_row_online() {
+    local container=$1 port=$2 authority=$3
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    local row=""
+    while ((SECONDS < deadline)); do
+        row=$(node_command "$container" "$port" LIST_SESSIONS 2>/dev/null \
+            | jq -c --arg a "$authority" '[.payload.data[]?
+                | select(.authority_node_id == $a and .availability == "online")]
+                | first' 2>/dev/null || true)
+        if [ -n "$row" ] && [ "$row" != "null" ]; then
+            printf '%s\n' "$row"
+            return 0
+        fi
+        row=""
+        sleep 2
+    done
+    die "$container never saw $authority online within ${GATE_TIMEOUT_SECS}s"
 }
 
 # Brings up the topology and gates on both nodes being enrolled and online.
@@ -1102,9 +1132,184 @@ scenario_relaymgmt() {
     log "relay removed: pin cleared, link down"
 }
 
+scenario_viaautodirect() {
+    log "scenario: viaautodirect (via = auto picks direct when the peer is directly reachable)"
+    # One bridge with the relay container also attached: both the direct
+    # path (node-b is on the same network) and the relay path exist. The
+    # auto profile must probe direct, dial direct, and remember it.
+    docker network create --internal "$NET_DIRECT" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_DIRECT" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    local a_home stage
+    a_home=$(mktemp -d)
+    stage=$(mktemp -d)
+    # A enrolls (relay available) with a host-mounted state dir so the
+    # harness can write the remote-hosts profile and read back the
+    # last_via_used annotation.
+    docker run -dt --name "$NODE_A" --network "$NET_DIRECT" --network-alias node-a \
+        -v "$a_home:/root/.waitagent" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+
+    # B authorizes A's operator key (same pattern as pastefile/direct): the
+    # reuse dial answers B's operator challenge with A's key.
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ -f "$a_home/operator.key" ] && break
+        assert_running "$NODE_A"
+        sleep 1
+    done
+    [ -f "$a_home/operator.key" ] || die "node A never generated its operator key"
+    docker cp "$NODE_A:/root/.waitagent/operator.key" "$stage/operator.key" >/dev/null
+    ssh-keygen -y -f "$stage/operator.key" >"$stage/node-a.pub" 2>/dev/null \
+        || die "could not derive node A's operator public key"
+
+    docker run -dt --name "$NODE_B" --network "$NET_DIRECT" --network-alias node-b \
+        -v "$stage/node-a.pub:/root/.waitagent/authorized_operators/node-a.pub:ro" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 2 ] \
+        || die "expected 2 whitelisted nodes, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+
+    local fp_b
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_b" ] || die "could not read node B's fingerprint"
+
+    # Auto profile: both paths exist, so the direct probe must win. The
+    # cached shell/port/pin keep the connect on the reuse fast path (no SSH).
+    cat >"$a_home/remote-hosts.toml" <<EOF
+[[hosts]]
+name = "node-b"
+host = "node-b"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/unused"
+remote_shell = "posix"
+last_remote_port = $NODE_PORT_B
+tls_pin_sha256 = "$fp_b"
+via = "auto"
+EOF
+
+    local connect_out
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CONNECT_REMOTE_HOST node-b")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "CONNECT_REMOTE_HOST on A failed: $connect_out"
+    jq -r '.payload.message // ""' <<<"$connect_out" | grep -q "via direct" \
+        || die "auto must report the direct path it took: $connect_out"
+    log "connect answered: $(jq -r '.payload.message' <<<"$connect_out")"
+
+    # The auto choice must be preserved with the effective path annotated,
+    # not rewritten to direct.
+    grep -q '^via = "auto"$' "$a_home/remote-hosts.toml" \
+        || die "the via = auto choice must be preserved: $(cat "$a_home/remote-hosts.toml")"
+    grep -q '^last_via_used = "direct"$' "$a_home/remote-hosts.toml" \
+        || die "last_via_used must remember the direct path: $(cat "$a_home/remote-hosts.toml")"
+
+    # A live remote session row on A, observed through the control socket —
+    # the data-plane anchor that the auto->direct connect established a
+    # usable session.
+    local row
+    row=$(wait_authority_row_online "$NODE_A" "$NODE_PORT_A" "node-b#$NODE_PORT_B")
+    log "node A sees node B online over the auto->direct path: $row"
+
+    rm -rf "$a_home" "$stage"
+    log "viaautodirect OK: auto picked and remembered the direct path with the relay available"
+}
+
+scenario_viaautorelay() {
+    log "scenario: viaautorelay (via = auto falls back to relay when direct is impossible)"
+    # Isolated two-bridge topology (same construction as pastefile/presence):
+    # A and B share no network, so the direct probe fails by construction
+    # and the auto profile must fall back to the relay dial path.
+    docker network create --internal "$NET_A" >/dev/null
+    docker network create --internal "$NET_B" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+    docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    local a_home stage
+    a_home=$(mktemp -d)
+    stage=$(mktemp -d)
+    docker run -dt --name "$NODE_A" --network "$NET_A" \
+        -v "$a_home:/root/.waitagent" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ -f "$a_home/operator.key" ] && break
+        assert_running "$NODE_A"
+        sleep 1
+    done
+    [ -f "$a_home/operator.key" ] || die "node A never generated its operator key"
+    docker cp "$NODE_A:/root/.waitagent/operator.key" "$stage/operator.key" >/dev/null
+    ssh-keygen -y -f "$stage/operator.key" >"$stage/node-a.pub" 2>/dev/null \
+        || die "could not derive node A's operator public key"
+
+    docker run -dt --name "$NODE_B" --network "$NET_B" \
+        -v "$stage/node-a.pub:/root/.waitagent/authorized_operators/node-a.pub:ro" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 2 ] \
+        || die "expected 2 whitelisted nodes, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+
+    local fp_b
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_b" ] || die "could not read node B's fingerprint"
+
+    # Auto profile on the relay-only topology.
+    cat >"$a_home/remote-hosts.toml" <<EOF
+[[hosts]]
+name = "node-b"
+host = "node-b"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/unused"
+remote_shell = "posix"
+last_remote_port = $NODE_PORT_B
+tls_pin_sha256 = "$fp_b"
+via = "auto"
+EOF
+
+    local connect_out
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CONNECT_REMOTE_HOST node-b")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "CONNECT_REMOTE_HOST on A failed: $connect_out"
+    jq -r '.payload.message // ""' <<<"$connect_out" | grep -q "via relay" \
+        || die "auto must report the relay fallback it took: $connect_out"
+    log "connect answered: $(jq -r '.payload.message' <<<"$connect_out")"
+
+    grep -q '^via = "auto"$' "$a_home/remote-hosts.toml" \
+        || die "the via = auto choice must be preserved: $(cat "$a_home/remote-hosts.toml")"
+    grep -q '^last_via_used = "relay"$' "$a_home/remote-hosts.toml" \
+        || die "last_via_used must remember the relay path: $(cat "$a_home/remote-hosts.toml")"
+
+    local row
+    row=$(wait_authority_row_online "$NODE_A" "$NODE_PORT_A" "node-b#$NODE_PORT_B")
+    log "node A sees node B online over the auto->relay path: $row"
+
+    rm -rf "$a_home" "$stage"
+    log "viaautorelay OK: auto fell back to and remembered the relay path"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt)
+    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -1145,8 +1350,14 @@ for scenario in "${scenarios[@]}"; do
         relaymgmt)
             scenario_relaymgmt
             ;;
+        viaautodirect)
+            scenario_viaautodirect
+            ;;
+        viaautorelay)
+            scenario_viaautorelay
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay)"
             ;;
     esac
     log "scenario '$scenario' passed"

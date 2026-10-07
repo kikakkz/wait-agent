@@ -191,8 +191,12 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
   白名单目录路径、
   token 生成参数、心跳参数（间隔默认 10s、离线阈值默认 3 次）、
   容量上限（`max_nodes`、`max_streams`、吞吐保护阈值）。
-- remote-hosts 条目增加 `via = "relay" | "direct"`（显式指定，不做隐式
-  回退；报错信息中给出引导）。
+- remote-hosts 条目增加 `via = "auto" | "relay" | "direct"`：auto 为缺省
+  （旧条目缺省由隐式 direct 升级而来，显式旧值保留）；auto = 直通优先、
+  relay 兜底——connect 时先探测 direct（TCP + TLS pin 握手，短超时上限），
+  失败再经 relay dial；显式 direct/relay 不回退（报错信息中给出引导）。
+  生效路径记入 `last_via_used` 供 UI 标注，不静默改写用户选择
+  （issue #156，取代本文件原"显式指定、不做隐式回退"决策条）。
 
 ## 兼容性承诺
 
@@ -237,10 +241,13 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
    压测标定 — 不在本期（默认值保守发布，实测后修订）。
 7. ✅ 已落地 — 配置面：relay.toml（#104；node 侧
    `src/infra/relay_toml_store.rs`、relay 侧 `relay_serve_toml_store.rs`）、
-   remote-hosts `via`（#107；`src/host/ssh/remote_host_history_store.rs`）、
+   remote-hosts `via`（#107 落地 direct/relay；#156 切片 2 扩为
+   auto|direct|relay 三选并加 `last_via_used` 生效路径标注；
+   `src/host/ssh/remote_host_history_store.rs`）、
    Ctrl-W 连接路径接入（`src/host/ssh/connect_remote_host_pane_runtime.rs`
-   的 via 选择与 "via relay" 标记，dial 走
-   `remote_host_connect_runtime.rs`）。
+   的 via 三选与 "via auto → …" 标记，dial 走
+   `remote_host_connect_runtime.rs`，auto 探测与回退在
+   `src/infra/remote_grpc_transport.rs`）。
 8. ✅ 已落地 — 结构化错误语义（relay → node → console）。锚点：#111
    （错误码定型）、#112（节点内传播）、#113（console 渲染）；
    `src/infra/relay_routing/error_code.rs`、`src/ratatui_node/client_runtime.rs`。
