@@ -13,10 +13,12 @@ use crate::host::ssh::remote_install_proxy_store::{
     RemoteInstallProxyStore,
 };
 use crate::host::ssh::remote_shell::RemoteShellKind;
+use crate::infra::relay_toml_store::RelayTomlConfig;
 use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
 use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardReadResult};
 use crate::ratatui_node::node_runtime::ServerMessageJson;
+use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -199,6 +201,67 @@ impl ConnectRemoteHostPaneRuntime {
                                 state.status = Status::Error(message);
                             }
                         },
+                        PaneAction::RelayJoin {
+                            address,
+                            token,
+                            force,
+                        } => {
+                            if matches!(state.status, Status::Working(_)) {
+                                continue;
+                            }
+                            state.status = Status::Working("Joining relay...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match run_relay_join_command(
+                                self.ratatui_port,
+                                &address,
+                                &token,
+                                force,
+                            ) {
+                                RelayNodeAnswer::Ok(message) => {
+                                    state.relay = load_relay_pin();
+                                    state.relay_draft_token.clear();
+                                    state.relay_mismatch = RelayMismatchState::Idle;
+                                    state.status = Status::Hint(message);
+                                }
+                                RelayNodeAnswer::PinMismatch(message) => {
+                                    state.relay_mismatch = RelayMismatchState::Prompt {
+                                        message,
+                                        focus: RelayMismatchFocus::Abort,
+                                    };
+                                    state.status = default_hint_status();
+                                }
+                                RelayNodeAnswer::Err(message) => {
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
+                        PaneAction::RelayRemove => {
+                            if matches!(state.status, Status::Working(_)) {
+                                continue;
+                            }
+                            state.status = Status::Working("Removing relay...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match run_relay_remove_command(self.ratatui_port) {
+                                Ok(message) => {
+                                    state.relay = None;
+                                    state.relay_mismatch = RelayMismatchState::Idle;
+                                    state.status = Status::Hint(message);
+                                }
+                                Err(message) => {
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
                         PaneAction::DeleteSelectedHost { profile_name } => {
                             match delete_selected_host(state, &profile_name) {
                                 Ok(request) => {
@@ -299,6 +362,12 @@ struct ConnectRemoteHostState {
     proxy_draft: RemoteInstallProxyProfile,
     proxy_all_proxy_autofilled: bool,
     proxy_https_proxy_autofilled: bool,
+    /// The pinned relay as the popup opened; the join flow compares the
+    /// learned fingerprint against this anchor (issue #156 slice 1).
+    relay: Option<RelayTomlConfig>,
+    relay_draft_address: String,
+    relay_draft_token: String,
+    relay_mismatch: RelayMismatchState,
     editing: Option<EditField>,
     edit_cursor: usize,
     status: Status,
@@ -343,6 +412,10 @@ impl ConnectRemoteHostState {
             },
             proxy_all_proxy_autofilled: false,
             proxy_https_proxy_autofilled: false,
+            relay: load_relay_pin(),
+            relay_draft_address: String::new(),
+            relay_draft_token: String::new(),
+            relay_mismatch: RelayMismatchState::Idle,
             editing: None,
             edit_cursor: 0,
             status: default_hint_status(),
@@ -494,6 +567,9 @@ impl ConnectRemoteHostState {
         if !matches!(self.delete_confirm, DeleteConfirmState::Idle) {
             return self.apply_delete_confirm_key(key);
         }
+        if !matches!(self.relay_mismatch, RelayMismatchState::Idle) {
+            return self.apply_relay_mismatch_key(key);
+        }
         if matches!(self.status, Status::Error(_)) {
             return self.apply_error_popup_key(key);
         }
@@ -525,6 +601,7 @@ impl ConnectRemoteHostState {
                     Focus::Delete => self.set_focus(Focus::Connect),
                     Focus::ProxySave => self.set_focus(Focus::ProxyActive),
                     Focus::ProxyDelete => self.set_focus(Focus::ProxySave),
+                    Focus::RelayRemove => self.set_focus(Focus::RelayJoin),
                     Focus::Auth if self.auth == AuthChoice::Password => {
                         self.set_focus(Focus::HostKind);
                     }
@@ -539,6 +616,9 @@ impl ConnectRemoteHostState {
                     Focus::Connect => self.set_focus(Focus::Delete),
                     Focus::ProxyActive => self.set_focus(Focus::ProxySave),
                     Focus::ProxySave => self.set_focus(Focus::ProxyDelete),
+                    Focus::RelayJoin if self.relay.is_some() => {
+                        self.set_focus(Focus::RelayRemove);
+                    }
                     Focus::Hosts => self.set_focus(self.default_detail_focus()),
                     Focus::Auth if self.auth == AuthChoice::Key => {}
                     _ if self.focus.uses_horizontal_choice() => self.adjust_choice(1),
@@ -608,6 +688,23 @@ impl ConnectRemoteHostState {
         PaneAction::None
     }
 
+    fn apply_relay_mismatch_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        size: (u16, u16),
+    ) -> PaneAction {
+        let layout = RelayMismatchGeometry::from_terminal_size(size);
+        if point_in_rect(mouse.column, mouse.row, layout.abort_button) {
+            self.relay_mismatch = RelayMismatchState::Idle;
+            return PaneAction::None;
+        }
+        if point_in_rect(mouse.column, mouse.row, layout.switch_button) {
+            self.relay_mismatch = RelayMismatchState::Idle;
+            return self.relay_join_action(true);
+        }
+        PaneAction::None
+    }
+
     fn shift_delete_confirm_focus(&mut self) {
         if let DeleteConfirmState::Prompt { focus, .. } = &mut self.delete_confirm {
             *focus = match focus {
@@ -641,6 +738,51 @@ impl ConnectRemoteHostState {
         };
         PaneAction::DeleteSelectedHost {
             profile_name: profile_name.clone(),
+        }
+    }
+
+    fn apply_relay_mismatch_key(&mut self, key: KeyEvent) -> PaneAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.relay_mismatch = RelayMismatchState::Idle;
+                PaneAction::None
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                self.shift_relay_mismatch_focus();
+                PaneAction::None
+            }
+            KeyCode::Enter => self.activate_relay_mismatch_focus(),
+            _ => PaneAction::None,
+        }
+    }
+
+    fn shift_relay_mismatch_focus(&mut self) {
+        if let RelayMismatchState::Prompt { focus, .. } = &mut self.relay_mismatch {
+            *focus = match focus {
+                RelayMismatchFocus::Abort => RelayMismatchFocus::SwitchAnyway,
+                RelayMismatchFocus::SwitchAnyway => RelayMismatchFocus::Abort,
+            };
+        }
+    }
+
+    fn activate_relay_mismatch_focus(&mut self) -> PaneAction {
+        match self.relay_mismatch_focus() {
+            Some(RelayMismatchFocus::Abort) => {
+                self.relay_mismatch = RelayMismatchState::Idle;
+                PaneAction::None
+            }
+            Some(RelayMismatchFocus::SwitchAnyway) => {
+                self.relay_mismatch = RelayMismatchState::Idle;
+                self.relay_join_action(true)
+            }
+            None => PaneAction::None,
+        }
+    }
+
+    fn relay_mismatch_focus(&self) -> Option<RelayMismatchFocus> {
+        match &self.relay_mismatch {
+            RelayMismatchState::Prompt { focus, .. } => Some(*focus),
+            RelayMismatchState::Idle => None,
         }
     }
 
@@ -791,6 +933,9 @@ impl ConnectRemoteHostState {
         if !matches!(self.delete_confirm, DeleteConfirmState::Idle) {
             return self.apply_delete_confirm_mouse(mouse, size);
         }
+        if !matches!(self.relay_mismatch, RelayMismatchState::Idle) {
+            return self.apply_relay_mismatch_mouse(mouse, size);
+        }
         let x = mouse.column;
         let y = mouse.row;
         if matches!(self.status, Status::Error(_)) {
@@ -834,6 +979,11 @@ impl ConnectRemoteHostState {
             self.sync_selected_proxy();
             return PaneAction::None;
         }
+        if point_in_rect(x, y, layout.sidebar.relay_list) {
+            self.selected = self.relay_selection_index();
+            self.set_focus(Focus::Hosts);
+            return PaneAction::None;
+        }
         if !point_in_rect(x, y, layout.details) {
             return PaneAction::None;
         }
@@ -846,6 +996,25 @@ impl ConnectRemoteHostState {
                 row if row == details.rows.https_proxy => self.set_focus(Focus::HttpsProxy),
                 row if row == details.rows.action => {
                     return proxy_action_from_x(x, details.save, self);
+                }
+                _ => {}
+            }
+            return PaneAction::None;
+        }
+        if self.selected_relay_config() {
+            let details = RelayDetailsGeometry::from_area(layout.details);
+            match row {
+                row if row == details.rows.address => self.set_focus(Focus::RelayAddress),
+                row if row == details.rows.token => self.set_focus(Focus::RelayToken),
+                row if row == details.rows.action => {
+                    if let Some(focus) = relay_action_from_x(x, details.action, self) {
+                        self.set_focus(focus);
+                        return match focus {
+                            Focus::RelayJoin => self.relay_join_action(false),
+                            Focus::RelayRemove => PaneAction::RelayRemove,
+                            _ => PaneAction::None,
+                        };
+                    }
                 }
                 _ => {}
             }
@@ -932,10 +1101,13 @@ impl ConnectRemoteHostState {
 
     fn move_down(&mut self) -> PaneAction {
         if self.focus == Focus::Hosts {
-            if self.selected < self.new_proxy_selection_index() {
+            if self.selected < self.relay_selection_index() {
                 self.selected += 1;
                 if self.selected_proxy_config() {
                     self.sync_selected_proxy();
+                    return PaneAction::None;
+                }
+                if self.selected_relay_config() {
                     return PaneAction::None;
                 }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
@@ -945,6 +1117,8 @@ impl ConnectRemoteHostState {
             if next == Focus::Hosts {
                 next = if self.selected_proxy_config() {
                     Focus::ProxySave
+                } else if self.selected_relay_config() {
+                    Focus::RelayJoin
                 } else {
                     Focus::Connect
                 };
@@ -957,6 +1131,8 @@ impl ConnectRemoteHostState {
     fn default_detail_focus(&self) -> Focus {
         if self.selected_proxy_config() {
             Focus::ProxyActive
+        } else if self.selected_relay_config() {
+            Focus::RelayAddress
         } else if self.selected >= self.profiles.len() {
             Focus::Host
         } else {
@@ -1027,7 +1203,9 @@ impl ConnectRemoteHostState {
             | Focus::HostKind
             | Focus::ProxyName
             | Focus::AllProxy
-            | Focus::HttpsProxy => PaneAction::None,
+            | Focus::HttpsProxy
+            | Focus::RelayAddress
+            | Focus::RelayToken => PaneAction::None,
             Focus::Auth => {
                 self.adjust_choice(1);
                 PaneAction::None
@@ -1052,6 +1230,32 @@ impl ConnectRemoteHostState {
             Focus::ProxyActive => PaneAction::ActivateProxyConfig,
             Focus::ProxySave => PaneAction::SaveProxyConfig,
             Focus::ProxyDelete => PaneAction::DeleteProxyConfig,
+            Focus::RelayJoin => self.relay_join_action(false),
+            Focus::RelayRemove => PaneAction::RelayRemove,
+        }
+    }
+
+    /// Validates the relay draft and dispatches the join. `force` carries
+    /// the explicit operator confirmation after a pin-mismatch warning.
+    fn relay_join_action(&mut self, force: bool) -> PaneAction {
+        if matches!(self.status, Status::Working(_)) {
+            return PaneAction::None;
+        }
+        let address = self.relay_draft_address.trim().to_string();
+        let token = self.relay_draft_token.trim().to_string();
+        if address.is_empty() {
+            self.status = Status::Error("Relay address is required.".to_string());
+            return PaneAction::None;
+        }
+        if token.is_empty() {
+            self.status = Status::Error("Invite token is required.".to_string());
+            return PaneAction::None;
+        }
+        self.relay_draft_address = address.clone();
+        PaneAction::RelayJoin {
+            address,
+            token,
+            force,
         }
     }
 
@@ -1230,12 +1434,14 @@ impl ConnectRemoteHostState {
             self.auth,
             self.has_saved_selection(),
             self.selected_proxy_config(),
+            self.selected_relay_config(),
         );
         if focus == Focus::Sudo && self.selected_profile_is_windows_shell() {
             return focus.next(
                 self.auth,
                 self.has_saved_selection(),
                 self.selected_proxy_config(),
+                self.selected_relay_config(),
             );
         }
         focus
@@ -1246,12 +1452,14 @@ impl ConnectRemoteHostState {
             self.auth,
             self.has_saved_selection(),
             self.selected_proxy_config(),
+            self.selected_relay_config(),
         );
         if focus == Focus::Sudo && self.selected_profile_is_windows_shell() {
             return focus.prev(
                 self.auth,
                 self.has_saved_selection(),
                 self.selected_proxy_config(),
+                self.selected_relay_config(),
             );
         }
         focus
@@ -1273,6 +1481,19 @@ impl ConnectRemoteHostState {
     fn new_proxy_selection_index(&self) -> usize {
         self.proxy_profile_selection_start()
             .saturating_add(self.proxy_settings.profiles.len())
+    }
+
+    /// Sidebar selection index of the single relay entry. The relay.toml
+    /// data model pins at most one relay; a multi-relay list would extend
+    /// this range (issue #156 keeps single-relay switch as the flow).
+    // TODO(issue #156 multi-relay): replace the single entry with a relay
+    // list once the data model supports more than one pinned relay.
+    fn relay_selection_index(&self) -> usize {
+        self.new_proxy_selection_index().saturating_add(1)
+    }
+
+    fn selected_relay_config(&self) -> bool {
+        self.selected == self.relay_selection_index()
     }
 
     fn selected_proxy_profile_index(&self) -> Option<usize> {
@@ -1437,6 +1658,10 @@ enum Focus {
     ProxyActive,
     ProxySave,
     ProxyDelete,
+    RelayAddress,
+    RelayToken,
+    RelayJoin,
+    RelayRemove,
 }
 
 impl Focus {
@@ -1452,13 +1677,20 @@ impl Focus {
             Self::ProxyName => Some(EditField::ProxyName),
             Self::AllProxy => Some(EditField::AllProxy),
             Self::HttpsProxy => Some(EditField::HttpsProxy),
+            Self::RelayAddress => Some(EditField::RelayAddress),
+            Self::RelayToken => Some(EditField::RelayToken),
             Self::Password if auth == AuthChoice::Key => Some(EditField::KeyPath),
             Self::Password if auth == AuthChoice::Password => Some(EditField::SshPassword),
             _ => None,
         }
     }
 
-    fn ordered(_auth: AuthChoice, has_saved_selection: bool, proxy_page: bool) -> Vec<Self> {
+    fn ordered(
+        _auth: AuthChoice,
+        has_saved_selection: bool,
+        proxy_page: bool,
+        relay_page: bool,
+    ) -> Vec<Self> {
         if proxy_page {
             return vec![
                 Self::Hosts,
@@ -1468,6 +1700,15 @@ impl Focus {
                 Self::ProxyActive,
                 Self::ProxySave,
                 Self::ProxyDelete,
+            ];
+        }
+        if relay_page {
+            return vec![
+                Self::Hosts,
+                Self::RelayAddress,
+                Self::RelayToken,
+                Self::RelayJoin,
+                Self::RelayRemove,
             ];
         }
         let mut ordered = vec![
@@ -1489,14 +1730,26 @@ impl Focus {
         ordered
     }
 
-    fn next(self, auth: AuthChoice, has_saved_selection: bool, proxy_page: bool) -> Self {
-        let ordered = Self::ordered(auth, has_saved_selection, proxy_page);
+    fn next(
+        self,
+        auth: AuthChoice,
+        has_saved_selection: bool,
+        proxy_page: bool,
+        relay_page: bool,
+    ) -> Self {
+        let ordered = Self::ordered(auth, has_saved_selection, proxy_page, relay_page);
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + 1) % ordered.len()]
     }
 
-    fn prev(self, auth: AuthChoice, has_saved_selection: bool, proxy_page: bool) -> Self {
-        let ordered = Self::ordered(auth, has_saved_selection, proxy_page);
+    fn prev(
+        self,
+        auth: AuthChoice,
+        has_saved_selection: bool,
+        proxy_page: bool,
+        relay_page: bool,
+    ) -> Self {
+        let ordered = Self::ordered(auth, has_saved_selection, proxy_page, relay_page);
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + ordered.len() - 1) % ordered.len()]
     }
@@ -1513,6 +1766,8 @@ enum EditField {
     ProxyName,
     AllProxy,
     HttpsProxy,
+    RelayAddress,
+    RelayToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1597,11 +1852,41 @@ enum PaneAction {
     Close,
     Connect,
     ReadClipboard,
-    DeleteSelectedHost { profile_name: String },
+    DeleteSelectedHost {
+        profile_name: String,
+    },
     LoadSecrets(Option<SecretLoadRequest>),
     SaveProxyConfig,
     ActivateProxyConfig,
     DeleteProxyConfig,
+    /// Enroll at / switch to the relay `address` with the invite `token`;
+    /// `force` confirms a pin mismatch after the explicit operator warning
+    /// (issue #156 slice 1).
+    RelayJoin {
+        address: String,
+        token: String,
+        force: bool,
+    },
+    /// Remove the pinned relay: clear relay.toml and stop the link.
+    RelayRemove,
+}
+
+/// Pin-mismatch confirmation shown when a join presented a different relay
+/// fingerprint than the pin it replaced. Abort is the default; switching
+/// requires an explicit second confirmation (no silent continue).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayMismatchState {
+    Idle,
+    Prompt {
+        message: String,
+        focus: RelayMismatchFocus,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayMismatchFocus {
+    Abort,
+    SwitchAnyway,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1648,6 +1933,8 @@ struct HostSidebarGeometry {
     proxy_header: Rect,
     proxy_list: Rect,
     new_proxy: Rect,
+    relay_header: Rect,
+    relay_list: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1774,6 +2061,41 @@ impl ConnectErrorGeometry {
     }
 }
 
+/// Pin-mismatch confirmation dialog: taller than the delete confirm so the
+/// refusal text (both fingerprints) fits without scrolling.
+#[derive(Debug, Clone, Copy)]
+struct RelayMismatchGeometry {
+    dialog: Rect,
+    message: Rect,
+    abort_button: Rect,
+    switch_button: Rect,
+}
+
+impl RelayMismatchGeometry {
+    fn from_terminal_size((cols, rows): (u16, u16)) -> Self {
+        let width = cols.clamp(52, 84);
+        let height = 11.min(rows.max(1));
+        let x = cols.saturating_sub(width) / 2;
+        let y = rows.saturating_sub(height) / 2;
+        let dialog = Rect::new(x, y, width, height);
+        let message = Rect::new(
+            x.saturating_add(2),
+            y.saturating_add(2),
+            width.saturating_sub(4),
+            height.saturating_sub(5),
+        );
+        let button_y = y.saturating_add(height.saturating_sub(2));
+        let switch_button = Rect::new(x.saturating_add(width.saturating_sub(19)), button_y, 15, 1);
+        let abort_button = Rect::new(switch_button.x.saturating_sub(11), button_y, 8, 1);
+        Self {
+            dialog,
+            message,
+            abort_button,
+            switch_button,
+        }
+    }
+}
+
 impl PopupGeometry {
     fn from_terminal_size((cols, rows): (u16, u16), state: &ConnectRemoteHostState) -> Self {
         let width = popup_preferred_width(state).min(cols);
@@ -1825,10 +2147,15 @@ impl HostSidebarGeometry {
     fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
         const HEADER_HEIGHT: u16 = 3;
         const BUTTON_HEIGHT: u16 = 3;
-        // Lists sit directly under their headers/buttons; only the two
-        // sections (Saved Hosts vs Proxy Configuration) are separated.
+        // Lists sit directly under their headers/buttons; only the
+        // sections (Saved Hosts / Proxy Configuration / Relay) are
+        // separated.
         const SECTION_GAP: u16 = 0;
-        const FIXED_ROWS: u16 = HEADER_HEIGHT * 2 + BUTTON_HEIGHT * 2 + SECTION_GAP;
+        // The relay section is a single always-present row (pinned relay or
+        // a "no relay" placeholder).
+        const RELAY_LIST_HEIGHT: u16 = 1;
+        const FIXED_ROWS: u16 =
+            HEADER_HEIGHT * 3 + BUTTON_HEIGHT * 2 + SECTION_GAP + RELAY_LIST_HEIGHT;
 
         let saved_content = state.profiles.len() as u16;
         let proxy_content = state.proxy_settings.profiles.len() as u16;
@@ -1874,6 +2201,23 @@ impl HostSidebarGeometry {
         let proxy_list = Rect::new(area.x, proxy_list_y, area.width, proxy_list_height);
         let new_proxy_y = proxy_list.y.saturating_add(proxy_list.height);
         let new_proxy = Rect::new(area.x, new_proxy_y, area.width, BUTTON_HEIGHT);
+        let relay_header_y = new_proxy
+            .y
+            .saturating_add(new_proxy.height)
+            .saturating_add(SECTION_GAP);
+        let relay_header_height = HEADER_HEIGHT.min(
+            area.y
+                .saturating_add(area.height)
+                .saturating_sub(relay_header_y),
+        );
+        let relay_header = Rect::new(area.x, relay_header_y, area.width, relay_header_height);
+        let relay_list_y = relay_header.y.saturating_add(relay_header.height);
+        let relay_list_height = RELAY_LIST_HEIGHT.min(
+            area.y
+                .saturating_add(area.height)
+                .saturating_sub(relay_list_y),
+        );
+        let relay_list = Rect::new(area.x, relay_list_y, area.width, relay_list_height);
 
         Self {
             saved_header,
@@ -1882,6 +2226,8 @@ impl HostSidebarGeometry {
             proxy_header,
             proxy_list,
             new_proxy,
+            relay_header,
+            relay_list,
         }
     }
 }
@@ -1993,6 +2339,7 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     render_connecting_popup(frame, state);
     render_connect_error_popup(frame, state);
     render_delete_confirm(frame, state);
+    render_relay_mismatch(frame, state);
 }
 
 fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -2062,6 +2409,44 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         Alignment::Left,
         new_proxy_selected,
     );
+
+    render_framed_block(
+        frame,
+        geometry.relay_header,
+        header_block_content(
+            "⇄",
+            "Relay",
+            usize::from(state.relay.is_some()),
+            geometry.relay_header.width,
+        ),
+        Alignment::Left,
+        false,
+    );
+    let relay_selected = state.selected_relay_config();
+    let relay_item = match &state.relay {
+        Some(pin) => ListItem::new(Line::from(vec![
+            Span::styled(" ●  ", Style::default().fg(Color::Green)),
+            Span::styled(pin.address.clone(), Style::default().fg(Color::White)),
+        ])),
+        None => ListItem::new(Line::from(vec![
+            Span::styled(" ○  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "no relay pinned".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+    };
+    let relay_list = List::new(vec![relay_item])
+        .highlight_symbol("")
+        .highlight_style(if hosts_focused && relay_selected {
+            active_focus_style()
+        } else if relay_selected {
+            selected_host_style()
+        } else {
+            Style::default()
+        });
+    let mut relay_list_state = ratatui::widgets::ListState::default().with_selected(Some(0));
+    frame.render_stateful_widget(relay_list, geometry.relay_list, &mut relay_list_state);
 }
 
 fn render_framed_block(
@@ -2239,6 +2624,10 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         render_proxy_details(frame, area, state);
         return;
     }
+    if state.selected_relay_config() {
+        render_relay_details(frame, area, state);
+        return;
+    }
     let geometry = DetailsGeometry::from_area(area, state);
     render_header(frame, geometry.header, state);
     render_connection(frame, geometry.connection, state);
@@ -2363,9 +2752,161 @@ fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
     render_status(frame, geometry.status, state);
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RelayDetailsGeometry {
+    relay: Rect,
+    action: Rect,
+    status: Rect,
+    rows: RelayDetailsRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelayDetailsRows {
+    address: u16,
+    token: u16,
+    fingerprint: u16,
+    action: u16,
+}
+
+impl RelayDetailsGeometry {
+    fn from_area(area: Rect) -> Self {
+        let bottom = area.y.saturating_add(area.height);
+        // Card: title + Address + Invite Token + Fingerprint rows + borders.
+        let relay_height = area.height.min(6);
+        let relay = Rect::new(area.x, area.y, area.width, relay_height);
+        let action_y = relay
+            .y
+            .saturating_add(relay_height)
+            .saturating_add(1)
+            .min(bottom);
+        let action_height = u16::from(action_y < bottom);
+        let action = Rect::new(area.x, action_y, area.width, action_height);
+        let status_y = action_y.saturating_add(action_height).min(bottom);
+        let status = Rect::new(
+            area.x,
+            status_y,
+            area.width,
+            bottom.saturating_sub(status_y),
+        );
+        let rows = RelayDetailsRows {
+            address: relay.y.saturating_add(1).saturating_sub(area.y),
+            token: relay.y.saturating_add(2).saturating_sub(area.y),
+            fingerprint: relay.y.saturating_add(3).saturating_sub(area.y),
+            action: action_y.saturating_sub(area.y),
+        };
+        Self {
+            relay,
+            action,
+            status,
+            rows,
+        }
+    }
+}
+
+fn render_relay_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let geometry = RelayDetailsGeometry::from_area(area);
+    let fingerprint = state
+        .relay
+        .as_ref()
+        .map(|pin| pin.relay_fingerprint.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let rows = [
+        detail_row(
+            "Address",
+            &relay_input_display(&state.relay_draft_address),
+            state,
+            Focus::RelayAddress,
+        ),
+        detail_row(
+            "Invite Token",
+            &relay_input_display(&state.relay_draft_token),
+            state,
+            Focus::RelayToken,
+        ),
+        readonly_detail_row("Fingerprint", &fingerprint),
+    ];
+    let relay_block = section_block("Relay", "⇄", SECTION_COLOR_CONNECTION);
+    let relay_inner = relay_block.inner(geometry.relay);
+    frame.render_widget(relay_block, geometry.relay);
+    render_detail_table(frame, relay_inner, rows);
+
+    render_relay_actions(frame, geometry.action, state);
+    render_status(frame, geometry.status, state);
+}
+
+fn relay_button_layout(area: Rect, state: &ConnectRemoteHostState) -> (Rect, Option<Rect>) {
+    let join_text = " ⇄  Join Relay ";
+    let join_width = join_text.width() as u16;
+    let remove_text = " 🗑  Remove Relay ";
+    let remove_width = remove_text.width() as u16;
+    let gap = 2;
+    let total_width = if state.relay.is_some() {
+        join_width + gap + remove_width
+    } else {
+        join_width
+    };
+    let start_x = area.x + (area.width.saturating_sub(total_width)) / 2;
+    let join = Rect::new(start_x, area.y, join_width, 1);
+    let remove = if state.relay.is_some() {
+        Some(Rect::new(
+            start_x + join_width + gap,
+            area.y,
+            remove_width,
+            1,
+        ))
+    } else {
+        None
+    };
+    (join, remove)
+}
+
+fn render_relay_actions(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    if area.height == 0 {
+        return;
+    }
+    let join_text = " ⇄  Join Relay ";
+    let remove_text = " 🗑  Remove Relay ";
+    let (join_area, remove_area) = relay_button_layout(area, state);
+    let join_style = if state.focus == Focus::RelayJoin {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Gray)
+    };
+    frame.render_widget(
+        Paragraph::new(join_text)
+            .style(join_style)
+            .alignment(Alignment::Center),
+        join_area,
+    );
+    if let Some(remove_area) = remove_area {
+        let remove_style = if state.focus == Focus::RelayRemove {
+            delete_focus_style()
+        } else {
+            Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Red)
+        };
+        frame.render_widget(
+            Paragraph::new(remove_text)
+                .style(remove_style)
+                .alignment(Alignment::Center),
+            remove_area,
+        );
+    }
+}
+
 const PROXY_EMPTY_PLACEHOLDER: &str = "________________";
 
 fn proxy_input_display(value: &str) -> String {
+    if value.is_empty() {
+        PROXY_EMPTY_PLACEHOLDER.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn relay_input_display(value: &str) -> String {
     if value.is_empty() {
         PROXY_EMPTY_PLACEHOLDER.to_string()
     } else {
@@ -2477,6 +3018,20 @@ fn proxy_action_from_x(x: u16, area: Rect, state: &ConnectRemoteHostState) -> Pa
         PaneAction::DeleteProxyConfig
     } else {
         PaneAction::None
+    }
+}
+
+fn relay_action_from_x(x: u16, area: Rect, state: &ConnectRemoteHostState) -> Option<Focus> {
+    let (join, remove) = relay_button_layout(area, state);
+    if point_in_rect(x, area.y, join) {
+        Some(Focus::RelayJoin)
+    } else if let Some(remove) = remove {
+        if point_in_rect(x, area.y, remove) {
+            return Some(Focus::RelayRemove);
+        }
+        None
+    } else {
+        None
     }
 }
 
@@ -2765,6 +3320,11 @@ fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
         Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
         Focus::Connect => "Enter: connect · Tab: next".to_string(),
         Focus::Delete => "Enter: delete · Tab: next".to_string(),
+        Focus::RelayAddress | Focus::RelayToken => {
+            "Enter: edit · Ctrl-V: paste · Tab: next".to_string()
+        }
+        Focus::RelayJoin => "Enter: join relay · Tab: next".to_string(),
+        Focus::RelayRemove => "Enter: remove relay · Tab: next".to_string(),
         _ => {
             let base = "↑/↓ Select · Tab Switch · Enter Connect";
             if state.has_saved_selection() {
@@ -3207,6 +3767,41 @@ fn render_delete_confirm(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) 
     );
 }
 
+fn render_relay_mismatch(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
+    let RelayMismatchState::Prompt { message, focus } = &state.relay_mismatch else {
+        return;
+    };
+    render_dim_overlay(frame);
+    let geometry =
+        RelayMismatchGeometry::from_terminal_size((frame.size().width, frame.size().height));
+    frame.render_widget(Clear, geometry.dialog);
+    let block = Block::default()
+        .title(modal_title("Relay pin mismatch"))
+        .borders(Borders::ALL);
+    frame.render_widget(block, geometry.dialog);
+    frame.render_widget(
+        Paragraph::new(message.as_str())
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false })
+            .alignment(Alignment::Left),
+        geometry.message,
+    );
+    render_modal_button(
+        frame,
+        geometry.abort_button,
+        "Abort",
+        *focus == RelayMismatchFocus::Abort,
+        false,
+    );
+    render_modal_button(
+        frame,
+        geometry.switch_button,
+        "Switch anyway",
+        *focus == RelayMismatchFocus::SwitchAnyway,
+        true,
+    );
+}
+
 fn render_modal_button(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3260,6 +3855,24 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         let max_x = details.x.saturating_add(details.width.saturating_sub(1));
         return Some((desired_x.min(max_x), details.y.saturating_add(row)));
     }
+    if state.selected_relay_config() {
+        let rows = RelayDetailsGeometry::from_area(details).rows;
+        let row = match field {
+            EditField::RelayAddress => rows.address,
+            EditField::RelayToken => rows.token,
+            _ => return None,
+        };
+        let value_area_x = details.x.saturating_add(DETAIL_VALUE_START);
+        let value_area_width = details.width.saturating_sub(DETAIL_VALUE_START);
+        let desired_x = right_aligned_cursor_x(
+            value_area_x,
+            value_area_width,
+            &edit_field_display_text(state, field),
+            state.edit_cursor,
+        );
+        let max_x = details.x.saturating_add(details.width.saturating_sub(1));
+        return Some((desired_x.min(max_x), details.y.saturating_add(row)));
+    }
     let rows = DetailsGeometry::from_area(details, state).rows;
     let row = match field {
         EditField::Host => rows.host,
@@ -3267,7 +3880,11 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         EditField::SshUser => rows.user,
         EditField::KeyPath | EditField::SshPassword => rows.password,
         EditField::SudoPassword => rows.sudo,
-        EditField::ProxyName | EditField::AllProxy | EditField::HttpsProxy => return None,
+        EditField::ProxyName
+        | EditField::AllProxy
+        | EditField::HttpsProxy
+        | EditField::RelayAddress
+        | EditField::RelayToken => return None,
     };
     let value_area_x = details.x.saturating_add(DETAIL_VALUE_START);
     let value_area_width = details.width.saturating_sub(DETAIL_VALUE_START);
@@ -3291,6 +3908,8 @@ fn edit_field_display_text(state: &ConnectRemoteHostState, field: EditField) -> 
         EditField::ProxyName => state.proxy_draft.name.clone(),
         EditField::AllProxy => proxy_input_display(&state.proxy_draft.all_proxy),
         EditField::HttpsProxy => proxy_input_display(&state.proxy_draft.https_proxy),
+        EditField::RelayAddress => relay_input_display(&state.relay_draft_address),
+        EditField::RelayToken => relay_input_display(&state.relay_draft_token),
     }
 }
 
@@ -3376,6 +3995,8 @@ fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut Str
         EditField::ProxyName => &mut state.proxy_draft.name,
         EditField::AllProxy => &mut state.proxy_draft.all_proxy,
         EditField::HttpsProxy => &mut state.proxy_draft.https_proxy,
+        EditField::RelayAddress => &mut state.relay_draft_address,
+        EditField::RelayToken => &mut state.relay_draft_token,
     }
 }
 
@@ -3390,6 +4011,8 @@ fn edit_buffer_ref(state: &ConnectRemoteHostState, field: EditField) -> &str {
         EditField::ProxyName => &state.proxy_draft.name,
         EditField::AllProxy => &state.proxy_draft.all_proxy,
         EditField::HttpsProxy => &state.proxy_draft.https_proxy,
+        EditField::RelayAddress => &state.relay_draft_address,
+        EditField::RelayToken => &state.relay_draft_token,
     }
 }
 
@@ -3411,6 +4034,8 @@ fn edit_focus(field: EditField) -> Focus {
         EditField::ProxyName => Focus::ProxyName,
         EditField::AllProxy => Focus::AllProxy,
         EditField::HttpsProxy => Focus::HttpsProxy,
+        EditField::RelayAddress => Focus::RelayAddress,
+        EditField::RelayToken => Focus::RelayToken,
     }
 }
 
@@ -3431,6 +4056,21 @@ fn load_proxy_settings() -> RemoteInstallProxySettings {
     RemoteInstallProxyStore::default()
         .load_settings()
         .unwrap_or_default()
+}
+
+/// Reads the pinned relay for the sidebar listing. An unreadable pin is
+/// logged and treated as "no relay": enrollment must never be blocked by a
+/// stale file (the join path surfaces parse errors with actionable text).
+fn load_relay_pin() -> Option<RelayTomlConfig> {
+    match RelayTomlConfig::load(&RelayTomlConfig::default_path()) {
+        Ok(pin) => pin,
+        Err(error) => {
+            crate::infra::error_log::ERROR_LOG.log(format!(
+                "[connect-popup] relay.toml unreadable; treating as unpinned: {error}"
+            ));
+            None
+        }
+    }
 }
 
 fn load_profiles() -> Vec<RemoteHostProfile> {
@@ -3639,6 +4279,97 @@ fn run_ratatui_connect(state: &ConnectRemoteHostState, port: u16) -> Result<Stri
         .strip_prefix("ERR ")
         .unwrap_or(response)
         .to_string())
+}
+
+/// What the node answered to a relay-management command. A pin-mismatch
+/// refusal is its own variant: the caller must show the explicit
+/// Switch-anyway confirmation (default abort) instead of a plain error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayNodeAnswer {
+    Ok(String),
+    PinMismatch(String),
+    Err(String),
+}
+
+/// Sends `RELAY_JOIN` over the node control channel and interprets the
+/// answer. Enrollment can block on TLS + enrollment IO, so the timeout is
+/// generous; the popup shows a modal "Joining relay..." while blocked here.
+fn run_relay_join_command(
+    port: Option<u16>,
+    address: &str,
+    token: &str,
+    force: bool,
+) -> RelayNodeAnswer {
+    let Some(port) = port else {
+        return RelayNodeAnswer::Err(
+            "relay management requires the embedded console (no node socket)".to_string(),
+        );
+    };
+    const JOIN_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    let force_arg = if force { " FORCE" } else { "" };
+    let command = format!(
+        "RELAY_JOIN {} {}{}",
+        general_purpose::STANDARD.encode(address.as_bytes()),
+        general_purpose::STANDARD.encode(token.as_bytes()),
+        force_arg
+    );
+    let line = match crate::platform::local_ipc::send_node_command_with_timeout(
+        port,
+        &command,
+        JOIN_RESPONSE_TIMEOUT,
+    ) {
+        Ok(line) => line,
+        Err(error) => return RelayNodeAnswer::Err(error.to_string()),
+    };
+    relay_node_answer(&line, "pin mismatch:")
+}
+
+/// Sends `RELAY_REMOVE` over the node control channel.
+fn run_relay_remove_command(port: Option<u16>) -> Result<String, String> {
+    let Some(port) = port else {
+        return Err("relay management requires the embedded console (no node socket)".to_string());
+    };
+    const REMOVE_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let line = crate::platform::local_ipc::send_node_command_with_timeout(
+        port,
+        "RELAY_REMOVE",
+        REMOVE_RESPONSE_TIMEOUT,
+    )
+    .map_err(|error| error.to_string())?;
+    match relay_node_answer(&line, "pin mismatch:") {
+        RelayNodeAnswer::Ok(message) => Ok(message),
+        RelayNodeAnswer::PinMismatch(message) | RelayNodeAnswer::Err(message) => Err(message),
+    }
+}
+
+/// Parses the node's reply like `run_ratatui_connect` does; answers whose
+/// refusal carries `mismatch_marker` become the explicit-confirmation
+/// variant instead of a plain error.
+fn relay_node_answer(line: &str, mismatch_marker: &str) -> RelayNodeAnswer {
+    let response = line.trim();
+    if response.is_empty() {
+        return RelayNodeAnswer::Err("empty response from ratatui node".to_string());
+    }
+    if let Ok(ServerMessageJson::Response(resp)) = serde_json::from_str(response) {
+        return match (resp.ok, resp.message) {
+            (true, message) => RelayNodeAnswer::Ok(message.unwrap_or_else(|| "ok".to_string())),
+            (false, Some(message)) if message.contains(mismatch_marker) => {
+                RelayNodeAnswer::PinMismatch(message)
+            }
+            (false, message) => {
+                RelayNodeAnswer::Err(message.unwrap_or_else(|| "command failed".to_string()))
+            }
+        };
+    }
+    if response.starts_with("OK") {
+        return RelayNodeAnswer::Ok(response.to_string());
+    }
+    RelayNodeAnswer::Err(
+        response
+            .strip_prefix("ERR ")
+            .unwrap_or(response)
+            .to_string(),
+    )
 }
 
 fn run_connect(
@@ -6276,5 +7007,249 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    fn relay_pin() -> RelayTomlConfig {
+        RelayTomlConfig {
+            address: "relay.example:7475".to_string(),
+            relay_fingerprint: "ab".repeat(32),
+            heartbeat_interval_secs: None,
+        }
+    }
+
+    fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn relay_selection_index_follows_the_proxy_section() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.proxy_settings.profiles = vec![blank_proxy_profile()];
+        state.proxy_settings.profiles[0].name = "corp".to_string();
+
+        // Selection space: [0]=host, [1]=new host, [2]=proxy, [3]=new proxy,
+        // [4]=relay.
+        let relay_index = state.relay_selection_index();
+        assert_eq!(relay_index, 4);
+        state.selected = relay_index;
+        assert!(state.selected_relay_config());
+        assert!(!state.selected_proxy_config());
+
+        // Arrow-down walks every slot and stops at the relay entry.
+        state.selected = 0;
+        state.focus = Focus::Hosts;
+        for expected in 1..=relay_index {
+            let _ = state.move_down();
+            assert_eq!(state.selected, expected);
+        }
+        let _ = state.move_down();
+        assert_eq!(
+            state.selected, relay_index,
+            "the relay entry is the last row"
+        );
+    }
+
+    #[test]
+    fn relay_page_tab_cycles_relay_focuses() {
+        let mut state = ConnectRemoteHostState::load();
+        state.relay = Some(relay_pin());
+        state.selected = state.relay_selection_index();
+
+        assert_eq!(state.default_detail_focus(), Focus::RelayAddress);
+        state.set_focus(Focus::Hosts);
+        assert_eq!(state.next_focus(), Focus::RelayAddress);
+        state.set_focus(Focus::RelayAddress);
+        assert_eq!(state.next_focus(), Focus::RelayToken);
+        state.set_focus(Focus::RelayToken);
+        assert_eq!(state.next_focus(), Focus::RelayJoin);
+        state.set_focus(Focus::RelayJoin);
+        assert_eq!(state.next_focus(), Focus::RelayRemove);
+        state.set_focus(Focus::RelayRemove);
+        assert_eq!(state.next_focus(), Focus::Hosts);
+        state.set_focus(Focus::RelayToken);
+        assert_eq!(state.prev_focus(), Focus::RelayAddress);
+    }
+
+    #[test]
+    fn relay_right_arrow_only_reaches_remove_when_pinned() {
+        let mut state = ConnectRemoteHostState::load();
+        state.relay = Some(relay_pin());
+        state.selected = state.relay_selection_index();
+        state.set_focus(Focus::RelayJoin);
+        let _ = state.apply_key(key_event(KeyCode::Right));
+        assert_eq!(state.focus, Focus::RelayRemove);
+
+        let mut unpinned = ConnectRemoteHostState::load();
+        unpinned.selected = unpinned.relay_selection_index();
+        unpinned.set_focus(Focus::RelayJoin);
+        let _ = unpinned.apply_key(key_event(KeyCode::Right));
+        assert_eq!(
+            unpinned.focus,
+            Focus::RelayJoin,
+            "without a pin there is nothing to remove"
+        );
+    }
+
+    #[test]
+    fn relay_join_action_validates_the_draft() {
+        let mut state = ConnectRemoteHostState::load();
+        state.selected = state.relay_selection_index();
+        state.set_focus(Focus::RelayJoin);
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(message) if message.contains("address")));
+
+        state.relay_draft_address = "relay.example:7475".to_string();
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(message) if message.contains("token")));
+
+        state.relay_draft_token = "invite-token".to_string();
+        let action = state.activate_focus();
+        assert_eq!(
+            action,
+            PaneAction::RelayJoin {
+                address: "relay.example:7475".to_string(),
+                token: "invite-token".to_string(),
+                force: false,
+            }
+        );
+    }
+
+    #[test]
+    fn relay_mismatch_prompt_defaults_to_abort() {
+        let mut state = ConnectRemoteHostState::load();
+        state.relay_draft_address = "relay.example:7475".to_string();
+        state.relay_draft_token = "invite-token".to_string();
+        state.relay_mismatch = RelayMismatchState::Prompt {
+            message: "pin mismatch: ...".to_string(),
+            focus: RelayMismatchFocus::Abort,
+        };
+
+        let _ = state.apply_key(key_event(KeyCode::Enter));
+        assert_eq!(state.relay_mismatch, RelayMismatchState::Idle);
+
+        state.relay_mismatch = RelayMismatchState::Prompt {
+            message: "pin mismatch: ...".to_string(),
+            focus: RelayMismatchFocus::SwitchAnyway,
+        };
+        let action = match state.apply_key(key_event(KeyCode::Enter)) {
+            PaneAction::RelayJoin { force: true, .. } => true,
+            other => panic!("expected the forced re-join, got {other:?}"),
+        };
+        assert!(action);
+        assert_eq!(state.relay_mismatch, RelayMismatchState::Idle);
+
+        state.relay_mismatch = RelayMismatchState::Prompt {
+            message: "pin mismatch: ...".to_string(),
+            focus: RelayMismatchFocus::SwitchAnyway,
+        };
+        let _ = state.apply_key(key_event(KeyCode::Esc));
+        assert_eq!(state.relay_mismatch, RelayMismatchState::Idle);
+    }
+
+    #[test]
+    fn relay_token_field_accepts_pasted_invite() {
+        let mut state = ConnectRemoteHostState::load();
+        state.selected = state.relay_selection_index();
+        state.set_focus(Focus::RelayToken);
+        assert_eq!(state.editing, Some(EditField::RelayToken));
+
+        let _ = state.apply_paste("invite-token-from-clipboard\nignored-second-line");
+        assert_eq!(state.relay_draft_token, "invite-token-from-clipboard");
+    }
+
+    #[test]
+    fn relay_join_command_requires_the_embedded_runtime() {
+        let answer = run_relay_join_command(None, "relay.example:7475", "token", false);
+        assert!(
+            matches!(answer, RelayNodeAnswer::Err(ref message) if message.contains("embedded console")),
+            "unexpected answer: {answer:?}"
+        );
+        let error = run_relay_remove_command(None).expect_err("no node socket must fail");
+        assert!(error.contains("embedded console"), "got: {error}");
+    }
+
+    #[test]
+    fn relay_node_answer_typed_parsing() {
+        let ok = serde_json::json!({"type": "Response", "payload": {"ok": true, "message": "relay joined: relay.example:7475 (fingerprint ab); link starting"}}).to_string();
+        assert!(matches!(
+            relay_node_answer(&ok, "pin mismatch:"),
+            RelayNodeAnswer::Ok(ref message) if message.contains("relay joined")
+        ));
+
+        let mismatch = serde_json::json!({"type": "Response", "payload": {"ok": false, "message": "pin mismatch: relay at x presents y, but this node pinned z"}}).to_string();
+        assert!(matches!(
+            relay_node_answer(&mismatch, "pin mismatch:"),
+            RelayNodeAnswer::PinMismatch(_)
+        ));
+
+        let refused = serde_json::json!({"type": "Response", "payload": {"ok": false, "message": "relay join failed: enrollment token was rejected"}}).to_string();
+        assert!(matches!(
+            relay_node_answer(&refused, "pin mismatch:"),
+            RelayNodeAnswer::Err(ref message) if message.contains("enrollment token was rejected")
+        ));
+
+        assert!(matches!(
+            relay_node_answer("OK relay removed", "pin mismatch:"),
+            RelayNodeAnswer::Ok(_)
+        ));
+        assert!(matches!(
+            relay_node_answer("ERR relay gone", "pin mismatch:"),
+            RelayNodeAnswer::Err(ref message) if message == "relay gone"
+        ));
+        assert!(matches!(
+            relay_node_answer("", "pin mismatch:"),
+            RelayNodeAnswer::Err(ref message) if message.contains("empty response")
+        ));
+    }
+
+    #[test]
+    fn connect_popup_renders_relay_section_and_details() {
+        let mut state = ConnectRemoteHostState::load();
+        state.relay = Some(relay_pin());
+        state.selected = state.relay_selection_index();
+        state.set_focus(Focus::RelayAddress);
+
+        let output = rendered_text(100, 34, &state);
+        assert!(output.contains("Relay"), "relay header renders: {output}");
+        assert!(
+            output.contains("relay.example:7475"),
+            "the pinned address renders in the sidebar: {output}"
+        );
+        assert!(
+            output.contains("Join Relay"),
+            "the join button renders: {output}"
+        );
+        assert!(
+            output.contains("Remove Relay"),
+            "the remove button renders for a pinned relay: {output}"
+        );
+        assert!(
+            output.contains(&"ab".repeat(24)),
+            "the pinned fingerprint renders (clipped to the card width): {output}"
+        );
+        assert!(
+            output.contains("Invite Token"),
+            "the token field renders: {output}"
+        );
+    }
+
+    #[test]
+    fn connect_popup_renders_no_relay_placeholder() {
+        let mut state = ConnectRemoteHostState::load();
+        state.relay = None;
+        state.selected = state.relay_selection_index();
+
+        let output = rendered_text(100, 34, &state);
+        assert!(
+            output.contains("no relay pinned"),
+            "the empty state renders: {output}"
+        );
+        assert!(
+            !output.contains("Remove Relay"),
+            "without a pin there is no remove button: {output}"
+        );
     }
 }

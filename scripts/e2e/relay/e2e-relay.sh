@@ -33,10 +33,16 @@
 #               identity enrolls (and comes fully ONLINE) under the custom
 #               certificate's fingerprint instead — join (#141) and the
 #               runtime relay link (#151) share one identity source.
+#   relaymgmt — issue #156 slice 1 (TUI relay management): the control
+#               channel's RELAY_JOIN/RELAY_JOIN FORCE/RELAY_REMOVE drive
+#               the exact flow the Ctrl-W popup sends — pin + link up,
+#               quiet re-pin on an unchanged fingerprint, pin-mismatch
+#               refusal that restores the previous pin, forced switch, and
+#               removal that tears the link down.
 #
 # Usage: e2e-relay.sh [scenario ...]
 #   scenarios: smoke (default), reconnect, reregister, streams, direct,
-#   pastefile, revoke, capacity, presence, joinkeypaths
+#   pastefile, revoke, capacity, presence, joinkeypaths, relaymgmt
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -53,7 +59,7 @@ log() { printf '[e2e-relay] %s\n' "$*"; }
 die() {
     log "ERROR: $*"
     local name
-    for name in "$RELAY" "$NODE_A" "$NODE_B" "$NODE_C"; do
+    for name in "$RELAY" "$RELAY2" "$NODE_A" "$NODE_B" "$NODE_C"; do
         if docker inspect "$name" >/dev/null 2>&1; then
             log "$name logs (tail):"
             docker logs --tail 20 "$name" 2>&1 | sed 's/^/  /' || true
@@ -64,6 +70,7 @@ die() {
 
 RUN=${RUN:-$RANDOM$RANDOM}
 RELAY="wa37-relay-$RUN"
+RELAY2="wa37-relay2-$RUN"
 NODE_A="wa37-node-a-$RUN"
 NODE_B="wa37-node-b-$RUN"
 NODE_C="wa37-node-c-$RUN"
@@ -78,7 +85,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required for host-side status parsin
 command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is required for the direct scenario"
 
 cleanup() {
-    docker rm -f "$RELAY" "$NODE_A" "$NODE_B" "$NODE_C" >/dev/null 2>&1 || true
+    docker rm -f "$RELAY" "$RELAY2" "$NODE_A" "$NODE_B" "$NODE_C" >/dev/null 2>&1 || true
     docker network rm "$NET_A" "$NET_B" "$NET_C" "$NET_DIRECT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -99,6 +106,36 @@ build_image() {
 
 relay_status() {
     docker exec "$RELAY" waitagent relay status --listen "$RELAY_LISTEN"
+}
+
+# Relay-container-parameterized variants for scenarios that bring up a
+# second relay (relaymgmt's pin-mismatch switch).
+relay_status_on() {
+    docker exec "$1" waitagent relay status --listen "$RELAY_LISTEN"
+}
+
+# Polls a relay container's admin status until exactly the expected node ids
+# are online.
+wait_for_node_ids_on() {
+    local relay_container=$1
+    shift
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    local want have
+    want=$(printf '%s\n' "$@" | sort | paste -sd' ')
+    while ((SECONDS < deadline)); do
+        if status=$(relay_status_on "$relay_container" 2>/dev/null); then
+            have=$(jq -r '[.nodes[].node_id] | sort | join(" ")' <<<"$status")
+            if [ "$have" = "$want" ]; then
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+    die "nodes [$want] did not come online within ${GATE_TIMEOUT_SECS}s (last status: ${status:-<none>})"
+}
+
+node_count_on() {
+    relay_status_on "$1" 2>/dev/null | jq -r '.nodes | length'
 }
 
 # Polls the admin status until exactly the expected node ids are online.
@@ -947,9 +984,127 @@ EOF
     log "presence OK: remote row availability followed B's relay liveness (online -> offline -> online)"
 }
 
+scenario_relaymgmt() {
+    log "scenario: relaymgmt (control-channel relay join/remove, issue #156 slice 1)"
+    docker network create --internal "$NET_A" >/dev/null
+
+    # Two relays with distinct identities: relay2 only exists so the join
+    # can present a fingerprint the node never pinned (the pin-mismatch
+    # path needs a real second identity, not a file edit).
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+    docker run -d --name "$RELAY2" --network "$NET_A" --network-alias relay2 "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+    token2=$(docker exec "$RELAY2" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token2" ] || die "relay2 invite produced no token"
+
+    relay_fp=$(docker exec "$RELAY" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]*\):.*/\1/p')
+    [ -n "$relay_fp" ] || die "could not fingerprint the relay identity"
+    relay2_fp=$(docker exec "$RELAY2" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]*\):.*/\1/p')
+    [ -n "$relay2_fp" ] || die "could not fingerprint the relay2 identity"
+    [ "$relay_fp" != "$relay2_fp" ] || die "the two relays must have distinct identities"
+
+    # Node A starts WITHOUT joining: enrollment must arrive through the
+    # node control channel — the exact RELAY_JOIN command the Ctrl-W popup
+    # sends (base64 address/token, matching the TUI encoding).
+    docker run -dt --name "$NODE_A" --network "$NET_A" "$IMAGE" \
+        sh -c "exec waitagent --port $NODE_PORT_A" >/dev/null
+    wait_node_ready "$NODE_A" "$NODE_PORT_A"
+    if docker exec "$NODE_A" test -f /root/.waitagent/relay.toml; then
+        die "node A must start without a relay pin"
+    fi
+
+    join_relay_cmd=$(docker exec "$NODE_A" sh -c \
+        "printf 'RELAY_JOIN %s %s' \"\$(printf %s 'relay:$RELAY_PORT' | base64 -w0)\" \"\$(printf %s '$token' | base64 -w0)\"")
+    join_relay2_cmd=$(docker exec "$NODE_A" sh -c \
+        "printf 'RELAY_JOIN %s %s' \"\$(printf %s 'relay2:$RELAY_PORT' | base64 -w0)\" \"\$(printf %s '$token2' | base64 -w0)\"")
+
+    join_out=$(node_command "$NODE_A" "$NODE_PORT_A" "$join_relay_cmd")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$join_out" >/dev/null \
+        || die "RELAY_JOIN failed: $join_out"
+    grep -q "relay joined" <<<"$(jq -r '.payload.message // ""' <<<"$join_out")" \
+        || die "RELAY_JOIN answer must report the joined relay: $join_out"
+
+    # The pin names the relay address and the relay identity fingerprint.
+    docker exec "$NODE_A" grep -q "^address = \"relay:$RELAY_PORT\"" /root/.waitagent/relay.toml \
+        || die "relay.toml does not pin the joined relay address"
+    docker exec "$NODE_A" grep -q "^relay_fingerprint = \"$relay_fp\"" /root/.waitagent/relay.toml \
+        || die "relay.toml does not pin the relay identity fingerprint"
+
+    # The link comes up: the relay's connection table lists A online.
+    fp_a=$(docker exec "$NODE_A" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]*\):.*/\1/p')
+    [ -n "$fp_a" ] || die "could not fingerprint node A"
+    wait_for_node_ids "$fp_a"
+    log "relay link established after control-channel join"
+
+    # Re-join with the unchanged fingerprint is the quiet path: ok, and
+    # the answer reports the pin was already in place.
+    rejoin_out=$(node_command "$NODE_A" "$NODE_PORT_A" "$join_relay_cmd")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$rejoin_out" >/dev/null \
+        || die "quiet re-join failed: $rejoin_out"
+    grep -q "relay already pinned" <<<"$(jq -r '.payload.message // ""' <<<"$rejoin_out")" \
+        || die "unchanged fingerprint must answer 'relay already pinned': $rejoin_out"
+
+    # Pin-mismatch guard: joining the OTHER relay (fingerprint the node
+    # never pinned) refuses by default and restores the previous pin — the
+    # control-channel equivalent of the TUI's abort-by-default warning.
+    mismatch_out=$(node_command "$NODE_A" "$NODE_PORT_A" "$join_relay2_cmd")
+    jq -e '.type == "Response" and .payload.ok == false' <<<"$mismatch_out" >/dev/null \
+        || die "pin-mismatch join must refuse: $mismatch_out"
+    grep -q "pin mismatch" <<<"$(jq -r '.payload.message // ""' <<<"$mismatch_out")" \
+        || die "the refusal must name the pin mismatch: $mismatch_out"
+    docker exec "$NODE_A" grep -q "^address = \"relay:$RELAY_PORT\"" /root/.waitagent/relay.toml \
+        || die "the refused join must restore the previous relay address"
+    docker exec "$NODE_A" grep -q "^relay_fingerprint = \"$relay_fp\"" /root/.waitagent/relay.toml \
+        || die "the refused join must restore the previous pin"
+    wait_for_node_ids "$fp_a"
+    log "pin mismatch refused by default and the previous pin was restored"
+
+    # The explicit confirmation (the TUI's Switch anyway = FORCE) accepts
+    # the new enrollment, re-pins relay2, and restarts the link there.
+    force_out=$(node_command "$NODE_A" "$NODE_PORT_A" "$join_relay2_cmd FORCE")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$force_out" >/dev/null \
+        || die "forced join failed: $force_out"
+    grep -q "relay joined" <<<"$(jq -r '.payload.message // ""' <<<"$force_out")" \
+        || die "the forced join must report the joined relay: $force_out"
+    docker exec "$NODE_A" grep -q "^address = \"relay2:$RELAY_PORT\"" /root/.waitagent/relay.toml \
+        || die "the forced join must pin relay2"
+    docker exec "$NODE_A" grep -q "^relay_fingerprint = \"$relay2_fp\"" /root/.waitagent/relay.toml \
+        || die "the forced join must pin relay2's fingerprint"
+    wait_for_node_ids_on "$RELAY2" "$fp_a"
+    log "forced switch re-pinned relay2 and the link re-established"
+
+    # Removal: relay.toml is cleared and the link is torn down (the active
+    # relay's table empties; relay IO through the control channel is
+    # refused because no relay is configured anymore).
+    remove_out=$(node_command "$NODE_A" "$NODE_PORT_A" "RELAY_REMOVE")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$remove_out" >/dev/null \
+        || die "RELAY_REMOVE failed: $remove_out"
+    if docker exec "$NODE_A" test -f /root/.waitagent/relay.toml; then
+        die "relay.toml must be removed"
+    fi
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ "$(node_count_on "$RELAY2")" = "0" ] && break
+        sleep 2
+    done
+    [ "$(node_count_on "$RELAY2")" = "0" ] \
+        || die "relay2 table must empty after removal (last status: $(relay_status_on "$RELAY2"))"
+    wait_probe_refused "$NODE_A" "$NODE_PORT_A" deadbeef >/dev/null
+    log "relay removed: pin cleared, link down"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths)
+    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -987,8 +1142,11 @@ for scenario in "${scenarios[@]}"; do
         joinkeypaths)
             scenario_joinkeypaths
             ;;
+        relaymgmt)
+            scenario_relaymgmt
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt)"
             ;;
     esac
     log "scenario '$scenario' passed"

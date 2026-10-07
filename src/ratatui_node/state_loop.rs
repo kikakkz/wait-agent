@@ -26,15 +26,19 @@ use super::outbound_dial_retry_worker::OutboundDialRetryWorker;
 use super::peer_reachability_probe_worker::PeerReachabilityProbeWorker;
 use super::reconnect_worker::ReconnectWorker;
 use super::runtime::{
-    RelayLinkErrorSnapshot, RemoteNodeConnectionInfo, RemoteNodeConnectionMode, SharedState,
+    start_relay_link, stop_relay_link, RelayLinkErrorSnapshot, RemoteNodeConnectionInfo,
+    RemoteNodeConnectionMode, SharedState,
 };
 use super::snapshot::{
     build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
     HistoryResponse, ServerStatus, SessionView,
 };
 use super::state_event::{
-    ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, RemoteHostConnectedOutcome,
-    StateEvent,
+    ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, RelayJoinApplied,
+    RemoteHostConnectedOutcome, StateEvent,
+};
+use crate::command::relay_enroll::{
+    current_relay_pin, decide_relay_join_pin, join_and_pin_relay, RelayJoinPinDecision,
 };
 use crate::host::ssh::outbound_connection_snapshot_store::OutboundConnectionSnapshotStore;
 use crate::host::ssh::remote_host_connect_runtime::{
@@ -284,6 +288,29 @@ fn run_state_event_loop(
             }
             StateEvent::E2eRelayProbeResult { client_id, result } => {
                 handle_e2e_relay_probe_result(&client_writer, client_id, *result);
+            }
+            StateEvent::RelayJoinResult {
+                client_id,
+                address,
+                result,
+            } => {
+                handle_relay_join_result(
+                    &shared,
+                    &client_writer,
+                    &connected_clients,
+                    client_id,
+                    &address,
+                    *result,
+                );
+            }
+            StateEvent::RelayRemoveResult { client_id, result } => {
+                handle_relay_remove_result(
+                    &shared,
+                    &client_writer,
+                    &connected_clients,
+                    client_id,
+                    *result,
+                );
             }
             StateEvent::CreateAuthorityHostSession {
                 request_id,
@@ -795,6 +822,32 @@ fn handle_client_command_event(
             *hold_secs,
             state_event_tx,
         );
+        return;
+    }
+
+    if let ClientCommand::RelayJoin {
+        address,
+        token,
+        force,
+    } = &command
+    {
+        // The enrollment session blocks on TLS + enrollment IO for seconds;
+        // it runs on a worker thread and the result comes back as a
+        // RelayJoinResult event so all SharedState mutations still happen
+        // on this single-writer loop.
+        run_relay_join(
+            shared.clone(),
+            client_id,
+            address.clone(),
+            token.clone(),
+            *force,
+            state_event_tx,
+        );
+        return;
+    }
+
+    if let ClientCommand::RelayRemove = &command {
+        run_relay_remove(client_id, state_event_tx);
         return;
     }
 
@@ -1597,6 +1650,15 @@ fn handle_client_command(
             // Handled asynchronously in the event-loop dispatcher like
             // CreateRemoteSession.
             CommandOutcome::Error("E2eRelayProbe must be handled by the event loop".to_string())
+        }
+
+        ClientCommand::RelayJoin { .. } | ClientCommand::RelayRemove => {
+            // Handled asynchronously in the event-loop dispatcher like
+            // E2eRelayProbe: enrollment and link teardown must not block the
+            // single writer thread.
+            CommandOutcome::Error(
+                "relay management commands must be handled by the event loop".to_string(),
+            )
         }
 
         ClientCommand::CloseSession { .. } => {
@@ -2626,6 +2688,165 @@ fn handle_e2e_relay_probe_result(
     client_writer.send(ClientWriterRequest::Write { client_id, payload });
 }
 
+/// Runs the relay enrollment off the state loop thread (issue #156 slice 1):
+/// the join blocks on TCP + TLS + enrollment IO for seconds and must not
+/// stall the single writer. All `SharedState` mutations happen when the
+/// result comes back as a `RelayJoinResult` event.
+fn run_relay_join(
+    shared: Arc<SharedState>,
+    client_id: u64,
+    address: String,
+    token: String,
+    force: bool,
+    state_event_tx: mpsc::Sender<StateEvent>,
+) {
+    std::thread::spawn(move || {
+        let result = perform_relay_join(&shared, &address, &token, force);
+        let _ = state_event_tx.send(StateEvent::RelayJoinResult {
+            client_id,
+            address,
+            result: Box::new(result),
+        });
+    });
+}
+
+/// Enrolls at the relay through the same engine `relay join` uses, then
+/// reconciles the fresh pin with the one it replaced. A fingerprint change
+/// refuses by default: the previous pin is restored and the caller surfaces
+/// a pin-mismatch error; only an explicit `force` (the TUI's "Switch
+/// anyway" confirmation) accepts the new identity. File IO only — the
+/// relay link restart is the state loop's job.
+fn perform_relay_join(
+    shared: &Arc<SharedState>,
+    address: &str,
+    token: &str,
+    force: bool,
+) -> Result<RelayJoinApplied, String> {
+    let previous = current_relay_pin();
+    let outcome =
+        join_and_pin_relay(address, token, &shared.network).map_err(|error| error.to_string())?;
+    match decide_relay_join_pin(previous.as_ref(), &outcome.relay_fingerprint, force) {
+        RelayJoinPinDecision::PinMismatch { previous } => {
+            previous
+                .save(&crate::infra::relay_toml_store::RelayTomlConfig::default_path())
+                .map_err(|error| format!("restore previous relay pin: {error}"))?;
+            Err(format!(
+                "pin mismatch: relay at {address} presents fingerprint {}, but this node pinned {} ({}); aborting. Use Switch anyway to accept the new identity.",
+                outcome.relay_fingerprint, previous.relay_fingerprint, previous.address
+            ))
+        }
+        RelayJoinPinDecision::Consistent => {
+            let pinned = current_relay_pin()
+                .ok_or_else(|| "relay join succeeded but the pin cannot be reloaded".to_string())?;
+            let slot_empty = shared
+                .relay_client
+                .lock()
+                .map(|slot| slot.is_none())
+                .unwrap_or(true);
+            let link_restarted = slot_empty || previous.as_ref() != Some(&pinned);
+            Ok(RelayJoinApplied {
+                pinned,
+                link_restarted,
+            })
+        }
+    }
+}
+
+/// Applies a finished relay join on the single-writer thread: restart the
+/// persistent link when the pin changed, clear the stale link-error
+/// snapshot, broadcast, and answer the originating client.
+fn handle_relay_join_result(
+    shared: &Arc<SharedState>,
+    client_writer: &ClientWriterHandle,
+    connected_clients: &HashSet<u64>,
+    client_id: u64,
+    address: &str,
+    result: Result<RelayJoinApplied, String>,
+) {
+    let outcome = match result {
+        Ok(applied) => {
+            if applied.link_restarted {
+                stop_relay_link(&shared.relay_client);
+                start_relay_link(shared, applied.pinned.clone());
+            }
+            if let Ok(mut slot) = shared.relay_error.lock() {
+                *slot = None;
+            }
+            broadcast_snapshot(shared, client_writer, connected_clients);
+            if applied.link_restarted {
+                CommandOutcome::Message(format!(
+                    "relay joined: {address} (fingerprint {}); link starting",
+                    applied.pinned.relay_fingerprint
+                ))
+            } else {
+                CommandOutcome::Message(format!(
+                    "relay already pinned: {address} (fingerprint {})",
+                    applied.pinned.relay_fingerprint
+                ))
+            }
+        }
+        Err(message) => CommandOutcome::Error(message),
+    };
+    let response: ControlResponse = outcome.into();
+    let payload = response_json(&response);
+    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+}
+
+/// Runs the relay removal's file IO off the state loop thread; the link
+/// teardown and state reset happen on the `RelayRemoveResult` event.
+fn run_relay_remove(client_id: u64, state_event_tx: mpsc::Sender<StateEvent>) {
+    std::thread::spawn(move || {
+        let result = perform_relay_remove();
+        let _ = state_event_tx.send(StateEvent::RelayRemoveResult {
+            client_id,
+            result: Box::new(result),
+        });
+    });
+}
+
+/// Deletes the pinned relay.toml. Returns the operator-facing message;
+/// a missing file is not an error (removal is idempotent).
+fn perform_relay_remove() -> Result<String, String> {
+    let path = crate::infra::relay_toml_store::RelayTomlConfig::default_path();
+    let pinned = path.is_file();
+    if pinned {
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("remove {}: {error}", path.display()))?;
+        Ok("relay removed; link stopping".to_string())
+    } else {
+        Ok("no relay was pinned".to_string())
+    }
+}
+
+/// Applies a finished relay removal on the single-writer thread: stop the
+/// persistent link, clear relay presence/error state, broadcast, and answer
+/// the originating client.
+fn handle_relay_remove_result(
+    shared: &Arc<SharedState>,
+    client_writer: &ClientWriterHandle,
+    connected_clients: &HashSet<u64>,
+    client_id: u64,
+    result: Result<String, String>,
+) {
+    let outcome = match result {
+        Ok(message) => {
+            stop_relay_link(&shared.relay_client);
+            if let Ok(mut slot) = shared.relay_error.lock() {
+                *slot = None;
+            }
+            if let Ok(mut presence) = shared.relay_presence.lock() {
+                presence.clear();
+            }
+            broadcast_snapshot(shared, client_writer, connected_clients);
+            CommandOutcome::Message(message)
+        }
+        Err(message) => CommandOutcome::Error(message),
+    };
+    let response: ControlResponse = outcome.into();
+    let payload = response_json(&response);
+    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+}
+
 fn handle_remote_session_create_result(
     shared: &Arc<SharedState>,
     client_writer: &ClientWriterHandle,
@@ -2724,6 +2945,22 @@ mod state_loop_tests {
         start_test_loop_with_snapshot_store(snapshot_store)
     }
 
+    /// Same as `start_test_loop` with an explicit network config, so link
+    /// lifecycle tests can point node credentials at throwaway paths.
+    fn start_test_loop_with_network(
+        network: RemoteNetworkConfig,
+    ) -> (
+        Arc<SharedState>,
+        mpsc::Sender<StateEvent>,
+        super::super::client_writer::ClientWriterHandle,
+        std::thread::JoinHandle<()>,
+    ) {
+        let snapshot_store = OutboundConnectionSnapshotStore::new(std::env::temp_dir().join(
+            format!("waitagent-test-outbound-snapshot-{}", std::process::id()),
+        ));
+        start_test_loop_full(network, snapshot_store)
+    }
+
     fn start_test_loop_with_snapshot_store(
         snapshot_store: OutboundConnectionSnapshotStore,
     ) -> (
@@ -2732,7 +2969,18 @@ mod state_loop_tests {
         super::super::client_writer::ClientWriterHandle,
         std::thread::JoinHandle<()>,
     ) {
-        let network = RemoteNetworkConfig::default();
+        start_test_loop_full(RemoteNetworkConfig::default(), snapshot_store)
+    }
+
+    fn start_test_loop_full(
+        network: RemoteNetworkConfig,
+        snapshot_store: OutboundConnectionSnapshotStore,
+    ) -> (
+        Arc<SharedState>,
+        mpsc::Sender<StateEvent>,
+        super::super::client_writer::ClientWriterHandle,
+        std::thread::JoinHandle<()>,
+    ) {
         let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
         let (tx, rx) = mpsc::channel::<StateEvent>();
         let (catalog_tx, _catalog_rx) = mpsc::channel::<LocalCatalogChangeRequest>();
@@ -3854,6 +4102,260 @@ mod state_loop_tests {
         );
 
         drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn relay_join_result_restarts_link_clears_error_and_answers() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let credential_dir = std::env::temp_dir().join(format!(
+            "waitagent-test-relay-join-creds-{}",
+            std::process::id()
+        ));
+        let network = RemoteNetworkConfig {
+            node_key_path: Some(
+                credential_dir
+                    .join("node.key")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            node_cert_path: Some(
+                credential_dir
+                    .join("node.crt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..RemoteNetworkConfig::default()
+        };
+        let (shared, tx, client_writer, handle) = start_test_loop_with_network(network);
+
+        let (mut server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+
+        // A stale link error must be cleared by the fresh enrollment.
+        let _ = tx.send(StateEvent::RelayLinkError {
+            code: 0x0002,
+            message: "node access revoked by the relay operator".to_string(),
+        });
+
+        let pinned = crate::infra::relay_toml_store::RelayTomlConfig {
+            address: "127.0.0.1:1".to_string(),
+            relay_fingerprint: "ab".repeat(32),
+            heartbeat_interval_secs: None,
+        };
+        let _ = tx.send(StateEvent::RelayJoinResult {
+            client_id: 1,
+            address: pinned.address.clone(),
+            result: Box::new(Ok(RelayJoinApplied {
+                pinned: pinned.clone(),
+                link_restarted: true,
+            })),
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let connected = read_line_until(&mut server, deadline).expect("connected snapshot");
+        assert!(connected.contains("Snapshot"), "got: {connected}");
+        let error_snapshot = read_line_until(&mut server, deadline).expect("error snapshot");
+        assert!(error_snapshot.contains("Snapshot"), "got: {error_snapshot}");
+        let join_snapshot = read_line_until(&mut server, deadline).expect("join snapshot");
+        assert!(
+            join_snapshot.contains("Snapshot"),
+            "the join result broadcasts a snapshot, got: {join_snapshot}"
+        );
+        let response = read_line_until(&mut server, deadline).expect("join response");
+        assert!(
+            response.contains("\"ok\":true") && response.contains("relay joined"),
+            "expected the joined answer, got: {response}"
+        );
+        assert!(
+            response.contains(&pinned.relay_fingerprint),
+            "the answer names the pinned fingerprint: {response}"
+        );
+
+        assert!(
+            shared
+                .relay_error
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none(),
+            "a fresh enrollment clears the stale link error"
+        );
+        assert!(
+            shared
+                .relay_client
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some(),
+            "the restarted link is installed for via-relay dials"
+        );
+
+        // Cancel the retrying test link so no thread leaks into other tests.
+        stop_relay_link(&shared.relay_client);
+        crate::infra::best_effort::remove_dir_all(&credential_dir);
+
+        drop(tx);
+        drop(client_writer);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn relay_join_result_without_restart_keeps_existing_link() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (shared, tx, client_writer, handle) = start_test_loop();
+        let (mut server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+
+        let pinned = crate::infra::relay_toml_store::RelayTomlConfig {
+            address: "127.0.0.1:1".to_string(),
+            relay_fingerprint: "ab".repeat(32),
+            heartbeat_interval_secs: None,
+        };
+        let _ = tx.send(StateEvent::RelayJoinResult {
+            client_id: 1,
+            address: pinned.address.clone(),
+            result: Box::new(Ok(RelayJoinApplied {
+                pinned: pinned.clone(),
+                link_restarted: false,
+            })),
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let connected = read_line_until(&mut server, deadline).expect("connected snapshot");
+        assert!(connected.contains("Snapshot"), "got: {connected}");
+        let join_snapshot = read_line_until(&mut server, deadline).expect("join snapshot");
+        assert!(
+            join_snapshot.contains("Snapshot"),
+            "the join result broadcasts a snapshot, got: {join_snapshot}"
+        );
+        let response = read_line_until(&mut server, deadline).expect("join response");
+        assert!(
+            response.contains("\"ok\":true") && response.contains("relay already pinned"),
+            "expected the quiet re-pin answer, got: {response}"
+        );
+        assert!(
+            shared
+                .relay_client
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none(),
+            "an unchanged pin must not touch the link slot"
+        );
+
+        drop(tx);
+        drop(client_writer);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn relay_join_result_error_is_passed_through() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (_shared, tx, client_writer, handle) = start_test_loop();
+        let (mut server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+
+        let _ = tx.send(StateEvent::RelayJoinResult {
+            client_id: 1,
+            address: "relay.example:7475".to_string(),
+            result: Box::new(Err(
+                "pin mismatch: relay at relay.example:7475 presents fingerprint cc..., but this node pinned ab... (relay.example:7475); aborting. Use Switch anyway to accept the new identity."
+                    .to_string(),
+            )),
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let connected = read_line_until(&mut server, deadline).expect("connected snapshot");
+        assert!(connected.contains("Snapshot"), "got: {connected}");
+        let response = read_line_until(&mut server, deadline).expect("join response");
+        assert!(
+            response.contains("\"ok\":false") && response.contains("pin mismatch"),
+            "the pin-mismatch refusal reaches the client verbatim: {response}"
+        );
+
+        drop(tx);
+        drop(client_writer);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn relay_remove_result_stops_link_clears_state_and_answers() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (shared, tx, client_writer, handle) = start_test_loop();
+        let (mut server, client) = UnixStream::pair().expect("stream pair");
+        client_writer.send(ClientWriterRequest::Register {
+            client_id: 1,
+            stream: crate::platform::local_ipc::unix::LocalStream::from_unix(client),
+            broadcast: true,
+        });
+        let _ = tx.send(StateEvent::ClientConnected { client_id: 1 });
+
+        // Seed presence and a link error the removal must reset.
+        let _ = tx.send(StateEvent::RelayPeerOnline {
+            node_id: "relay-peer-a".to_string(),
+        });
+        let _ = tx.send(StateEvent::RelayLinkError {
+            code: 0x0002,
+            message: "node access revoked by the relay operator".to_string(),
+        });
+        let _ = tx.send(StateEvent::RelayRemoveResult {
+            client_id: 1,
+            result: Box::new(Ok("relay removed; link stopping".to_string())),
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let connected = read_line_until(&mut server, deadline).expect("connected snapshot");
+        assert!(connected.contains("Snapshot"), "got: {connected}");
+        let presence_snapshot = read_line_until(&mut server, deadline).expect("presence snapshot");
+        assert!(
+            presence_snapshot.contains("Snapshot"),
+            "got: {presence_snapshot}"
+        );
+        let error_snapshot = read_line_until(&mut server, deadline).expect("error snapshot");
+        assert!(error_snapshot.contains("Snapshot"), "got: {error_snapshot}");
+        let remove_snapshot = read_line_until(&mut server, deadline).expect("remove snapshot");
+        assert!(
+            remove_snapshot.contains("Snapshot"),
+            "the removal broadcasts a snapshot, got: {remove_snapshot}"
+        );
+        let response = read_line_until(&mut server, deadline).expect("remove response");
+        assert!(
+            response.contains("\"ok\":true") && response.contains("relay removed"),
+            "expected the removal answer, got: {response}"
+        );
+
+        assert!(
+            shared
+                .relay_error
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none(),
+            "removal resets the link error"
+        );
+        assert!(
+            shared
+                .relay_presence
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "removal resets relay presence"
+        );
+
+        drop(tx);
+        drop(client_writer);
         handle.join().expect("state loop should exit cleanly");
     }
 }
