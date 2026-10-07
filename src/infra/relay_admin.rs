@@ -70,6 +70,13 @@ pub(crate) struct RelayAdminRequest {
     pub(crate) deploy: Option<bool>,
     #[serde(default)]
     pub(crate) fingerprint: Option<String>,
+    /// Node-channel-only `resolve-node` query (issue #156 slice 3); the
+    /// local admin grammar never matches those command names.
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    /// Node-channel-only `announce` payload (issue #156 slice 3).
+    #[serde(default)]
+    pub(crate) labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

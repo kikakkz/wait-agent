@@ -221,3 +221,44 @@ fn pinned_verifier_rejects_mismatched_fingerprint() {
     );
     assert!(result.is_err(), "pin mismatch must fail");
 }
+
+#[test]
+fn egress_ip_label_resolves_for_literal_relay_hosts() {
+    // UDP connect sends no packets but lets the kernel pick the egress
+    // route, so a literal relay address yields this node's local IP.
+    assert_eq!(egress_ip_label("127.0.0.1"), Some("127.0.0.1".to_string()));
+    assert_eq!(egress_ip_label("::1"), Some("::1".to_string()));
+}
+
+#[test]
+fn egress_ip_label_skips_hostname_relays_without_dns() {
+    // Resolving the relay's hostname could block on DNS inside the link
+    // loop; hostname relays simply contribute no IP label.
+    assert_eq!(egress_ip_label("relay.example"), None);
+    assert_eq!(egress_ip_label(""), None);
+}
+
+#[test]
+fn push_label_keeps_first_occurrence_and_skips_blanks() {
+    let mut labels = Vec::new();
+    push_label(&mut labels, "nas".to_string());
+    push_label(&mut labels, "nas".to_string());
+    push_label(&mut labels, "  ".to_string());
+    push_label(&mut labels, "10.0.1.5".to_string());
+    assert_eq!(labels, vec!["nas".to_string(), "10.0.1.5".to_string()]);
+}
+
+#[test]
+fn node_labels_combine_hostname_and_literal_egress_ip() {
+    let labels = node_labels("127.0.0.1");
+    assert!(
+        labels.iter().any(|label| label == "127.0.0.1"),
+        "literal relay host contributes the egress IP: {labels:?}"
+    );
+    // A hostname relay adds no IP label and never the relay's own name.
+    let labels = node_labels("relay.example");
+    assert!(
+        !labels.iter().any(|label| label == "relay.example"),
+        "the relay's own name is not a label for this node: {labels:?}"
+    );
+}

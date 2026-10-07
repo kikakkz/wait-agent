@@ -82,6 +82,11 @@ pub struct RemoteHostConnectOutcome {
     /// `auto` profiles resolve to direct/relay before dialing, so `auto`
     /// never appears here (issue #156 slice 2).
     pub dial_via: Option<RemoteNodeVia>,
+    /// Whether `tls_pin_sha256` was empty and the connect filled it through
+    /// relay fingerprint auto-discovery (issue #156 slice 3). The UI names
+    /// the discovery in the connect response so the operator knows the pin
+    /// came from the relay, not from their own typing.
+    pub pin_auto_discovered: bool,
 }
 
 pub struct RemoteHostConnectRuntime<H, P, B> {
@@ -109,12 +114,26 @@ pub struct RemoteHostConnectRuntime<H, P, B> {
     /// inject a deterministic resolver so the connect flow can be exercised
     /// without sockets.
     via_resolver: Option<ViaResolver>,
+    /// Fingerprint auto-discovery for pin-less relay/auto profiles (issue
+    /// #156 slice 3): maps the profile host to the peer's certificate
+    /// fingerprint through the pinned relay's `resolve-node` admin request.
+    /// Injected by the caller because the relay client handle lives outside
+    /// this runtime; `None` keeps the pre-slice-3 behavior (straight to the
+    /// SSH bootstrap).
+    fingerprint_discoverer: Option<FingerprintDiscoverer>,
 }
 
 /// Resolves a profile `via` for one concrete dial attempt; see
 /// [`RemoteHostConnectRuntime::resolve_dial_via`].
 pub type ViaResolver =
     Arc<dyn Fn(RemoteNodeVia, &str, Option<&str>) -> RemoteNodeVia + Send + Sync>;
+
+/// Discovers a peer's certificate fingerprint by its host label through the
+/// pinned relay (issue #156 slice 3). `Ok(Some(fp))` is a unique match,
+/// `Ok(None)` means "looked up, nothing uniquely matched" (the connect
+/// falls back to the SSH bootstrap), `Err` means the lookup itself failed
+/// (logged; same fallback).
+pub type FingerprintDiscoverer = Arc<dyn Fn(&str) -> Result<Option<String>, String> + Send + Sync>;
 
 /// Reports whether the given node has actively rejected this host's operator
 /// key, returning the rejection message when it has.
@@ -177,6 +196,7 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
             operator_key_store,
             auth_rejection: None,
             via_resolver: None,
+            fingerprint_discoverer: None,
         }
     }
 
@@ -184,6 +204,15 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
     /// (see [`AuthRejectionChecker`]).
     pub fn with_auth_rejection_checker(mut self, checker: AuthRejectionChecker) -> Self {
         self.auth_rejection = Some(checker);
+        self
+    }
+
+    /// Install the fingerprint discoverer used for pin-less relay/auto
+    /// profiles (issue #156 slice 3). The production caller injects a
+    /// `resolve-node` admin request against the node's pinned relay;
+    /// leaving it unset disables discovery (legacy behavior).
+    pub fn with_fingerprint_discoverer(mut self, discoverer: FingerprintDiscoverer) -> Self {
+        self.fingerprint_discoverer = Some(discoverer);
         self
     }
 
@@ -291,14 +320,54 @@ where
         }
         let mut remote_shell = profile.remote_shell.unwrap_or_default();
 
+        // Fingerprint auto-discovery (issue #156 slice 3): a pin-less
+        // relay/auto profile can learn the peer's certificate fingerprint
+        // from the pinned relay before falling back to the SSH bootstrap.
+        // Opportunistic by design: a miss or failure keeps the legacy flow
+        // and never fails the connect, and explicit direct profiles keep
+        // their exact semantics (no relay lookup at all).
+        let mut pin_auto_discovered = false;
+        if profile.tls_pin_sha256.as_deref().is_none_or(str::is_empty)
+            && profile.via() != RemoteNodeVia::Direct
+        {
+            if let Some(discoverer) = &self.fingerprint_discoverer {
+                match discoverer(&profile.host) {
+                    Ok(Some(fingerprint)) => {
+                        ERROR_LOG.log(format!(
+                            "[remote-host-connect] discovered fingerprint for {} via relay: {fingerprint}",
+                            profile.host
+                        ));
+                        profile.tls_pin_sha256 = Some(fingerprint);
+                        pin_auto_discovered = true;
+                    }
+                    Ok(None) => ERROR_LOG.log(format!(
+                        "[remote-host-connect] no relay fingerprint match for {}; falling back to SSH bootstrap",
+                        profile.host
+                    )),
+                    Err(error) => ERROR_LOG.log_error(format!(
+                        "[remote-host-connect] relay fingerprint discovery failed for {}: {error}",
+                        profile.host
+                    )),
+                }
+            }
+        }
+
         // Fast path: if the remote waitagent is still running from a previous
         // connection, dial it directly using the stored TLS pin and operator key
         // without re-bootstrapping over SSH.
         if let Some(outcome) =
             self.try_reuse_existing_connection(&profile, &request, &mut initiate_outbound_dial)?
         {
-            self.persist_auto_via_memory(&request, &profile, outcome.dial_via);
-            return Ok(outcome);
+            self.persist_connect_annotations(
+                &request,
+                &profile,
+                outcome.dial_via,
+                pin_auto_discovered,
+            );
+            return Ok(RemoteHostConnectOutcome {
+                pin_auto_discovered,
+                ..outcome
+            });
         }
 
         let preference = port_preference(&profile.preferred_remote_port);
@@ -411,6 +480,7 @@ where
                 reused_existing_endpoint: true,
                 // No dial was queued: the target was already online.
                 dial_via: None,
+                pin_auto_discovered,
             });
         }
 
@@ -457,6 +527,7 @@ where
             created_target: default_target,
             reused_existing_endpoint: port.reused_existing_waitagent,
             dial_via: Some(resolved_via),
+            pin_auto_discovered,
         })
     }
 
@@ -554,6 +625,9 @@ where
                 created_target: target,
                 reused_existing_endpoint: true,
                 dial_via: Some(resolved_via),
+                // The caller knows whether the pin was relay-discovered and
+                // overwrites this on the way out.
+                pin_auto_discovered: false,
             })),
             Err(error) => {
                 if is_auth_rejection_error(&error) {
@@ -576,29 +650,47 @@ where
         }
     }
 
-    /// Remembers the dial path that just worked for an `auto` profile
-    /// (issue #156 slice 2): persists `last_via_used` for store-backed
-    /// profiles. Explicit `direct`/`relay` choices and unsaved (ad-hoc)
-    /// profiles are left untouched — the memory annotates the effective
-    /// path and must never rewrite the user's choice. Best effort: a failed
-    /// write is logged and never fails the connect.
-    fn persist_auto_via_memory(
+    /// Persists the annotations a successful connect produced, without
+    /// rewriting the user's choices (issue #156):
+    ///
+    /// - `last_via_used` for an `auto` profile that dialed through a
+    ///   concrete path (slice 2 semantics);
+    /// - a relay-discovered `tls_pin_sha256` for any store-backed profile
+    ///   (slice 3) so the next connect's reuse fast path works without
+    ///   discovery.
+    ///
+    /// Only store-backed profiles (`profile_name` or `save_profile_name`)
+    /// are written; explicit `direct`/`relay` choices and unsaved ad-hoc
+    /// profiles are left untouched. Best effort: a failed write is logged
+    /// and never fails the connect.
+    fn persist_connect_annotations(
         &self,
         request: &RemoteHostConnectRequest,
         profile: &RemoteHostProfile,
         dial_via: Option<RemoteNodeVia>,
+        pin_auto_discovered: bool,
     ) {
-        let Some(used) = dial_via else {
-            return;
-        };
-        if profile.via() != RemoteNodeVia::Auto || request.profile_name.is_none() {
+        if request.profile_name.is_none() && request.save_profile_name.is_none() {
             return;
         }
         let mut updated = profile.clone();
-        updated.last_via_used = Some(used.as_str().to_string());
+        let mut changed = false;
+        if profile.via() == RemoteNodeVia::Auto {
+            if let Some(used) = dial_via {
+                updated.last_via_used = Some(used.as_str().to_string());
+                changed = true;
+            }
+        }
+        if pin_auto_discovered {
+            // `profile` already carries the discovered pin.
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
         if let Err(error) = self.history_store.upsert_profile(updated) {
             ERROR_LOG.log(format!(
-                "[remote-host-connect] connected {} but failed to persist last_via_used: {error}",
+                "[remote-host-connect] connected {} but failed to persist connect annotations: {error}",
                 profile.name
             ));
         }
@@ -1209,6 +1301,385 @@ mod tests {
                 "session creation should not be called".to_string(),
             )),
         ))
+    }
+
+    #[test]
+    fn remote_host_connect_relay_discovers_a_missing_pin_and_persists_it() {
+        // via = "relay" with no stored pin: the injected discoverer stands in
+        // for the relay resolve-node admin request and answers the peer's
+        // fingerprint. The reuse dial must carry the discovered pin over the
+        // relay path, the profile must persist it (never the user's hand),
+        // and the outcome must say the pin was auto-discovered (issue #156
+        // slice 3).
+        let path = unique_path("remote-host-connect-discover-relay.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("relay".to_string());
+        stored.last_remote_port = Some(7476);
+        stored.tls_pin_sha256 = None;
+        history.upsert_profile(stored).unwrap();
+        let registry = Arc::new(FakeRegistry::new(vec![remote_target(
+            "10.1.29.130#7476",
+            "seed",
+        )]));
+        let discovery_calls = Arc::new(Mutex::new(Vec::new()));
+        let discovery_log = discovery_calls.clone();
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Arc::new(Mutex::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_fingerprint_discoverer(Arc::new(move |host| {
+            discovery_log.lock().unwrap().push(host.to_string());
+            Ok(Some("cafe0123".to_string()))
+        }));
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(outcome.reused_existing_endpoint);
+        assert!(outcome.pin_auto_discovered, "{outcome:?}");
+        assert_eq!(outcome.dial_via, Some(RemoteNodeVia::Relay));
+        assert_eq!(
+            discovery_calls.lock().unwrap().as_slice(),
+            &["10.1.29.130".to_string()],
+            "the discoverer must see the profile host"
+        );
+        let dials = dials.lock().unwrap();
+        assert_eq!(dials.len(), 1);
+        assert_eq!(dials[0].tls_pin_sha256.as_deref(), Some("cafe0123"));
+        assert_eq!(dials[0].via, Some(RemoteNodeVia::Relay));
+        drop(dials);
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_eq!(loaded.hosts[0].tls_pin_sha256.as_deref(), Some("cafe0123"));
+        assert_eq!(
+            loaded.hosts[0].via(),
+            RemoteNodeVia::Relay,
+            "the explicit relay choice must be preserved"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_auto_discovers_pin_and_uses_relay_path() {
+        // auto + no pin: discovery fills the pin first, the direct probe
+        // still fails (resolver answers Relay), the relay dial carries the
+        // discovered pin, and both the pin and last_via_used land on disk.
+        let path = unique_path("remote-host-connect-discover-auto.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("auto".to_string());
+        stored.last_remote_port = Some(7476);
+        stored.tls_pin_sha256 = None;
+        history.upsert_profile(stored).unwrap();
+        let registry = Arc::new(FakeRegistry::new(vec![remote_target(
+            "10.1.29.130#7476",
+            "seed",
+        )]));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Arc::new(Mutex::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_via_resolver(Arc::new(|_via, _endpoint, pin| {
+            assert_eq!(
+                pin,
+                Some("cafe0123"),
+                "auto must probe with the discovered pin"
+            );
+            RemoteNodeVia::Relay
+        }))
+        .with_fingerprint_discoverer(Arc::new(|_host| Ok(Some("cafe0123".to_string()))));
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(outcome.pin_auto_discovered);
+        assert_eq!(outcome.dial_via, Some(RemoteNodeVia::Relay));
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_eq!(loaded.hosts[0].tls_pin_sha256.as_deref(), Some("cafe0123"));
+        assert_eq!(loaded.hosts[0].via(), RemoteNodeVia::Auto);
+        assert_eq!(loaded.hosts[0].last_via_used(), Some(RemoteNodeVia::Relay));
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_discovery_miss_falls_back_to_ssh_bootstrap() {
+        // Nothing matches on the relay: discovery must not change the
+        // legacy flow — SSH bootstrap supplies the pin as before, and the
+        // outcome must not claim auto-discovery.
+        let path = unique_path("remote-host-connect-discover-miss.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("relay".to_string());
+        history.upsert_profile(stored).unwrap();
+        let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let discovery_calls = Arc::new(Mutex::new(0));
+        let discovery_count = discovery_calls.clone();
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_fingerprint_discoverer(Arc::new(move |_host| {
+            *discovery_count.lock().unwrap() += 1;
+            Ok(None)
+        }));
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(*discovery_calls.lock().unwrap(), 1);
+        assert_eq!(
+            bootstrap_plans.lock().unwrap().len(),
+            1,
+            "miss keeps the SSH bootstrap"
+        );
+        assert!(!outcome.pin_auto_discovered);
+        assert_eq!(outcome.dial_via, Some(RemoteNodeVia::Relay));
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_eq!(
+            loaded.hosts[0].tls_pin_sha256.as_deref(),
+            Some("deadbeef"),
+            "the bootstrap pin stays authoritative on a discovery miss"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_discovery_error_falls_back_to_ssh_bootstrap() {
+        let path = unique_path("remote-host-connect-discover-error.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("relay".to_string());
+        history.upsert_profile(stored).unwrap();
+        let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_fingerprint_discoverer(Arc::new(|_host| {
+            Err("relay admin request failed".to_string())
+        }));
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
+        assert!(!outcome.pin_auto_discovered);
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_direct_profile_never_discovers() {
+        // Explicit direct keeps its exact semantics: no relay lookup — the
+        // discoverer must not even be consulted.
+        let path = unique_path("remote-host-connect-discover-direct.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.tls_pin_sha256 = None;
+        history.upsert_profile(stored).unwrap();
+        let discovery_calls = Arc::new(Mutex::new(0));
+        let discovery_count = discovery_calls.clone();
+        let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_fingerprint_discoverer(Arc::new(move |_host| {
+            *discovery_count.lock().unwrap() += 1;
+            Ok(Some("cafe0123".to_string()))
+        }));
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            *discovery_calls.lock().unwrap(),
+            0,
+            "explicit direct must not consult relay discovery"
+        );
+        assert!(!outcome.pin_auto_discovered);
+        assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_existing_pin_skips_discovery() {
+        let path = unique_path("remote-host-connect-discover-pinned.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("relay".to_string());
+        stored.last_remote_port = Some(7476);
+        stored.tls_pin_sha256 = Some("deadbeef".to_string());
+        history.upsert_profile(stored).unwrap();
+        let discovery_calls = Arc::new(Mutex::new(0));
+        let discovery_count = discovery_calls.clone();
+        let registry = Arc::new(FakeRegistry::new(vec![remote_target(
+            "10.1.29.130#7476",
+            "seed",
+        )]));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Arc::new(Mutex::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_fingerprint_discoverer(Arc::new(move |_host| {
+            *discovery_count.lock().unwrap() += 1;
+            Ok(Some("cafe0123".to_string()))
+        }));
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(*discovery_calls.lock().unwrap(), 0, "a stored pin wins");
+        assert!(!outcome.pin_auto_discovered);
+        crate::infra::best_effort::remove_file(path);
     }
 
     #[test]

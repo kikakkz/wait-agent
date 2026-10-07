@@ -324,10 +324,12 @@ async fn dispatch_loop(
                     }
                     Ok(Frame::AdminRequest { seq, command }) => {
                         // Node-channel admin (docs/relay-design.md 管理通道):
-                        // status reads the shared tables; invite/remove
-                        // execute the exact local-admin handlers; shutdown
-                        // is refused (local socket only). The response rides
-                        // this link's outbound queue, correlated by seq.
+                        // status reads the shared tables; announce labels the
+                        // requesting link's own entry; resolve-node answers
+                        // host-label lookups; invite/remove execute the exact
+                        // local-admin handlers; shutdown is refused (local
+                        // socket only). The response rides this link's
+                        // outbound queue, correlated by seq.
                         let body = remote_admin_response(
                             &command,
                             &RemoteAdminContext {
@@ -342,6 +344,8 @@ async fn dispatch_loop(
                                 token_ttls,
                                 whitelist_dir,
                                 presence,
+                                node_id: node_id.clone(),
+                                connection_id,
                             },
                         );
                         let _ = outbound_tx.send(Frame::AdminResponse { seq, body }).await;

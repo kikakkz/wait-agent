@@ -197,6 +197,13 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
   失败再经 relay dial；显式 direct/relay 不回退（报错信息中给出引导）。
   生效路径记入 `last_via_used` 供 UI 标注，不静默改写用户选择
   （issue #156，取代本文件原"显式指定、不做隐式回退"决策条）。
+- remote-hosts 条目的 `tls_pin_sha256` 可省略：pin 缺失且 via 为
+  auto/relay 时，connect 经 node↔relay 管理通道的 `resolve-node` 按
+  host 标签查对端已注册指纹（唯一命中才采用，多命中/未命中回退 SSH
+  bootstrap 旧路径），发现的 pin 随 profile 落盘、响应注明
+  （issue #156 切片 3）。节点 register 后经同一通道 `announce` 公告自身
+  标签（主机名 + 对 relay 字面地址的 egress IP，≤8 个 × ≤64 字节），
+  只写本链接自己的连接表项。
 
 ## 兼容性承诺
 
@@ -248,6 +255,15 @@ relay → node → console 的错误通道现在定义好结构：错误码 + �
    的 via 三选与 "via auto → …" 标记，dial 走
    `remote_host_connect_runtime.rs`，auto 探测与回退在
    `src/infra/remote_grpc_transport.rs`）。
+   ✅ 已落地（#156 切片 3）— 指纹自动发现：remote-hosts 的
+   `tls_pin_sha256` 可省略；connect 经 node↔relay 管理通道
+   `resolve-node` 按 host 标签唯一命中对端指纹（`announce` 在 register
+   后公告本节点主机名 + egress IP，只写本链接自己的连接表项；
+   锚点 `src/infra/relay_connection_table.rs`、
+   `relay_remote_admin.rs`、`relay_client.rs`、
+   `remote_host_connect_runtime.rs`）。进程级 e2e：e2e-relay.sh
+   pinautodiscovery 场景（pin-less 的 relay 与 auto 两腿，盘上 pin ==
+   对方 enrolled 指纹）。
 8. ✅ 已落地 — 结构化错误语义（relay → node → console）。锚点：#111
    （错误码定型）、#112（节点内传播）、#113（console 渲染）；
    `src/infra/relay_routing/error_code.rs`、`src/ratatui_node/client_runtime.rs`。
