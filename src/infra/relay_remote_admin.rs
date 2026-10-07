@@ -2,7 +2,10 @@
 //! "远端控制流" — a registered node manages the relay over its authenticated
 //! link. Read paths since slice 2 (`status`) plus the `list-whitelist`
 //! directory listing (issue #147, so the dashboard can resolve a remove
-//! prefix against enrolled-but-offline nodes); write paths (`invite`/`remove`)
+//! prefix against enrolled-but-offline nodes); the slice-3 fingerprint
+//! auto-discovery pair (`announce` / `resolve-node`, issue #156) lets a node
+//! publish its host labels and look a peer's fingerprint up by host label
+//! or address; write paths (`invite`/`remove`)
 //! opened in slice 4 with the exact `relay_admin` semantics (mint +
 //! persist; revoke whitelist entry + drop the live link). `shutdown` stays
 //! local-only forever: an emergency stop must not be reachable from a
@@ -23,7 +26,7 @@ use crate::infra::relay_admin::{
     handle_invite, handle_remove, parse_relay_admin_command, RelayAdminCommand,
 };
 use crate::infra::relay_capacity::{RelayCapacityConfig, RelayUsage, SharedUsageMeter};
-use crate::infra::relay_connection_table::RelayConnectionTable;
+use crate::infra::relay_connection_table::{LabelResolve, RelayConnectionTable};
 use crate::infra::relay_enrollment::EnrollmentTokenStore;
 use crate::infra::relay_presence::PresenceHub;
 use crate::infra::relay_routing::RoutingTable;
@@ -37,6 +40,25 @@ pub struct RemoteAdminNodeEntry {
     /// Milliseconds since the node's last frame.
     pub idle_ms: u128,
 }
+
+/// A unique `resolve-node` match (issue #156 slice 3): the registered node
+/// whose announced host labels answer the query, with the labels it
+/// announced so the caller can show what matched.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteAdminNodeMatch {
+    /// The matched node's certificate fingerprint (its node id) — the
+    /// `tls_pin_sha256` a relay-via dial pins.
+    pub node_id: String,
+    /// The host labels the node announced for itself.
+    pub labels: Vec<String>,
+}
+
+/// Caps for the slice-3 `announce` labels (issue #156): enough for a
+/// hostname plus a handful of addresses, bounded so one link cannot bloat
+/// the in-memory table.
+pub(crate) const MAX_ANNOUNCE_LABELS: usize = 8;
+/// Maximum byte length of one announced label.
+pub(crate) const MAX_LABEL_LEN: usize = 64;
 
 /// The relay status snapshot, answered to a `status` request. Field sources
 /// are identical to the local admin socket's status (same tables, same
@@ -59,8 +81,8 @@ pub struct RemoteAdminStatus {
 }
 
 /// The node-channel admin response envelope, same shape as the local admin
-/// protocol: `ok` plus at most one of `status` / `whitelist` / `message` /
-/// `error`.
+/// protocol: `ok` plus at most one of `status` / `whitelist` / `node` /
+/// `message` / `error`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteAdminResponse {
     /// Whether the request succeeded.
@@ -73,6 +95,10 @@ pub struct RemoteAdminResponse {
     /// (enrolled nodes, online or not — issue #147).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whitelist: Option<Vec<String>>,
+    /// The unique node match of a successful `resolve-node` (issue #156
+    /// slice 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<RemoteAdminNodeMatch>,
     /// The human-readable result of a successful write command (same text
     /// the local admin socket prints, e.g. the invite answer carrying the
     /// raw token on its `token: ` line).
@@ -100,6 +126,11 @@ pub(crate) struct RemoteAdminContext<'a> {
     pub(crate) token_ttls: TokenTtlConfig,
     pub(crate) whitelist_dir: &'a Path,
     pub(crate) presence: &'a Arc<PresenceHub>,
+    /// The requesting link's registered identity: `announce` may only label
+    /// this link's own table entry, never another node's (issue #156
+    /// slice 3). Same ownership guard as `touch`/`remove_if_current`.
+    pub(crate) node_id: String,
+    pub(crate) connection_id: u64,
 }
 
 /// A parsed node-channel admin command. `invite`/`remove` execute with the
@@ -112,6 +143,13 @@ pub(crate) enum RemoteAdminCommand {
     /// List the enrolled (whitelisted) node fingerprints, online or not
     /// (issue #147: the dashboard resolves remove prefixes against this).
     ListWhitelist,
+    /// Publish this link's host labels for fingerprint auto-discovery
+    /// (issue #156 slice 3). Labels the requesting link's own table entry
+    /// only.
+    Announce { labels: Vec<String> },
+    /// Look up the uniquely-registered node whose announced labels match the
+    /// query (issue #156 slice 3). Read-only.
+    ResolveNode { label: String },
     /// Mint an enrollment token (one-time by default).
     Invite { ttl_secs: Option<u64>, deploy: bool },
     /// Revoke a whitelisted node and drop its live link.
@@ -120,15 +158,30 @@ pub(crate) enum RemoteAdminCommand {
     Unsupported(&'static str),
 }
 
-/// Parses one request body. `list-whitelist` is a node-channel-only read of
-/// the authorized_nodes directory, so it is recognized here before falling
-/// back to the shared local admin grammar, which stays unchanged (issue
-/// #147).
+/// Parses one request body. The node-channel-only reads (`list-whitelist`,
+/// `resolve-node`) and the self-labeling write (`announce`) are recognized
+/// here before falling back to the shared local admin grammar, which stays
+/// unchanged (issue #147, issue #156 slice 3).
 pub(crate) fn parse_remote_admin_command(body: &str) -> Result<RemoteAdminCommand, String> {
     if let Ok(request) = serde_json::from_str::<crate::infra::relay_admin::RelayAdminRequest>(body)
     {
-        if request.command == "list-whitelist" {
-            return Ok(RemoteAdminCommand::ListWhitelist);
+        match request.command.as_str() {
+            "list-whitelist" => return Ok(RemoteAdminCommand::ListWhitelist),
+            "announce" => {
+                let labels = request
+                    .labels
+                    .ok_or_else(|| "announce requires a `labels` array".to_string())?;
+                return parse_announce_labels(labels)
+                    .map(|labels| RemoteAdminCommand::Announce { labels });
+            }
+            "resolve-node" => {
+                let label = request
+                    .label
+                    .filter(|label| !label.trim().is_empty())
+                    .ok_or_else(|| "resolve-node requires a `label` field".to_string())?;
+                return Ok(RemoteAdminCommand::ResolveNode { label });
+            }
+            _ => {}
         }
     }
     match parse_relay_admin_command(body)? {
@@ -141,6 +194,37 @@ pub(crate) fn parse_remote_admin_command(body: &str) -> Result<RemoteAdminComman
             "shutdown is not supported over the node channel; use the local admin socket",
         )),
     }
+}
+
+/// Validates an `announce` label list: bounded count and per-label length,
+/// non-empty after trim, deduplicated, stored trimmed.
+fn parse_announce_labels(labels: Vec<String>) -> Result<Vec<String>, String> {
+    if labels.is_empty() {
+        return Err("announce requires a non-empty `labels` array".to_string());
+    }
+    if labels.len() > MAX_ANNOUNCE_LABELS {
+        return Err(format!(
+            "announce accepts at most {MAX_ANNOUNCE_LABELS} labels, got {}",
+            labels.len()
+        ));
+    }
+    let mut parsed = Vec::with_capacity(labels.len());
+    for label in labels {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err("announce labels must be non-empty".to_string());
+        }
+        if label.len() > MAX_LABEL_LEN {
+            return Err(format!(
+                "announce labels are at most {MAX_LABEL_LEN} bytes, got {}",
+                label.len()
+            ));
+        }
+        if !parsed.iter().any(|existing| existing == label) {
+            parsed.push(label.to_string());
+        }
+    }
+    Ok(parsed)
 }
 /// Builds the status snapshot from the same state the local admin socket
 /// reads. `started_at` is captured by `relay_server::start`.
@@ -182,6 +266,7 @@ pub(crate) fn remote_admin_response(
             ok: false,
             status: None,
             whitelist: None,
+            node: None,
             message: None,
             error: Some(message),
         }),
@@ -207,6 +292,7 @@ pub(crate) fn handle_remote_admin_request(
                 context.started_at,
             )),
             whitelist: None,
+            node: None,
             message: None,
             error: None,
         },
@@ -220,6 +306,7 @@ pub(crate) fn handle_remote_admin_request(
                         ok: true,
                         status: None,
                         whitelist: Some(fingerprints),
+                        node: None,
                         message: None,
                         error: None,
                     }
@@ -228,11 +315,56 @@ pub(crate) fn handle_remote_admin_request(
                     ok: false,
                     status: None,
                     whitelist: None,
+                    node: None,
                     message: None,
                     error: Some(format!("list-whitelist: {error}")),
                 },
             }
         }
+        RemoteAdminCommand::Announce { labels } => {
+            // Self-description scoped to the requesting link: the table
+            // drops the write when this connection id no longer owns the
+            // entry (replacement/re-register raced the request).
+            context
+                .table
+                .set_labels(&context.node_id, context.connection_id, labels.clone());
+            RemoteAdminResponse {
+                ok: true,
+                status: None,
+                whitelist: None,
+                node: None,
+                message: Some(format!("announced: {} label(s)", labels.len())),
+                error: None,
+            }
+        }
+        RemoteAdminCommand::ResolveNode { label } => match context.table.resolve_label(&label) {
+            LabelResolve::Unique { node_id, labels } => RemoteAdminResponse {
+                ok: true,
+                status: None,
+                whitelist: None,
+                node: Some(RemoteAdminNodeMatch { node_id, labels }),
+                message: None,
+                error: None,
+            },
+            LabelResolve::NoMatch => RemoteAdminResponse {
+                ok: false,
+                status: None,
+                whitelist: None,
+                node: None,
+                message: None,
+                error: Some(format!("no registered node matches label {label:?}")),
+            },
+            LabelResolve::Ambiguous(count) => RemoteAdminResponse {
+                ok: false,
+                status: None,
+                whitelist: None,
+                node: None,
+                message: None,
+                error: Some(format!(
+                    "label {label:?} matches {count} registered nodes; refine the host label"
+                )),
+            },
+        },
         RemoteAdminCommand::Invite { ttl_secs, deploy } => {
             let local = handle_invite(
                 ttl_secs,
@@ -256,6 +388,7 @@ pub(crate) fn handle_remote_admin_request(
             ok: false,
             status: None,
             whitelist: None,
+            node: None,
             message: None,
             error: Some(reason.to_string()),
         },
@@ -271,6 +404,7 @@ fn message_envelope(local: crate::infra::relay_admin::RelayAdminResponse) -> Rem
         ok: local.ok,
         status: None,
         whitelist: None,
+        node: None,
         message: local.message,
         error: local.error,
     }
@@ -364,6 +498,7 @@ mod tests {
             ok: true,
             status: Some(snapshot.clone()),
             whitelist: None,
+            node: None,
             message: None,
             error: None,
         };
@@ -381,6 +516,7 @@ mod tests {
             ok: false,
             status: None,
             whitelist: None,
+            node: None,
             message: None,
             error: Some("nope".to_string()),
         };
@@ -390,7 +526,8 @@ mod tests {
     }
 
     /// Owns everything a [`RemoteAdminContext`] borrows for the
-    /// `list-whitelist` tests (only `whitelist_dir` matters there).
+    /// `list-whitelist`/`announce`/`resolve-node` tests (only `table` and
+    /// `whitelist_dir` matter there).
     struct TestContext {
         table: Arc<RelayConnectionTable>,
         routing: Arc<RoutingTable>,
@@ -411,6 +548,15 @@ mod tests {
         }
 
         fn context<'a>(&'a self, whitelist_dir: &'a std::path::Path) -> RemoteAdminContext<'a> {
+            self.context_with_link(whitelist_dir, "fp-self", 1)
+        }
+
+        fn context_with_link<'a>(
+            &'a self,
+            whitelist_dir: &'a std::path::Path,
+            node_id: &str,
+            connection_id: u64,
+        ) -> RemoteAdminContext<'a> {
             RemoteAdminContext {
                 table: &self.table,
                 routing: &self.routing,
@@ -427,8 +573,185 @@ mod tests {
                 token_ttls: TokenTtlConfig::default(),
                 whitelist_dir,
                 presence: &self.presence,
+                node_id: node_id.to_string(),
+                connection_id,
             }
         }
+    }
+
+    fn dummy_outbound() -> crate::infra::relay_scheduler::SchedulerIngress {
+        let (ingress, _bulk_rx, _control_rx) =
+            crate::infra::relay_scheduler::SchedulerIngress::test_channels(8);
+        ingress
+    }
+
+    #[test]
+    fn parses_announce_and_resolve_node_commands() {
+        assert_eq!(
+            parse_remote_admin_command(r#"{"command":"announce","labels":["nas","10.0.1.5"]}"#),
+            Ok(RemoteAdminCommand::Announce {
+                labels: vec!["nas".to_string(), "10.0.1.5".to_string()]
+            })
+        );
+        assert_eq!(
+            parse_remote_admin_command(r#"{"command":"resolve-node","label":"nas"}"#),
+            Ok(RemoteAdminCommand::ResolveNode {
+                label: "nas".to_string()
+            })
+        );
+        // Both stay node-channel-only: the shared local grammar rejects them.
+        let local_announce =
+            parse_relay_admin_command(r#"{"command":"announce","labels":["nas"]}"#).unwrap_err();
+        assert!(
+            local_announce.contains("unknown admin command"),
+            "{local_announce}"
+        );
+        let local_resolve =
+            parse_relay_admin_command(r#"{"command":"resolve-node","label":"nas"}"#).unwrap_err();
+        assert!(
+            local_resolve.contains("unknown admin command"),
+            "{local_resolve}"
+        );
+
+        let missing_labels =
+            parse_remote_admin_command(r#"{"command":"announce","labels":[]}"#).unwrap_err();
+        assert!(missing_labels.contains("labels"), "{missing_labels}");
+        let missing_label =
+            parse_remote_admin_command(r#"{"command":"resolve-node"}"#).unwrap_err();
+        assert!(missing_label.contains("label"), "{missing_label}");
+        let too_many = parse_remote_admin_command(&format!(
+            r#"{{"command":"announce","labels":[{}]}}"#,
+            (0..MAX_ANNOUNCE_LABELS + 1)
+                .map(|_| "\"x\"".to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+        .unwrap_err();
+        assert!(too_many.contains("at most"), "{too_many}");
+        let too_long = parse_remote_admin_command(&format!(
+            r#"{{"command":"announce","labels":["{}"]}}"#,
+            "x".repeat(MAX_LABEL_LEN + 1)
+        ))
+        .unwrap_err();
+        assert!(too_long.contains("64"), "{too_long}");
+    }
+
+    #[test]
+    fn announce_labels_only_the_requesting_link_and_resolve_node_answers() {
+        let holder = TestContext::new();
+        let dir = std::env::temp_dir().join(format!(
+            "waitagent-remote-announce-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("whitelist dir");
+
+        let link = holder.table.register("fp-node-a", dummy_outbound());
+        // A stale/replaced link cannot relabel the entry: announce through a
+        // context whose connection id no longer owns the node.
+        let stale = handle_remote_admin_request(
+            RemoteAdminCommand::Announce {
+                labels: vec!["stale".to_string()],
+            },
+            &holder.context_with_link(&dir, "fp-node-a", link.connection_id + 999),
+        );
+        let stale: RemoteAdminResponse = serde_json::from_str(&stale).expect("envelope parses");
+        assert!(stale.ok, "{stale:?}");
+        assert_eq!(
+            holder.table.resolve_label("stale"),
+            crate::infra::relay_connection_table::LabelResolve::NoMatch
+        );
+
+        let announced = handle_remote_admin_request(
+            RemoteAdminCommand::Announce {
+                labels: vec!["node-a".to_string(), "10.0.1.5".to_string()],
+            },
+            &holder.context_with_link(&dir, "fp-node-a", link.connection_id),
+        );
+        let announced: RemoteAdminResponse = serde_json::from_str(&announced).expect("envelope");
+        assert!(announced.ok, "{announced:?}");
+        assert!(announced.node.is_none(), "{announced:?}");
+
+        // Another registered node does not match the label.
+        holder.table.register("fp-node-b", dummy_outbound());
+        let body = handle_remote_admin_request(
+            RemoteAdminCommand::ResolveNode {
+                label: "node-a".to_string(),
+            },
+            &holder.context(&dir),
+        );
+        let response: RemoteAdminResponse = serde_json::from_str(&body).expect("envelope");
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.node,
+            Some(RemoteAdminNodeMatch {
+                node_id: "fp-node-a".to_string(),
+                labels: vec!["node-a".to_string(), "10.0.1.5".to_string()],
+            })
+        );
+
+        let missing = handle_remote_admin_request(
+            RemoteAdminCommand::ResolveNode {
+                label: "ghost".to_string(),
+            },
+            &holder.context(&dir),
+        );
+        let missing: RemoteAdminResponse = serde_json::from_str(&missing).expect("envelope");
+        assert!(!missing.ok, "{missing:?}");
+        assert!(
+            missing
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("ghost"),
+            "{missing:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_node_reports_ambiguous_matches() {
+        let holder = TestContext::new();
+        let dir = std::env::temp_dir().join(format!(
+            "waitagent-remote-resolve-ambiguous-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(":", "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("whitelist dir");
+
+        for (node, label) in [("fp-a", "nas"), ("fp-b", "nas")] {
+            let link = holder.table.register(node, dummy_outbound());
+            let body = handle_remote_admin_request(
+                RemoteAdminCommand::Announce {
+                    labels: vec![label.to_string()],
+                },
+                &holder.context_with_link(&dir, node, link.connection_id),
+            );
+            let response: RemoteAdminResponse = serde_json::from_str(&body).expect("envelope");
+            assert!(response.ok, "{response:?}");
+        }
+        let body = handle_remote_admin_request(
+            RemoteAdminCommand::ResolveNode {
+                label: "nas".to_string(),
+            },
+            &holder.context(&dir),
+        );
+        let response: RemoteAdminResponse = serde_json::from_str(&body).expect("envelope");
+        assert!(!response.ok, "ambiguous must not guess: {response:?}");
+        assert!(response.node.is_none(), "{response:?}");
+        let error = response.error.expect("error present");
+        assert!(error.contains("2") && error.contains("nas"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

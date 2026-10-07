@@ -98,6 +98,27 @@ pub(crate) struct ConnectionEntry {
     pub(crate) outbound: SchedulerIngress,
     /// Allocator for relay-initiated (even) stream ids on this link.
     pub(crate) next_relay_stream: Arc<AtomicU32>,
+    /// Host labels the node announced for itself over the node-channel
+    /// `announce` admin request (issue #156 slice 3: fingerprint
+    /// auto-discovery). Written once per (re)register, read by
+    /// `resolve_label`; both happen under the table lock.
+    pub(crate) labels: Vec<String>,
+}
+
+/// The outcome of matching a host label against the registered nodes'
+/// announced labels (issue #156 slice 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LabelResolve {
+    /// Exactly one registered node matches; carries its fingerprint (node
+    /// id) and its announced labels for the admin response.
+    Unique {
+        node_id: String,
+        labels: Vec<String>,
+    },
+    /// More than one registered node matches; the caller must not guess.
+    Ambiguous(usize),
+    /// No registered node matches.
+    NoMatch,
 }
 
 /// A resolved routing target: everything needed to open a routed stream
@@ -133,6 +154,7 @@ impl RelayConnectionTable {
             last_seen: Arc::new(Mutex::new(Instant::now())),
             outbound,
             next_relay_stream: Arc::new(AtomicU32::new(2)),
+            labels: Vec::new(),
         };
         let previous = self
             .entries
@@ -248,6 +270,54 @@ impl RelayConnectionTable {
             .collect()
     }
 
+    /// Records the host labels a link announced for itself (issue #156
+    /// slice 3). The write lands only when `connection_id` still owns the
+    /// entry, so a stale link cannot label its successor (same guard as
+    /// `touch`/`remove_if_current`). Labels are stored verbatim; matching
+    /// normalizes case and trailing dots.
+    pub(crate) fn set_labels(&self, node_id: &str, connection_id: u64, labels: Vec<String>) {
+        let mut table = self
+            .entries
+            .lock()
+            .expect("relay connection table lock poisoned");
+        if let Some(entry) = table.get_mut(node_id) {
+            if entry.connection_id == connection_id {
+                entry.labels = labels;
+            }
+        }
+    }
+
+    /// Matches a host label (what the operator typed as the profile's host)
+    /// against every registered node's announced labels. Hostname labels
+    /// match case-insensitively, ignoring one trailing dot, and in either
+    /// dotted-suffix direction (`nas` matches `nas.local` and vice versa);
+    /// IP-shaped labels must match exactly. One table lock covers the whole
+    /// scan so the answer is a consistent point-in-time snapshot.
+    pub(crate) fn resolve_label(&self, label: &str) -> LabelResolve {
+        let table = self
+            .entries
+            .lock()
+            .expect("relay connection table lock poisoned");
+        let mut matches: Vec<(String, Vec<String>)> = Vec::new();
+        for (node_id, entry) in table.iter() {
+            if entry
+                .labels
+                .iter()
+                .any(|announced| labels_match(announced, label))
+            {
+                matches.push((node_id.clone(), entry.labels.clone()));
+            }
+        }
+        match matches.len() {
+            0 => LabelResolve::NoMatch,
+            1 => {
+                let (node_id, labels) = matches.pop().expect("one match present");
+                LabelResolve::Unique { node_id, labels }
+            }
+            count => LabelResolve::Ambiguous(count),
+        }
+    }
+
     /// Returns a point-in-time view of the registered nodes for the admin
     /// socket: `(node_id, connection_id, idle milliseconds)`. The table
     /// lock is released before the per-entry `last_seen` reads (lock order:
@@ -285,6 +355,35 @@ pub(crate) struct RegisteredEntry {
     pub(crate) connection_id: u64,
     pub(crate) retire_rx: watch::Receiver<bool>,
     pub(crate) previous: Option<ConnectionEntry>,
+}
+
+/// Normalizes a label for matching: lowercase, one trailing dot stripped.
+fn normalize_label(label: &str) -> String {
+    let mut normalized = label.trim().to_lowercase();
+    if normalized.len() > 1 && normalized.ends_with('.') {
+        normalized.pop();
+    }
+    normalized
+}
+
+/// Whether an announced label answers the operator-typed query. IPs match
+/// exactly; hostnames match exactly or as dotted-suffix extensions in
+/// either direction (`nas` ↔ `nas.local`).
+fn labels_match(announced: &str, query: &str) -> bool {
+    let announced = normalize_label(announced);
+    let query = normalize_label(query);
+    if announced.is_empty() || query.is_empty() {
+        return false;
+    }
+    if announced == query {
+        return true;
+    }
+    if announced.parse::<std::net::IpAddr>().is_ok() || query.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    // Hostname extension in either direction: `nas` answers `nas.local` and
+    // `nas.local` answers `nas`.
+    announced.starts_with(&format!("{query}.")) || query.starts_with(&format!("{announced}."))
 }
 
 #[cfg(test)]
@@ -436,6 +535,91 @@ mod tests {
             !table.retire_notifying(&node_id("node-a"), RelayErrorCode::NodeRevoked),
             "a second retire finds no live entry"
         );
+    }
+
+    #[test]
+    fn set_labels_records_labels_and_resolve_label_matches_hostname() {
+        let table = RelayConnectionTable::default();
+        let registered = table.register(&node_id("node-a"), dummy_outbound());
+        table.set_labels(
+            &node_id("node-a"),
+            registered.connection_id,
+            vec!["nas".to_string(), "10.0.1.5".to_string()],
+        );
+
+        // Exact (case-insensitive, trailing-dot-insensitive) hostname match.
+        assert_eq!(
+            table.resolve_label("NAS."),
+            LabelResolve::Unique {
+                node_id: node_id("node-a"),
+                labels: vec!["nas".to_string(), "10.0.1.5".to_string()],
+            }
+        );
+        // Dotted suffix extension matches in both directions.
+        assert_eq!(
+            table.resolve_label("nas.local"),
+            LabelResolve::Unique {
+                node_id: node_id("node-a"),
+                labels: vec!["nas".to_string(), "10.0.1.5".to_string()],
+            }
+        );
+        // IP labels match exactly only.
+        assert_eq!(
+            table.resolve_label("10.0.1.5"),
+            LabelResolve::Unique {
+                node_id: node_id("node-a"),
+                labels: vec!["nas".to_string(), "10.0.1.5".to_string()],
+            }
+        );
+        assert_eq!(table.resolve_label("10.0.1"), LabelResolve::NoMatch);
+        assert_eq!(table.resolve_label("other"), LabelResolve::NoMatch);
+    }
+
+    #[test]
+    fn resolve_label_reports_ambiguous_matches() {
+        let table = RelayConnectionTable::default();
+        table.register(&node_id("node-a"), dummy_outbound());
+        table.register(&node_id("node-b"), dummy_outbound());
+        let a = table.register(&node_id("node-a"), dummy_outbound());
+        let b = table.register(&node_id("node-b"), dummy_outbound());
+        table.set_labels(&node_id("node-a"), a.connection_id, vec!["nas".to_string()]);
+        table.set_labels(&node_id("node-b"), b.connection_id, vec!["nas".to_string()]);
+
+        assert_eq!(table.resolve_label("nas"), LabelResolve::Ambiguous(2));
+    }
+
+    #[test]
+    fn set_labels_ignored_by_a_replaced_link() {
+        let table = RelayConnectionTable::default();
+        let first = table.register(&node_id("node-a"), dummy_outbound());
+        let second = table.register(&node_id("node-a"), dummy_outbound());
+        // A stale link cannot label its successor's entry.
+        table.set_labels(
+            &node_id("node-a"),
+            first.connection_id,
+            vec!["stale".to_string()],
+        );
+        assert_eq!(table.resolve_label("stale"), LabelResolve::NoMatch);
+        table.set_labels(
+            &node_id("node-a"),
+            second.connection_id,
+            vec!["fresh".to_string()],
+        );
+        assert_eq!(
+            table.resolve_label("fresh"),
+            LabelResolve::Unique {
+                node_id: node_id("node-a"),
+                labels: vec!["fresh".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn set_labels_for_an_unknown_node_is_a_noop() {
+        let table = RelayConnectionTable::default();
+        table.register(&node_id("node-a"), dummy_outbound());
+        table.set_labels(&node_id("missing"), 999, vec!["ghost".to_string()]);
+        assert_eq!(table.resolve_label("ghost"), LabelResolve::NoMatch);
     }
 
     #[test]

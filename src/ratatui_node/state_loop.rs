@@ -2191,6 +2191,7 @@ fn perform_remote_host_connect(
     };
 
     let auth_rejection_shared = shared.clone();
+    let discovery_shared = shared.clone();
     let runtime = RemoteHostConnectRuntime::new(
         history_store.clone(),
         SshRemotePortProbeFactory,
@@ -2200,6 +2201,9 @@ fn perform_remote_host_connect(
     )
     .with_auth_rejection_checker(Arc::new(move |node_id| {
         auth_rejection_shared.remote_node_auth_rejection(node_id)
+    }))
+    .with_fingerprint_discoverer(Arc::new(move |host| {
+        discover_fingerprint_via_relay(&discovery_shared, host)
     }));
 
     let outcome = runtime
@@ -2300,7 +2304,68 @@ fn perform_remote_host_connect(
         authority_node_id: outcome.authority_node_id,
         created_target: record,
         connection_info,
+        pin_auto_discovered: outcome.pin_auto_discovered,
     })
+}
+
+/// Resolves a peer's host label to its certificate fingerprint through the
+/// pinned relay's node-channel `resolve-node` admin request (issue #156
+/// slice 3). Runs on the connect worker thread: the relay client handle is
+/// cloned out of its slot with the lock dropped before any IO (m07). A
+/// missing/unconfigured relay, a lookup failure, or a non-unique match all
+/// answer `Ok(None)`/`Err` so the connect falls back to the SSH bootstrap;
+/// discovery is opportunistic and never fails the connect by itself.
+fn discover_fingerprint_via_relay(
+    shared: &Arc<SharedState>,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let relay_client = {
+        let slot = shared
+            .relay_client
+            .lock()
+            .map_err(|_| "relay client lock poisoned".to_string())?;
+        match slot.clone() {
+            Some(client) => client,
+            // No relay configured: nothing to discover against.
+            None => return Ok(None),
+        }
+    };
+    let body = serde_json::json!({
+        "command": "resolve-node",
+        "label": label,
+    })
+    .to_string();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("build discovery runtime: {error}"))?;
+    let response = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            relay_client.admin_request(&body),
+        )
+        .await
+        .map_err(|_| "relay resolve-node request timed out".to_string())?
+        .map_err(|error| format!("relay resolve-node request failed: {error}"))
+    })?;
+    let envelope: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("invalid resolve-node response: {error}"))?;
+    if envelope.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        ERROR_LOG.log(format!(
+            "[relay-resolve] no unique fingerprint for {label:?}: {}",
+            envelope
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unreadable error>")
+        ));
+        return Ok(None);
+    }
+    let node_id = envelope
+        .get("node")
+        .and_then(|node| node.get("node_id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "resolve-node response carried no node.node_id".to_string())?;
+    Ok(Some(node_id.to_string()))
 }
 
 /// Dials every sibling ratatui node server on the remote host (same TLS pin,
@@ -2412,13 +2477,20 @@ fn apply_remote_host_connect_outcome(
 ) -> CommandOutcome {
     // Name the dial path that took effect so an auto connect reports, e.g.,
     // "connected node-b#9002 via relay" — the visible anchor for the
-    // direct-first/relay-fallback outcome (issue #156 slice 2).
+    // direct-first/relay-fallback outcome (issue #156 slice 2). When the
+    // connect filled an empty pin through relay discovery, say so too
+    // (slice 3): the operator should see the pin came from the relay.
     let via_suffix = outcome
         .connection_info
         .as_ref()
         .and_then(|info| info.via)
         .map(|via| format!(" via {}", via.as_str()))
         .unwrap_or_default();
+    let discovery_suffix = if outcome.pin_auto_discovered {
+        " (fingerprint auto-discovered)"
+    } else {
+        ""
+    };
     if let Some(info) = outcome.connection_info {
         shared.record_remote_node_connection(&outcome.authority_node_id, info);
     }
@@ -2461,7 +2533,7 @@ fn apply_remote_host_connect_outcome(
         ));
     }
 
-    CommandOutcome::Message(format!("connected {target}{via_suffix}"))
+    CommandOutcome::Message(format!("connected {target}{via_suffix}{discovery_suffix}"))
 }
 
 #[allow(clippy::too_many_arguments)]

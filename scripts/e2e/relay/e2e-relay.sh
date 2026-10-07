@@ -45,11 +45,15 @@
 #   viaautorelay — issue #156 slice 2 (via = auto): the isolated two-bridge
 #               topology (direct path impossible by construction); the auto
 #               profile must fall back to the relay and remember it.
+#   pinautodiscovery — issue #156 slice 3 (fingerprint auto-discovery): the
+#               relay-only topology with a pin-less profile; both the
+#               explicit relay and the auto paths must resolve the peer
+#               fingerprint through the relay, connect, and persist the pin.
 #
 # Usage: e2e-relay.sh [scenario ...]
 #   scenarios: smoke (default), reconnect, reregister, streams, direct,
 #   pastefile, revoke, capacity, presence, joinkeypaths, relaymgmt,
-#   viaautodirect, viaautorelay
+#   viaautodirect, viaautorelay, pinautodiscovery
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -1307,9 +1311,123 @@ EOF
     log "viaautorelay OK: auto fell back to and remembered the relay path"
 }
 
+scenario_pinautodiscovery() {
+    log "scenario: pinautodiscovery (relay fingerprint auto-discovery, issue #156 slice 3)"
+    # Same two-bridge relay-only topology as viaautorelay: A and B share no
+    # network, so only the relay path exists and the SSH bootstrap cannot
+    # run. B's hostname is node-b: the label it announces to the relay and
+    # the host A's profile names — the connect must discover B's enrolled
+    # fingerprint instead of requiring a hand-typed tls_pin_sha256.
+    docker network create --internal "$NET_A" >/dev/null
+    docker network create --internal "$NET_B" >/dev/null
+
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
+    docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    local a_home stage
+    a_home=$(mktemp -d)
+    stage=$(mktemp -d)
+    docker run -dt --name "$NODE_A" --network "$NET_A" \
+        -v "$a_home:/root/.waitagent" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        [ -f "$a_home/operator.key" ] && break
+        assert_running "$NODE_A"
+        sleep 1
+    done
+    [ -f "$a_home/operator.key" ] || die "node A never generated its operator key"
+    docker cp "$NODE_A:/root/.waitagent/operator.key" "$stage/operator.key" >/dev/null
+    ssh-keygen -y -f "$stage/operator.key" >"$stage/node-a.pub" 2>/dev/null \
+        || die "could not derive node A's operator public key"
+
+    docker run -dt --hostname node-b --name "$NODE_B" --network "$NET_B" \
+        -v "$stage/node-a.pub:/root/.waitagent/authorized_operators/node-a.pub:ro" "$IMAGE" \
+        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 2 ] \
+        || die "expected 2 whitelisted nodes, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+    wait_for_node_ids "${FINGERPRINTS[@]}"
+
+    local fp_b
+    fp_b=$(docker exec "$NODE_B" waitagent __generate-node-credentials \
+        | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p')
+    [ -n "$fp_b" ] || die "could not read node B's fingerprint"
+
+    # Profile with NO tls_pin_sha256 at all. last_remote_port stands in for
+    # the port a previous connect learned; the piece slice 3 removes is the
+    # hand-typed pin. via = "relay": the connect must resolve the peer
+    # fingerprint through the relay, dial, and persist the pin.
+    cat >"$a_home/remote-hosts.toml" <<EOF
+[[hosts]]
+name = "node-b"
+host = "node-b"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/unused"
+remote_shell = "posix"
+last_remote_port = $NODE_PORT_B
+via = "relay"
+EOF
+
+    local connect_out
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CONNECT_REMOTE_HOST node-b")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "CONNECT_REMOTE_HOST on A failed: $connect_out"
+    jq -r '.payload.message // ""' <<<"$connect_out" | grep -q "via relay" \
+        || die "the relay path must be named: $connect_out"
+    jq -r '.payload.message // ""' <<<"$connect_out" | grep -q "fingerprint auto-discovered" \
+        || die "the discovery must be named in the connect response: $connect_out"
+    log "connect answered: $(jq -r '.payload.message' <<<"$connect_out")"
+
+    grep -q "^tls_pin_sha256 = \"$fp_b\"\$" "$a_home/remote-hosts.toml" \
+        || die "the discovered pin must land on disk: $(cat "$a_home/remote-hosts.toml")"
+
+    local row
+    row=$(wait_authority_row_online "$NODE_A" "$NODE_PORT_A" "node-b#$NODE_PORT_B")
+    log "node A sees node B online over the discovered-pin relay path: $row"
+
+    # Second leg, via = "auto", still no pin: the direct probe fails by
+    # construction and the auto relay fallback must discover the pin too.
+    cat >"$a_home/remote-hosts.toml" <<EOF
+[[hosts]]
+name = "node-b"
+host = "node-b"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/unused"
+remote_shell = "posix"
+last_remote_port = $NODE_PORT_B
+via = "auto"
+EOF
+    connect_out=$(node_command "$NODE_A" "$NODE_PORT_A" "CONNECT_REMOTE_HOST node-b")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "auto CONNECT_REMOTE_HOST on A failed: $connect_out"
+    jq -r '.payload.message // ""' <<<"$connect_out" | grep -q "via relay" \
+        || die "auto must report the relay fallback it took: $connect_out"
+    jq -r '.payload.message // ""' <<<"$connect_out" | grep -q "fingerprint auto-discovered" \
+        || die "auto must name the discovery in the response: $connect_out"
+    grep -q '^via = "auto"$' "$a_home/remote-hosts.toml" \
+        || die "the auto choice must be preserved: $(cat "$a_home/remote-hosts.toml")"
+    grep -q '^last_via_used = "relay"$' "$a_home/remote-hosts.toml" \
+        || die "auto must remember the relay path: $(cat "$a_home/remote-hosts.toml")"
+    grep -q "^tls_pin_sha256 = \"$fp_b\"\$" "$a_home/remote-hosts.toml" \
+        || die "auto must persist the discovered pin: $(cat "$a_home/remote-hosts.toml")"
+
+    rm -rf "$a_home" "$stage"
+    log "pinautodiscovery OK: pin-less relay and auto connects both discovered and persisted B's fingerprint"
+}
+
 scenarios=("$@")
 if [ "${#scenarios[@]}" -eq 0 ]; then
-    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay)
+    scenarios=(smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay pinautodiscovery)
 fi
 build_image
 for scenario in "${scenarios[@]}"; do
@@ -1356,8 +1474,11 @@ for scenario in "${scenarios[@]}"; do
         viaautorelay)
             scenario_viaautorelay
             ;;
+        pinautodiscovery)
+            scenario_pinautodiscovery
+            ;;
         *)
-            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay)"
+            die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay pinautodiscovery)"
             ;;
     esac
     log "scenario '$scenario' passed"

@@ -11,6 +11,11 @@ pub(crate) struct RemoteHostConnectedOutcome {
     pub authority_node_id: String,
     pub created_target: crate::domain::session_catalog::ManagedSessionRecord,
     pub connection_info: Option<crate::ratatui_node::runtime::RemoteNodeConnectionInfo>,
+    /// Whether the connect filled an empty `tls_pin_sha256` through relay
+    /// fingerprint auto-discovery (issue #156 slice 3); the response
+    /// message names the discovery so the operator sees where the pin
+    /// came from.
+    pub pin_auto_discovered: bool,
 }
 
 /// Events that converge on `StateEventLoop`, the single writer of `SharedState`.

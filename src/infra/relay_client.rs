@@ -748,6 +748,10 @@ async fn serve_registered(
             ERROR_LOG.log_debug(format!("[relay-client] watch re-declare failed: {error}"));
         }
     }
+    // Fingerprint auto-discovery (issue #156 slice 3): publish this node's
+    // host labels right behind Register/watches on the same FIFO queue, so
+    // by the time the relay has registered us it has our labels too.
+    announce_host_labels(&opener, &config.relay.address);
     emit(
         event_tx,
         RelayClientEvent::Connected {
@@ -985,6 +989,96 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier {
             .signature_verification_algorithms
             .supported_schemes()
     }
+}
+
+/// The seq of the fire-and-forget label announcement (issue #156 slice 3).
+/// `admin_request` allocates seqs from an incrementing counter starting at
+/// 0, so `u64::MAX` can never collide with a request that has a pending
+/// waiter; the control dispatch ignores responses with unknown seqs.
+const ADMIN_ANNOUNCE_SEQ: u64 = u64::MAX;
+
+/// Publishes this node's host labels on the freshly registered link so
+/// peers can resolve its fingerprint by host label or address (issue #156
+/// slice 3). Fire-and-forget: labels are best-effort discovery data, never
+/// worth blocking the link loop over, and a reconnect re-announces them.
+fn announce_host_labels(opener: &MuxOpener, relay_address: &str) {
+    let host = match parse_relay_address(relay_address) {
+        Ok((host, _port)) => host,
+        Err(_) => return,
+    };
+    let labels = node_labels(&host);
+    if labels.is_empty() {
+        return;
+    }
+    let body = serde_json::json!({
+        "command": "announce",
+        "labels": labels,
+    })
+    .to_string();
+    if let Err(error) = opener.send_control(Frame::AdminRequest {
+        seq: ADMIN_ANNOUNCE_SEQ,
+        command: body,
+    }) {
+        ERROR_LOG.log_debug(format!("[relay-client] label announce not sent: {error}"));
+    }
+}
+
+/// The host labels this node advertises for fingerprint auto-discovery:
+/// its hostname plus, when the relay address is an IP literal, the local
+/// egress IP toward it. std-only on purpose: hostname lookups can block on
+/// DNS, which must not stall the link loop, so hostname relays contribute
+/// no IP label.
+fn node_labels(relay_host: &str) -> Vec<String> {
+    let mut labels = Vec::with_capacity(2);
+    if let Some(hostname) = hostname_label() {
+        push_label(&mut labels, hostname);
+    }
+    if let Some(ip) = egress_ip_label(relay_host) {
+        push_label(&mut labels, ip);
+    }
+    labels
+}
+
+/// Appends `label` unless blank or already present (first occurrence wins).
+fn push_label(labels: &mut Vec<String>, label: String) {
+    let label = label.trim();
+    if label.is_empty() || labels.iter().any(|existing| existing == label) {
+        return;
+    }
+    labels.push(label.to_string());
+}
+
+/// This machine's hostname, or `None` when it cannot be read. Loopback
+/// names are not labels: they identify every node and match nothing.
+fn hostname_label() -> Option<String> {
+    #[cfg(unix)]
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok());
+    #[cfg(windows)]
+    let hostname = std::env::var("COMPUTERNAME").ok();
+    let hostname = hostname?.trim().to_string();
+    if hostname.is_empty() || hostname.eq_ignore_ascii_case("localhost") {
+        None
+    } else {
+        Some(hostname)
+    }
+}
+
+/// The local IP the kernel would route toward `relay_host` without sending
+/// any packets (UDP `connect` only installs the route). Returns `None` for
+/// non-literal hosts so the link loop never blocks on DNS.
+fn egress_ip_label(relay_host: &str) -> Option<String> {
+    let target: std::net::IpAddr = relay_host.trim().parse().ok()?;
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    socket.connect((target, 0)).ok()?;
+    let local = socket.local_addr().ok()?;
+    Some(local.ip().to_string())
 }
 
 /// Splits `host[:port]`; a missing port defaults to
