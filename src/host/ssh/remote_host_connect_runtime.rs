@@ -23,7 +23,9 @@ use crate::host::ssh::ssh_remote_host_bootstrapper::{
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::operator_auth::{self, OperatorKeyStore};
-use crate::infra::remote_grpc_transport::OutboundNodeSessionRequest;
+use crate::infra::remote_grpc_transport::{
+    auto_direct_probe_timeout, resolve_via_for_dial, OutboundNodeSessionRequest, RemoteNodeVia,
+};
 use crate::lifecycle::LifecycleError;
 use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
@@ -75,6 +77,11 @@ pub struct RemoteHostConnectOutcome {
     pub authority_node_id: String,
     pub created_target: ManagedSessionRecord,
     pub reused_existing_endpoint: bool,
+    /// The concrete dial path this connect actually dialed with (`None`
+    /// when no dial was needed because an online target already existed).
+    /// `auto` profiles resolve to direct/relay before dialing, so `auto`
+    /// never appears here (issue #156 slice 2).
+    pub dial_via: Option<RemoteNodeVia>,
 }
 
 pub struct RemoteHostConnectRuntime<H, P, B> {
@@ -96,7 +103,18 @@ pub struct RemoteHostConnectRuntime<H, P, B> {
     /// error instead of falling back to an SSH bootstrap that would only
     /// spawn a redundant node server the dial would reject anyway.
     auth_rejection: Option<AuthRejectionChecker>,
+    /// Test seam for the `via = "auto"` dial-path resolution (issue #156
+    /// slice 2). `None` (production) probes the real network: direct first,
+    /// relay fallback, capped at `auto_direct_probe_timeout`. Unit tests
+    /// inject a deterministic resolver so the connect flow can be exercised
+    /// without sockets.
+    via_resolver: Option<ViaResolver>,
 }
+
+/// Resolves a profile `via` for one concrete dial attempt; see
+/// [`RemoteHostConnectRuntime::resolve_dial_via`].
+pub type ViaResolver =
+    Arc<dyn Fn(RemoteNodeVia, &str, Option<&str>) -> RemoteNodeVia + Send + Sync>;
 
 /// Reports whether the given node has actively rejected this host's operator
 /// key, returning the rejection message when it has.
@@ -158,6 +176,7 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
             session_creation_service,
             operator_key_store,
             auth_rejection: None,
+            via_resolver: None,
         }
     }
 
@@ -166,6 +185,37 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
     pub fn with_auth_rejection_checker(mut self, checker: AuthRejectionChecker) -> Self {
         self.auth_rejection = Some(checker);
         self
+    }
+
+    /// Install a deterministic dial-path resolver (test seam, issue #156
+    /// slice 2). Production leaves the resolver unset and probes the real
+    /// network for `via = "auto"`.
+    #[cfg(test)]
+    pub fn with_via_resolver(mut self, resolver: ViaResolver) -> Self {
+        self.via_resolver = Some(resolver);
+        self
+    }
+
+    /// Resolves the profile `via` for one concrete dial attempt. Explicit
+    /// `direct`/`relay` pass through untouched; `auto` probes the direct
+    /// path first (TCP connect plus the pinned TLS handshake, capped at the
+    /// configured probe timeout) and falls back to `relay` when the probe
+    /// fails. Runs on the connect worker thread — never on `StateEventLoop`.
+    fn resolve_dial_via(
+        &self,
+        via: RemoteNodeVia,
+        endpoint_uri: &str,
+        tls_pin_sha256: Option<&str>,
+    ) -> RemoteNodeVia {
+        match &self.via_resolver {
+            Some(resolver) => resolver(via, endpoint_uri, tls_pin_sha256),
+            None => resolve_via_for_dial(
+                via,
+                endpoint_uri,
+                tls_pin_sha256,
+                auto_direct_probe_timeout(),
+            ),
+        }
     }
 
     /// Scope the remote-install proxy settings store to a custom path.
@@ -247,6 +297,7 @@ where
         if let Some(outcome) =
             self.try_reuse_existing_connection(&profile, &request, &mut initiate_outbound_dial)?
         {
+            self.persist_auto_via_memory(&request, &profile, outcome.dial_via);
             return Ok(outcome);
         }
 
@@ -358,14 +409,22 @@ where
                 authority_node_id: endpoint.address.authority_id().to_string(),
                 created_target: endpoint,
                 reused_existing_endpoint: true,
+                // No dial was queued: the target was already online.
+                dial_via: None,
             });
         }
 
+        let endpoint_uri = format!("tls://{}:{}", profile.host, bootstrap_result.remote_port);
+        let resolved_via = self.resolve_dial_via(
+            profile.via(),
+            &endpoint_uri,
+            Some(&bootstrap_result.tls_pin_sha256),
+        );
         let outbound_request = OutboundNodeSessionRequest {
             node_id: authority_node_id.clone(),
-            endpoint_uri: format!("tls://{}:{}", profile.host, bootstrap_result.remote_port),
+            endpoint_uri,
             tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
-            via: profile.via(),
+            via: request_via(resolved_via),
         };
         ERROR_LOG.log(format!(
             "[remote-host-connect] queuing bootstrap dial for {}:{} node={}",
@@ -380,6 +439,11 @@ where
             DEFAULT_ENDPOINT_WAIT_TIMEOUT,
             self.auth_rejection.as_ref(),
         )?;
+        // The dial worked: for an `auto` profile remember which concrete
+        // path took effect, without rewriting the user's choice.
+        if profile.via() == RemoteNodeVia::Auto {
+            profile.last_via_used = Some(resolved_via.as_str().to_string());
+        }
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
         profile.use_install_proxy = request.use_install_proxy;
@@ -392,6 +456,7 @@ where
             authority_node_id,
             created_target: default_target,
             reused_existing_endpoint: port.reused_existing_waitagent,
+            dial_via: Some(resolved_via),
         })
     }
 
@@ -454,16 +519,21 @@ where
         }
 
         let authority_node_id = authority_id_for_profile_port(profile, port);
+        let endpoint_uri = format!("tls://{}:{}", profile.host, port);
+        let resolved_via =
+            self.resolve_dial_via(profile.via(), &endpoint_uri, Some(&tls_pin_sha256));
         let outbound_request = OutboundNodeSessionRequest {
             node_id: authority_node_id.clone(),
-            endpoint_uri: format!("tls://{}:{}", profile.host, port),
+            endpoint_uri: endpoint_uri.clone(),
             tls_pin_sha256: Some(tls_pin_sha256),
-            via: profile.via(),
+            via: request_via(resolved_via),
         };
 
         ERROR_LOG.log(format!(
-            "[remote-host-connect] queuing reuse dial for {}:{} node={}",
-            profile.host, port, authority_node_id
+            "[remote-host-connect] queuing reuse dial for {} node={} via={}",
+            endpoint_uri,
+            authority_node_id,
+            resolved_via.as_str()
         ));
         if let Err(error) = initiate_outbound_dial(outbound_request) {
             ERROR_LOG.log(format!(
@@ -483,6 +553,7 @@ where
                 authority_node_id,
                 created_target: target,
                 reused_existing_endpoint: true,
+                dial_via: Some(resolved_via),
             })),
             Err(error) => {
                 if is_auth_rejection_error(&error) {
@@ -502,6 +573,34 @@ where
                 ));
                 Ok(None)
             }
+        }
+    }
+
+    /// Remembers the dial path that just worked for an `auto` profile
+    /// (issue #156 slice 2): persists `last_via_used` for store-backed
+    /// profiles. Explicit `direct`/`relay` choices and unsaved (ad-hoc)
+    /// profiles are left untouched — the memory annotates the effective
+    /// path and must never rewrite the user's choice. Best effort: a failed
+    /// write is logged and never fails the connect.
+    fn persist_auto_via_memory(
+        &self,
+        request: &RemoteHostConnectRequest,
+        profile: &RemoteHostProfile,
+        dial_via: Option<RemoteNodeVia>,
+    ) {
+        let Some(used) = dial_via else {
+            return;
+        };
+        if profile.via() != RemoteNodeVia::Auto || request.profile_name.is_none() {
+            return;
+        }
+        let mut updated = profile.clone();
+        updated.last_via_used = Some(used.as_str().to_string());
+        if let Err(error) = self.history_store.upsert_profile(updated) {
+            ERROR_LOG.log(format!(
+                "[remote-host-connect] connected {} but failed to persist last_via_used: {error}",
+                profile.name
+            ));
         }
     }
 
@@ -705,9 +804,12 @@ fn profile_from_direct_args(
         tls_pin_sha256: None,
         host_kind: host_kind.unwrap_or_default(),
         remote_shell: None,
-        // CLI-driven ad-hoc connects stay direct; the profile file is the
-        // phase-1 setter for relay-via.
-        via: None,
+        // CLI-driven ad-hoc connects stay direct (no relay fallback); the
+        // profile file is where the `via` choice lives. Explicit here so
+        // the file-level absent-means-auto default cannot change CLI
+        // semantics (issue #156 slice 2).
+        via: Some("direct".to_string()),
+        last_via_used: None,
     })
 }
 
@@ -799,6 +901,14 @@ fn parse_remote_port(value: Option<&str>) -> Result<HistoryRemotePortPreference,
 
 fn authority_id_for_profile_port(profile: &RemoteHostProfile, remote_port: u16) -> String {
     format!("{}#{}", profile.host, remote_port)
+}
+
+/// Maps a resolved concrete dial path onto the optional request field,
+/// preserving the pre-auto convention that `None` means direct. `auto`
+/// never reaches this point: the connect runtime resolves it before
+/// building the request (issue #156 slice 2).
+fn request_via(via: RemoteNodeVia) -> Option<RemoteNodeVia> {
+    via.to_request_via()
 }
 
 fn is_auth_rejection_error(error: &LifecycleError) -> bool {
@@ -1154,6 +1264,161 @@ mod tests {
         assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
         assert!(create_requests.lock().unwrap().is_empty());
         assert_eq!(*registry.calls.lock().unwrap(), 1);
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_auto_via_probes_direct_first_and_remembers_it() {
+        // via = "auto" with a stored endpoint: the injected resolver stands
+        // in for the direct probe and answers Direct. The reuse dial must
+        // carry the resolved path (direct stays the request default), and
+        // the profile must record last_via_used = direct without rewriting
+        // the user's auto choice.
+        let path = unique_path("remote-host-connect-auto-direct.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("auto".to_string());
+        stored.last_remote_port = Some(7476);
+        stored.tls_pin_sha256 = Some("deadbeef".to_string());
+        history.upsert_profile(stored).unwrap();
+        let registry = Arc::new(FakeRegistry::new(vec![remote_target(
+            "10.1.29.130#7476",
+            "seed",
+        )]));
+        let resolve_calls = Arc::new(Mutex::new(Vec::new()));
+        let resolver_calls = resolve_calls.clone();
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Arc::new(Mutex::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_via_resolver(Arc::new(move |via, endpoint, pin| {
+            resolver_calls.lock().unwrap().push((
+                via,
+                endpoint.to_string(),
+                pin.map(str::to_string),
+            ));
+            RemoteNodeVia::Direct
+        }));
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(outcome.reused_existing_endpoint);
+        assert_eq!(outcome.dial_via, Some(RemoteNodeVia::Direct));
+        assert_eq!(
+            resolve_calls.lock().unwrap().as_slice(),
+            &[(
+                RemoteNodeVia::Auto,
+                "tls://10.1.29.130:7476".to_string(),
+                Some("deadbeef".to_string()),
+            )],
+            "the resolver must see the auto choice, the reuse endpoint, and the pin"
+        );
+        let dials = dials.lock().unwrap();
+        assert_eq!(dials.len(), 1);
+        assert_eq!(dials[0].via, None, "direct stays the request-level default");
+        drop(dials);
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_eq!(
+            loaded.hosts[0].via(),
+            RemoteNodeVia::Auto,
+            "the memory must not rewrite the user's auto choice"
+        );
+        assert_eq!(loaded.hosts[0].last_via_used(), Some(RemoteNodeVia::Direct));
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_auto_via_falls_back_to_relay_and_remembers_it() {
+        // The direct probe fails (the resolver answers Relay, as the
+        // production resolver does after a failed probe): the reuse dial
+        // must carry via = Some(Relay) and the profile must remember relay
+        // as the effective path.
+        let path = unique_path("remote-host-connect-auto-relay.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.via = Some("auto".to_string());
+        stored.last_remote_port = Some(7476);
+        stored.tls_pin_sha256 = Some("deadbeef".to_string());
+        history.upsert_profile(stored).unwrap();
+        let registry = Arc::new(FakeRegistry::new(vec![remote_target(
+            "10.1.29.130#7476",
+            "seed",
+        )]));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Arc::new(Mutex::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_via_resolver(Arc::new(|_via, _endpoint, _pin| RemoteNodeVia::Relay));
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(outcome.reused_existing_endpoint);
+        assert_eq!(outcome.dial_via, Some(RemoteNodeVia::Relay));
+        let dials = dials.lock().unwrap();
+        assert_eq!(dials.len(), 1);
+        assert_eq!(dials[0].via, Some(RemoteNodeVia::Relay));
+        drop(dials);
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_eq!(loaded.hosts[0].via(), RemoteNodeVia::Auto);
+        assert_eq!(loaded.hosts[0].last_via_used(), Some(RemoteNodeVia::Relay));
         crate::infra::best_effort::remove_file(path);
     }
 
@@ -1773,6 +2038,11 @@ mod tests {
             use_install_proxy: true,
             tls_pin_sha256: None,
             remote_shell: Some(RemoteShellKind::Posix),
+            // These tests predate `via = "auto"` and exercise the SSH/reuse
+            // flow, not dial-path resolution: pin direct so the production
+            // resolver never probes the network here. Auto behavior has
+            // dedicated tests below with an injected resolver.
+            via: Some("direct".to_string()),
             ..RemoteHostProfile::default()
         }
     }

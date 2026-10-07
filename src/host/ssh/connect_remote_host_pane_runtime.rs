@@ -14,6 +14,7 @@ use crate::host::ssh::remote_install_proxy_store::{
 };
 use crate::host::ssh::remote_shell::RemoteShellKind;
 use crate::infra::relay_toml_store::RelayTomlConfig;
+use crate::infra::remote_grpc_transport::RemoteNodeVia;
 use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
 use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardReadResult};
@@ -348,6 +349,9 @@ struct ConnectRemoteHostState {
     remote_port_preference: String,
     last_remote_port: Option<u16>,
     host_kind: RemoteHostKind,
+    /// Dial-path choice for the saved profile: auto (direct first, relay
+    /// fallback), direct, or relay (issue #156 slice 2).
+    via: RemoteNodeVia,
     auth: AuthChoice,
     key_path: String,
     ssh_password: String,
@@ -394,6 +398,7 @@ impl ConnectRemoteHostState {
             remote_port_preference: "auto".to_string(),
             last_remote_port: None,
             host_kind: RemoteHostKind::Lan,
+            via: RemoteNodeVia::Auto,
             auth: AuthChoice::Password,
             key_path: String::new(),
             ssh_password: String::new(),
@@ -437,6 +442,7 @@ impl ConnectRemoteHostState {
             self.remote_port_preference = "auto".to_string();
             self.last_remote_port = None;
             self.host_kind = RemoteHostKind::Lan;
+            self.via = RemoteNodeVia::Auto;
             self.auth = AuthChoice::Password;
             self.key_path.clear();
             self.ssh_password.clear();
@@ -460,6 +466,7 @@ impl ConnectRemoteHostState {
         self.ssh_port = profile.ssh_port().to_string();
         self.last_remote_port = profile.last_remote_port;
         self.host_kind = profile.host_kind;
+        self.via = profile.via();
         let mut request = SecretLoadRequest {
             id: self.next_secret_request_id,
             selected: self.selected,
@@ -638,7 +645,7 @@ impl ConnectRemoteHostState {
                     self.use_install_proxy = !self.use_install_proxy;
                 } else if self.focus == Focus::Password || self.focus == Focus::Sudo {
                     self.toggle_password_visibility();
-                } else if self.focus == Focus::HostKind {
+                } else if self.focus == Focus::HostKind || self.focus == Focus::Via {
                     self.adjust_choice(1);
                 }
                 PaneAction::None
@@ -1034,6 +1041,9 @@ impl ConnectRemoteHostState {
             row if row == details.rows.host_kind && point_in_rect(x, y, details.connection) => {
                 self.set_focus(Focus::HostKind)
             }
+            row if row == details.rows.via && point_in_rect(x, y, details.connection) => {
+                self.set_focus(Focus::Via)
+            }
             row if row == details.rows.auth && point_in_rect(x, y, details.authentication) => {
                 self.set_focus(Focus::Auth)
             }
@@ -1210,6 +1220,10 @@ impl ConnectRemoteHostState {
                 self.adjust_choice(1);
                 PaneAction::None
             }
+            Focus::Via => {
+                self.adjust_choice(1);
+                PaneAction::None
+            }
             Focus::Password => PaneAction::None,
             Focus::Sudo => {
                 self.start_sudo_password_edit();
@@ -1303,6 +1317,10 @@ impl ConnectRemoteHostState {
                     }
                 }
                 self.set_focus(Focus::HostKind);
+            }
+            Focus::Via => {
+                self.via = self.via.shift(step);
+                self.set_focus(Focus::Via);
             }
             Focus::Auth => {
                 if self.host_kind == RemoteHostKind::Cloud {
@@ -1645,6 +1663,7 @@ enum Focus {
     Port,
     User,
     HostKind,
+    Via,
     Auth,
     Password,
     Sudo,
@@ -1666,7 +1685,7 @@ enum Focus {
 
 impl Focus {
     fn uses_horizontal_choice(self) -> bool {
-        matches!(self, Self::HostKind | Self::Auth)
+        matches!(self, Self::HostKind | Self::Via | Self::Auth)
     }
 
     fn edit_field(self, auth: AuthChoice) -> Option<EditField> {
@@ -1717,6 +1736,7 @@ impl Focus {
             Self::Port,
             Self::User,
             Self::HostKind,
+            Self::Via,
             Self::Auth,
             Self::Password,
             Self::Sudo,
@@ -1955,6 +1975,7 @@ struct DetailsRows {
     port: u16,
     user: u16,
     host_kind: u16,
+    via: u16,
     auth: u16,
     password: u16,
     sudo: u16,
@@ -2105,9 +2126,9 @@ impl PopupGeometry {
         // instead of stretching to the full terminal height. The height is
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
-        // terminals to keep a visible margin. 24 rows is the compact target
-        // that fits the framed sidebar and detail sections.
-        const POPUP_HEIGHT: u16 = 27;
+        // terminals to keep a visible margin; 28 rows fit the framed
+        // sidebar and detail sections including the Via choice row.
+        const POPUP_HEIGHT: u16 = 28;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -2241,7 +2262,7 @@ impl DetailsGeometry {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // framed header bar
-                Constraint::Length(7), // Connection card (Host/Port/Last Port/User/Host Kind)
+                Constraint::Length(8), // Connection card (Host/Port/Last Port/User/Host Kind/Via)
                 Constraint::Length(5), // Authentication card
                 Constraint::Length(4), // Options card
                 Constraint::Length(3), // info box card
@@ -2255,6 +2276,7 @@ impl DetailsGeometry {
             port: sections[1].y.saturating_add(2).saturating_sub(area.y),
             user: sections[1].y.saturating_add(3).saturating_sub(area.y),
             host_kind: sections[1].y.saturating_add(4).saturating_sub(area.y),
+            via: sections[1].y.saturating_add(5).saturating_sub(area.y),
             auth: sections[2].y.saturating_add(1).saturating_sub(area.y),
             password: sections[2].y.saturating_add(2).saturating_sub(area.y),
             sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
@@ -2674,14 +2696,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
             "Saved",
             Style::default().bg(Color::Green).fg(Color::Black),
         ));
-        if state.selected_profile().and_then(|profile| profile.via())
-            == Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay)
-        {
+        if let Some(badge) = via_badge(state.selected_profile()) {
             content.push(Span::raw(" "));
-            content.push(Span::styled(
-                "via relay",
-                Style::default().bg(Color::Magenta).fg(Color::Black),
-            ));
+            content.push(badge);
         }
     }
 
@@ -2700,6 +2717,34 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     content.push(Span::styled(star, Style::default().fg(Color::Yellow)));
 
     render_framed_block(frame, area, Line::from(content), Alignment::Left, false);
+}
+
+/// Header badge for the selected profile's dial path (issue #156 slice 2):
+/// the explicit choice, or — for `auto` — the choice annotated with the
+/// path that last took effect, so the effective route is visible without
+/// ever rewriting the user's choice.
+fn via_badge(profile: Option<&RemoteHostProfile>) -> Option<Span<'static>> {
+    let profile = profile?;
+    let badge = match profile.via() {
+        RemoteNodeVia::Relay => Span::styled(
+            "via relay",
+            Style::default().bg(Color::Magenta).fg(Color::Black),
+        ),
+        RemoteNodeVia::Direct => Span::styled(
+            "via direct",
+            Style::default().bg(Color::Cyan).fg(Color::Black),
+        ),
+        RemoteNodeVia::Auto => {
+            let text = match profile.last_via_used() {
+                Some(RemoteNodeVia::Direct) => "via auto → direct",
+                Some(RemoteNodeVia::Relay) => "via auto → relay",
+                // No successful auto connect yet (or a hand-edited value).
+                _ => "via auto",
+            };
+            Span::styled(text, Style::default().bg(Color::Green).fg(Color::Black))
+        }
+    };
+    Some(badge)
 }
 
 fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHostState) {
@@ -3076,6 +3121,13 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         state,
         Focus::HostKind,
     ));
+    rows.push(icon_choice_row(
+        "⇄",
+        "Via",
+        via_tabs(state),
+        state,
+        Focus::Via,
+    ));
     render_detail_table(frame, table_area, rows);
 }
 
@@ -3316,7 +3368,9 @@ fn render_hint(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState
 fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
     match state.focus {
         Focus::Password | Focus::Sudo => "Enter: edit · Space: show/hide · Tab: next".to_string(),
-        Focus::HostKind | Focus::Auth => "←/→: switch · Space: toggle · Tab: next".to_string(),
+        Focus::HostKind | Focus::Via | Focus::Auth => {
+            "←/→: switch · Space: toggle · Tab: next".to_string()
+        }
         Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
         Focus::Connect => "Enter: connect · Tab: next".to_string(),
         Focus::Delete => "Enter: delete · Tab: next".to_string(),
@@ -3520,6 +3574,23 @@ fn host_kind_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
         ChoiceSegment {
             label: RemoteHostKind::Cloud.label(),
             selected: state.host_kind == RemoteHostKind::Cloud,
+        },
+    ]
+}
+
+fn via_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
+    vec![
+        ChoiceSegment {
+            label: RemoteNodeVia::Auto.label(),
+            selected: state.via == RemoteNodeVia::Auto,
+        },
+        ChoiceSegment {
+            label: RemoteNodeVia::Direct.label(),
+            selected: state.via == RemoteNodeVia::Direct,
+        },
+        ChoiceSegment {
+            label: RemoteNodeVia::Relay.label(),
+            selected: state.via == RemoteNodeVia::Relay,
         },
     ]
 }
@@ -4218,12 +4289,15 @@ where
         remote_shell: state
             .selected_profile()
             .and_then(|profile| profile.remote_shell),
-        // Preserve an existing via choice; new entries self-describe as
-        // direct so the file is explicit about the dial path.
-        via: state
+        // Persist the popup's three-way choice; auto is the default for new
+        // entries. The effective-path memory is preserved from the stored
+        // profile and only ever updated by the connect runtime after a
+        // successful auto connect — never rewritten here (issue #156
+        // slice 2).
+        via: Some(state.via.as_str().to_string()),
+        last_via_used: state
             .selected_profile()
-            .and_then(|profile| profile.via.clone())
-            .or_else(|| Some("direct".to_string())),
+            .and_then(|profile| profile.last_via_used.clone()),
     };
 
     history_store
@@ -4615,6 +4689,7 @@ fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostS
         && profile.ssh_port() == state_ssh_port(state)
         && normalized_port_matches_profile(&state.remote_port_preference, profile)
         && profile.host_kind == state.host_kind
+        && profile.via() == state.via
         && auth_matches_state(&profile.auth, state)
         && profile.use_install_proxy == state.use_install_proxy
 }
@@ -6753,6 +6828,198 @@ mod tests {
         assert!(tabs[1].label == "Cloud" && tabs[1].selected);
     }
 
+    #[test]
+    fn via_tabs_reflect_state() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        assert_eq!(state.via, RemoteNodeVia::Auto);
+
+        state.via = RemoteNodeVia::Auto;
+        assert_eq!(segmented_for_test(&via_tabs(&state)), "Auto  Direct  Relay");
+
+        state.via = RemoteNodeVia::Relay;
+        let tabs = via_tabs(&state);
+        assert!(!tabs[0].selected && !tabs[1].selected && tabs[2].selected);
+    }
+
+    #[test]
+    fn via_choice_cycles_with_horizontal_keys_and_space() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Via);
+        assert_eq!(state.via, RemoteNodeVia::Auto);
+
+        state.adjust_choice(1);
+        assert_eq!(state.via, RemoteNodeVia::Direct);
+        state.adjust_choice(1);
+        assert_eq!(state.via, RemoteNodeVia::Relay);
+        state.adjust_choice(1);
+        assert_eq!(state.via, RemoteNodeVia::Auto);
+        state.adjust_choice(-1);
+        assert_eq!(state.via, RemoteNodeVia::Relay);
+
+        state.apply_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(state.via, RemoteNodeVia::Auto);
+    }
+
+    #[test]
+    fn sync_selected_profile_syncs_via_and_defaults_new_entries_to_auto() {
+        // Build the profile explicitly: `load()` reads the real waitagent
+        // home, which has no profiles in CI (an empty Vec would panic on
+        // indexing), so tests must not depend on the user's history file.
+        let mut state = ConnectRemoteHostState::load();
+        let profile = RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("~/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: None,
+            host_kind: RemoteHostKind::Lan,
+            remote_shell: None,
+            via: Some("relay".to_string()),
+            last_via_used: None,
+        };
+        state.profiles = vec![profile];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        assert_eq!(state.via, RemoteNodeVia::Relay);
+
+        // New Host row resets the choice to the auto default.
+        state.selected = state.profiles.len();
+        let _ = state.sync_selected_profile();
+        assert_eq!(state.via, RemoteNodeVia::Auto);
+    }
+
+    #[test]
+    fn via_badge_names_explicit_choice_and_auto_effective_path() {
+        let mut profile = RemoteHostProfile {
+            via: Some("relay".to_string()),
+            ..RemoteHostProfile::default()
+        };
+        assert_eq!(
+            via_badge(Some(&profile)).map(|span| span.content.to_string()),
+            Some("via relay".to_string())
+        );
+
+        profile.via = Some("direct".to_string());
+        assert_eq!(
+            via_badge(Some(&profile)).map(|span| span.content.to_string()),
+            Some("via direct".to_string())
+        );
+
+        profile.via = Some("auto".to_string());
+        assert_eq!(
+            via_badge(Some(&profile)).map(|span| span.content.to_string()),
+            Some("via auto".to_string())
+        );
+
+        profile.last_via_used = Some("relay".to_string());
+        assert_eq!(
+            via_badge(Some(&profile)).map(|span| span.content.to_string()),
+            Some("via auto → relay".to_string())
+        );
+
+        profile.last_via_used = Some("direct".to_string());
+        assert_eq!(
+            via_badge(Some(&profile)).map(|span| span.content.to_string()),
+            Some("via auto → direct".to_string())
+        );
+
+        assert!(via_badge(None).is_none());
+    }
+
+    #[test]
+    fn ensure_connectable_profile_persists_via_choice_and_preserves_memory() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.host = "192.168.1.21".to_string();
+        state.ssh_user = "k".to_string();
+        state.ssh_password = "ssh-secret".to_string();
+        state.password_mode = PasswordMode::Enter;
+        state.sudo_mode = SudoMode::None;
+        state.via = RemoteNodeVia::Relay;
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+        assert_eq!(profile.via(), RemoteNodeVia::Relay);
+
+        // An auto profile with a remembered effective path keeps both: the
+        // user's choice and the annotation.
+        let mut auto = state.clone();
+        auto.via = RemoteNodeVia::Auto;
+        let stored = RemoteHostProfile {
+            name: "k@192.168.1.21".to_string(),
+            ..profile.clone()
+        };
+        let stored = {
+            let mut s = stored;
+            s.via = Some("auto".to_string());
+            s.last_via_used = Some("relay".to_string());
+            s
+        };
+        auto.profiles = vec![stored];
+        auto.selected = 0;
+        let _ = auto.sync_selected_profile();
+        let kept = ensure_connectable_profile(&auto, &secret_store, &history_store).unwrap();
+        assert_eq!(kept.via(), RemoteNodeVia::Auto);
+        assert_eq!(kept.last_via_used(), Some(RemoteNodeVia::Relay));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn profile_matches_state_includes_via() {
+        // Explicit profile construction: see
+        // sync_selected_profile_syncs_via_and_defaults_new_entries_to_auto
+        // for why tests must not index the user's loaded history.
+        let mut state = ConnectRemoteHostState::load();
+        let profile = RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("~/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: None,
+            host_kind: RemoteHostKind::Lan,
+            remote_shell: None,
+            via: Some("relay".to_string()),
+            last_via_used: None,
+        };
+        state.profiles = vec![profile.clone()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+
+        assert!(profile_matches_state(&profile, &state));
+
+        state.via = RemoteNodeVia::Auto;
+        assert!(!profile_matches_state(&profile, &state));
+    }
+
     fn test_secret_store() -> crate::host::ssh::remote_host_secret_store::MemoryRemoteHostSecretStore
     {
         crate::host::ssh::remote_host_secret_store::MemoryRemoteHostSecretStore::default()
@@ -6923,6 +7190,7 @@ mod tests {
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
             via: None,
+            last_via_used: None,
         };
 
         let mut state = ConnectRemoteHostState::load();
@@ -6970,6 +7238,7 @@ mod tests {
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
             via: None,
+            last_via_used: None,
         };
 
         let mut state = ConnectRemoteHostState::load();

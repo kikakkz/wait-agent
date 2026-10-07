@@ -74,10 +74,21 @@ pub struct RemoteHostProfile {
     /// probed yet (profiles written before shell detection existed); the
     /// connect flow detects and caches it on the first SSH bootstrap.
     pub remote_shell: Option<RemoteShellKind>,
-    /// Dial path for the node-to-node inner TLS: "relay" routes through the
-    /// pinned relay, "direct" dials the peer's TCP port (the default when
-    /// absent). Validated at load.
+    /// Dial path for the node-to-node inner TLS: "auto" (the default) probes
+    /// a direct dial first and falls back to the pinned relay; "direct"
+    /// dials the peer's TCP port; "relay" routes through the pinned relay.
+    /// Absent means "auto" — profiles written before `auto` existed
+    /// defaulted to direct at the call site, and the migration rule for
+    /// them is to upgrade the default rather than freeze it (issue #156
+    /// slice 2; explicit "direct"/"relay" values are preserved verbatim).
+    /// Validated at load.
     pub via: Option<String>,
+    /// The dial path that actually worked on the most recent successful
+    /// connect of an `auto` profile ("direct" or "relay"). Never written
+    /// for explicit choices and never "auto" itself: it annotates the
+    /// effective path without rewriting the user's choice (issue #156
+    /// slice 2). Validated at load.
+    pub last_via_used: Option<String>,
 }
 
 impl RemoteHostProfile {
@@ -86,13 +97,31 @@ impl RemoteHostProfile {
         self.ssh_port.unwrap_or(22)
     }
 
-    /// Dial path for the node-to-node inner TLS. The store validates the
-    /// `via` string at load time; a value that somehow bypasses validation
-    /// falls back to direct rather than failing the whole connect.
-    pub fn via(&self) -> Option<crate::infra::remote_grpc_transport::RemoteNodeVia> {
+    /// The user's dial-path choice. The store validates the `via` string at
+    /// load time; a value that somehow bypasses validation falls back to
+    /// `auto` (the direct-first superset) rather than failing the connect.
+    pub fn via(&self) -> crate::infra::remote_grpc_transport::RemoteNodeVia {
         self.via
             .as_deref()
             .and_then(|value| crate::infra::remote_grpc_transport::RemoteNodeVia::parse(value).ok())
+            .unwrap_or_default()
+    }
+
+    /// The dial path that last worked for an `auto` profile.
+    pub fn last_via_used(&self) -> Option<crate::infra::remote_grpc_transport::RemoteNodeVia> {
+        self.last_via_used
+            .as_deref()
+            .and_then(|value| crate::infra::remote_grpc_transport::RemoteNodeVia::parse(value).ok())
+    }
+
+    /// The dial path a UI should display for this profile right now: the
+    /// explicit choice when there is one, otherwise the path that last
+    /// worked (or `None` until the first auto connect has succeeded).
+    pub fn effective_via(&self) -> Option<crate::infra::remote_grpc_transport::RemoteNodeVia> {
+        match self.via() {
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Auto => self.last_via_used(),
+            concrete => Some(concrete),
+        }
     }
 }
 
@@ -275,6 +304,9 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         if let Some(via) = &host.via {
             push_string(&mut out, "via", via);
         }
+        if let Some(last_via_used) = &host.last_via_used {
+            push_string(&mut out, "last_via_used", last_via_used);
+        }
         out.push('\n');
     }
     out
@@ -349,6 +381,7 @@ struct RawProfile {
     host_kind: Option<String>,
     remote_shell: Option<String>,
     via: Option<String>,
+    last_via_used: Option<String>,
 }
 
 impl RawProfile {
@@ -371,6 +404,7 @@ impl RawProfile {
             "host_kind" => self.host_kind = Some(value),
             "remote_shell" => self.remote_shell = Some(value),
             "via" => self.via = Some(value),
+            "last_via_used" => self.last_via_used = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -414,6 +448,7 @@ impl RawProfile {
             host_kind: parse_host_kind(self.host_kind)?,
             remote_shell: parse_remote_shell(self.remote_shell)?,
             via: parse_via(self.via)?,
+            last_via_used: parse_last_via_used(self.last_via_used)?,
         })
     }
 }
@@ -518,9 +553,9 @@ fn parse_remote_shell(
         .map_err(RemoteHostHistoryStoreError::new)
 }
 
-/// Validates the `via` dial-path key: exactly `relay` or `direct`, absent by
-/// default. The guiding error names both legal values so a hand-edited file
-/// is fixable from the message alone.
+/// Validates the `via` dial-path key: `auto` (also the absent default),
+/// `direct`, or `relay`. The guiding error names all legal values so a
+/// hand-edited file is fixable from the message alone.
 fn parse_via(value: Option<String>) -> Result<Option<String>, RemoteHostHistoryStoreError> {
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
@@ -528,6 +563,27 @@ fn parse_via(value: Option<String>) -> Result<Option<String>, RemoteHostHistoryS
     crate::infra::remote_grpc_transport::RemoteNodeVia::parse(&value)
         .map(|via| Some(via.as_str().to_string()))
         .map_err(RemoteHostHistoryStoreError::new)
+}
+
+/// Validates the `last_via_used` annotation: only the concrete paths a
+/// connect can actually take. `auto` is a choice, not an outcome, so it is
+/// rejected here — the field must never become a silent rewrite of the
+/// user's choice.
+fn parse_last_via_used(
+    value: Option<String>,
+) -> Result<Option<String>, RemoteHostHistoryStoreError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    match crate::infra::remote_grpc_transport::RemoteNodeVia::parse(&value) {
+        Ok(crate::infra::remote_grpc_transport::RemoteNodeVia::Auto) => {
+            Err(RemoteHostHistoryStoreError::new(
+                "remote host profile `last_via_used` must be \"direct\" or \"relay\"",
+            ))
+        }
+        Ok(concrete) => Ok(Some(concrete.as_str().to_string())),
+        Err(error) => Err(RemoteHostHistoryStoreError::new(error)),
+    }
 }
 
 fn parse_port_preference(
@@ -718,6 +774,7 @@ mod tests {
                 host_kind: RemoteHostKind::Cloud,
                 remote_shell: None,
                 via: None,
+                last_via_used: None,
             })
             .unwrap();
         store
@@ -739,6 +796,7 @@ mod tests {
                 host_kind: RemoteHostKind::Lan,
                 remote_shell: None,
                 via: None,
+                last_via_used: None,
             })
             .unwrap();
 
@@ -779,6 +837,7 @@ mod tests {
                 host_kind: RemoteHostKind::Lan,
                 remote_shell: None,
                 via: None,
+                last_via_used: None,
             })
             .unwrap();
 
@@ -860,11 +919,15 @@ host_kind = "lan"
         let mut relayed = profile("relayed", "10.1.29.140");
         relayed.via = Some("relay".to_string());
         let direct = profile("direct", "10.1.29.141");
+        let mut auto = profile("auto", "10.1.29.142");
+        auto.via = Some("auto".to_string());
         store.upsert_profile(relayed).unwrap();
         store.upsert_profile(direct).unwrap();
+        store.upsert_profile(auto).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("via = \"relay\""));
+        assert!(content.contains("via = \"auto\""));
         assert!(
             !content.contains("via = \"direct\""),
             "absent via is not written"
@@ -873,18 +936,27 @@ host_kind = "lan"
         let loaded = store.load().unwrap();
         let relayed = loaded.hosts.iter().find(|h| h.name == "relayed").unwrap();
         let direct = loaded.hosts.iter().find(|h| h.name == "direct").unwrap();
+        let auto = loaded.hosts.iter().find(|h| h.name == "auto").unwrap();
         assert_eq!(relayed.via, Some("relay".to_string()));
         assert_eq!(
             relayed.via(),
-            Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay)
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Relay
         );
         assert_eq!(direct.via, None);
+        assert_eq!(
+            direct.via(),
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Auto
+        );
+        assert_eq!(
+            auto.via(),
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Auto
+        );
 
         crate::infra::best_effort::remove_file(path);
     }
 
     #[test]
-    fn remote_host_history_without_via_field_loads_as_direct() {
+    fn remote_host_history_without_via_field_loads_as_auto() {
         let path = unique_path("remote-hosts-legacy-no-via.toml");
         fs::write(
             &path,
@@ -904,7 +976,11 @@ host_kind = "lan"
 
         assert_eq!(loaded.hosts.len(), 1);
         assert_eq!(loaded.hosts[0].via, None);
-        assert_eq!(loaded.hosts[0].via(), None);
+        assert_eq!(
+            loaded.hosts[0].via(),
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Auto,
+            "legacy entries without a via key upgrade from implicit-direct to auto"
+        );
 
         crate::infra::best_effort::remove_file(path);
     }
@@ -932,9 +1008,75 @@ via = "relays"
             .expect_err("an unknown via value must fail the load");
         let message = error.to_string();
         assert!(
-            message.contains("\"relay\"") && message.contains("\"direct\""),
-            "the error names both legal values: {message}"
+            message.contains("\"auto\"")
+                && message.contains("\"relay\"")
+                && message.contains("\"direct\""),
+            "the error names all legal values: {message}"
         );
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_last_via_used() {
+        let path = unique_path("remote-hosts-last-via-used.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        let mut auto_relayed = profile("auto-relayed", "10.1.29.140");
+        auto_relayed.via = Some("auto".to_string());
+        auto_relayed.last_via_used = Some("relay".to_string());
+        store.upsert_profile(auto_relayed).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("via = \"auto\""));
+        assert!(content.contains("last_via_used = \"relay\""));
+
+        let loaded = store.load().unwrap();
+        let auto_relayed = loaded
+            .hosts
+            .iter()
+            .find(|h| h.name == "auto-relayed")
+            .unwrap();
+        assert_eq!(
+            auto_relayed.via(),
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Auto,
+            "the memory must not rewrite the user's auto choice"
+        );
+        assert_eq!(
+            auto_relayed.last_via_used(),
+            Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay)
+        );
+        assert_eq!(
+            auto_relayed.effective_via(),
+            Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay),
+            "the effective path annotates the auto choice"
+        );
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_rejects_auto_as_last_via_used() {
+        let path = unique_path("remote-hosts-bad-last-via.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "typo"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+via = "auto"
+last_via_used = "auto"
+"#,
+        )
+        .unwrap();
+
+        RemoteHostHistoryStore::new(&path)
+            .load()
+            .expect_err("last_via_used must name a concrete path, never auto");
 
         crate::infra::best_effort::remove_file(path);
     }
