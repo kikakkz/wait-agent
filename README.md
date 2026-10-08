@@ -410,6 +410,7 @@ Alpine, openSUSE/SLES, and Homebrew.
 - [UI Design](docs/ui-design.md)
 - [Relay Design](docs/relay-design.md)
 - [WebUI Deployment & Security](docs/webui.md)
+- [Relay Deployment Runbook](docs/deployment.md)
 - [Execution Status Board](docs/archive/execution-status-board.md)
 
 ---
