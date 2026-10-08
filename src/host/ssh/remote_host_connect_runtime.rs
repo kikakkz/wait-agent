@@ -1683,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_host_connect_prefights_before_reusing_existing_online_endpoint() {
+    fn remote_host_connect_preflights_before_reusing_existing_online_endpoint() {
         let path = unique_path("remote-host-connect-reuse.toml");
         let history = RemoteHostHistoryStore::new(&path);
         history.upsert_profile(profile()).unwrap();
