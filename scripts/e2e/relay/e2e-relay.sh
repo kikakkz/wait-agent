@@ -125,6 +125,22 @@ relay_status_on() {
     docker exec "$1" waitagent relay status --listen "$RELAY_LISTEN"
 }
 
+# `docker run -d ... relay serve` returns before the relay has created its
+# admin socket; an admin command issued right afterwards fails with "the
+# relay does not appear to be running" (issue #162). Poll until the admin
+# channel answers before issuing the first admin command.
+wait_for_relay_admin_on() {
+    local relay_container=$1
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        if relay_status_on "$relay_container" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    die "relay admin on $relay_container did not answer within ${GATE_TIMEOUT_SECS}s"
+}
+
 # Polls a relay container's admin status until exactly the expected node ids
 # are online.
 wait_for_node_ids_on() {
@@ -275,6 +291,7 @@ bring_up_topology() {
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
     docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -317,6 +334,7 @@ scenario_joinkeypaths() {
     docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -583,6 +601,7 @@ scenario_pastefile() {
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
     docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -835,6 +854,7 @@ scenario_capacity() {
     docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
     docker network connect --alias relay "$NET_C" "$RELAY" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -922,6 +942,7 @@ scenario_presence() {
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
     docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -1030,9 +1051,11 @@ scenario_relaymgmt() {
     docker run -d --name "$RELAY2" --network "$NET_A" --network-alias relay2 "$IMAGE" \
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
+    wait_for_relay_admin_on "$RELAY2"
     token2=$(docker exec "$RELAY2" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token2" ] || die "relay2 invite produced no token"
@@ -1146,6 +1169,7 @@ scenario_viaautodirect() {
     docker run -d --name "$RELAY" --network "$NET_DIRECT" --network-alias relay "$IMAGE" \
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -1240,6 +1264,7 @@ scenario_viaautorelay() {
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
     docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
@@ -1325,6 +1350,7 @@ scenario_pinautodiscovery() {
         waitagent relay serve --listen "$RELAY_LISTEN" >/dev/null
     docker network connect --alias relay "$NET_B" "$RELAY" >/dev/null
 
+    wait_for_relay_admin_on "$RELAY"
     token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
         | sed -n 's/^token: //p')
     [ -n "$token" ] || die "relay invite produced no token"
