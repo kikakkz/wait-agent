@@ -1,0 +1,11 @@
+# Minimal sshd configuration for the install-source e2e target (issue #168).
+# Root logs in with the e2e key only; the container has no PAM session
+# infrastructure, so PAM is disabled.
+Port 22
+ListenAddress 0.0.0.0
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+UsePAM no
+AllowTcpForwarding yes
