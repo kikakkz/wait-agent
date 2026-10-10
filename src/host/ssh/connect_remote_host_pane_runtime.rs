@@ -1002,7 +1002,7 @@ impl ConnectRemoteHostState {
                 row if row == details.rows.all_proxy => self.set_focus(Focus::AllProxy),
                 row if row == details.rows.https_proxy => self.set_focus(Focus::HttpsProxy),
                 row if row == details.rows.action => {
-                    return proxy_action_from_x(x, details.save, self);
+                    return proxy_action_from_x(x, details.buttons, self);
                 }
                 _ => {}
             }
@@ -1985,9 +1985,12 @@ struct DetailsRows {
 
 #[derive(Debug, Clone, Copy)]
 struct ProxyDetailsGeometry {
+    header: Rect,
     proxy: Rect,
     no_proxy: Rect,
-    save: Rect,
+    info: Rect,
+    buttons: Rect,
+    hint: Rect,
     status: Rect,
     rows: ProxyDetailsRows,
 }
@@ -2298,39 +2301,37 @@ impl DetailsGeometry {
 
 impl ProxyDetailsGeometry {
     fn from_area(area: Rect) -> Self {
-        let bottom = area.y.saturating_add(area.height);
-        // Bordered cards: proxy config needs 3 content rows + 2 border rows;
-        // no_proxy needs 1 content row + 2 border rows.
-        let proxy_height = area.height.min(5);
-        let proxy = Rect::new(area.x, area.y, area.width, proxy_height);
-        let no_proxy_y = area.y.saturating_add(proxy_height);
-        let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(5);
-        let no_proxy = Rect::new(area.x, no_proxy_y, area.width, no_proxy_height);
-        let action_y = no_proxy_y
-            .saturating_add(no_proxy_height)
-            .saturating_add(1)
-            .min(bottom);
-        let action_height = u16::from(action_y < bottom);
-        let save = Rect::new(area.x, action_y, area.width, action_height);
-        let status_y = action_y.saturating_add(action_height).min(bottom);
-        let status = Rect::new(
-            area.x,
-            status_y,
-            area.width,
-            bottom.saturating_sub(status_y),
-        );
+        // Same skeleton as the host detail page (DetailsGeometry): framed
+        // header bar, bordered cards, info box, spacer, buttons, and hint;
+        // the status line fills whatever rows remain.
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // framed header bar
+                Constraint::Length(5), // Proxy card (Name / all_proxy / https_proxy)
+                Constraint::Length(3), // No Proxy card
+                Constraint::Length(3), // info box card
+                Constraint::Length(1), // spacer above buttons
+                Constraint::Length(1), // buttons
+                Constraint::Length(1), // hint
+                Constraint::Min(0),    // status
+            ])
+            .split(area);
         let rows = ProxyDetailsRows {
-            name: proxy.y.saturating_add(1).saturating_sub(area.y),
-            all_proxy: proxy.y.saturating_add(2).saturating_sub(area.y),
-            https_proxy: proxy.y.saturating_add(3).saturating_sub(area.y),
-            no_proxy: no_proxy.y.saturating_add(1).saturating_sub(area.y),
-            action: save.y.saturating_sub(area.y),
+            name: sections[1].y.saturating_add(1).saturating_sub(area.y),
+            all_proxy: sections[1].y.saturating_add(2).saturating_sub(area.y),
+            https_proxy: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            no_proxy: sections[2].y.saturating_add(1).saturating_sub(area.y),
+            action: sections[5].y.saturating_sub(area.y),
         };
         Self {
-            proxy,
-            no_proxy,
-            save,
-            status,
+            header: sections[0],
+            proxy: sections[1],
+            no_proxy: sections[2],
+            info: sections[3],
+            buttons: sections[5],
+            hint: sections[6],
+            status: sections[7],
             rows,
         }
     }
@@ -2747,6 +2748,54 @@ fn via_badge(profile: Option<&RemoteHostProfile>) -> Option<Span<'static>> {
     Some(badge)
 }
 
+/// Proxy detail header (issue #166): the same framed identity bar as the
+/// host page — profile icon and name, a Saved/Draft badge, and the active
+/// marker right-aligned (★ only when this profile is the active one; the
+/// New Proxy draft shows no marker).
+fn render_proxy_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let saved = state.selected_proxy_profile_index().is_some();
+    let name = if saved {
+        state.proxy_draft.name.clone()
+    } else {
+        "New Proxy".to_string()
+    };
+    let badge = if saved {
+        Span::styled("Saved", Style::default().bg(Color::Green).fg(Color::Black))
+    } else {
+        Span::styled("Draft", Style::default().bg(Color::Yellow).fg(Color::Black))
+    };
+    let mut content = vec![
+        Span::styled("⛓", Style::default().fg(SECTION_COLOR_CONNECTION)),
+        Span::raw(" "),
+        Span::styled(
+            name,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        badge,
+    ];
+    let star = if !saved {
+        None
+    } else if state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str()) {
+        Some(Span::styled("★", Style::default().fg(Color::Yellow)))
+    } else {
+        Some(Span::styled("☆", Style::default().fg(Color::DarkGray)))
+    };
+    let star_width = star.as_ref().map_or(0, |span| span.content.width());
+    let content_width: usize = content.iter().map(|span| span.content.width()).sum();
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let padding = inner_width
+        .saturating_sub(content_width)
+        .saturating_sub(star_width);
+    content.push(Span::raw(" ".repeat(padding)));
+    if let Some(star) = star {
+        content.push(star);
+    }
+    render_framed_block(frame, area, Line::from(content), Alignment::Left, false);
+}
+
 fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHostState) {
     if area.height == 0 {
         return;
@@ -2766,26 +2815,56 @@ fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHost
     );
 }
 
+fn render_proxy_info_box(frame: &mut Frame<'_>, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SECTION_BORDER_UNIFIED))
+        .style(Style::default().bg(SECTION_BG_UNIFIED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text =
+        "ⓘ Environment used when the remote host downloads and installs waitagent during connect.";
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().fg(Color::Gray))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
 fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let geometry = ProxyDetailsGeometry::from_area(area);
+    render_proxy_header(frame, geometry.header, state);
+
+    let proxy_block = section_block("Proxy", "⛓", SECTION_COLOR_CONNECTION);
+    let proxy_inner = proxy_block.inner(geometry.proxy);
+    frame.render_widget(proxy_block, geometry.proxy);
     let rows = [
-        detail_row("Name", &state.proxy_draft.name, state, Focus::ProxyName),
-        detail_row(
+        icon_detail_row(
+            "●",
+            "Name",
+            &state.proxy_draft.name,
+            state,
+            Focus::ProxyName,
+        ),
+        icon_detail_row(
+            "◆",
             "all_proxy",
             &proxy_input_display(&state.proxy_draft.all_proxy),
             state,
             Focus::AllProxy,
         ),
-        detail_row(
+        icon_detail_row(
+            "◇",
             "https_proxy",
             &proxy_input_display(&state.proxy_draft.https_proxy),
             state,
             Focus::HttpsProxy,
         ),
     ];
-    let proxy_block = section_block("Proxy Configuration", "⛓", SECTION_COLOR_CONNECTION);
-    let proxy_inner = proxy_block.inner(geometry.proxy);
-    frame.render_widget(proxy_block, geometry.proxy);
     render_detail_table(frame, proxy_inner, rows);
 
     let no_proxy_block = section_block("No Proxy", "⊘", SECTION_COLOR_OPTIONS);
@@ -2793,7 +2872,9 @@ fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
     frame.render_widget(no_proxy_block, geometry.no_proxy);
     render_no_proxy(frame, no_proxy_inner, state);
 
-    render_proxy_save(frame, geometry.save, state);
+    render_proxy_info_box(frame, geometry.info);
+    render_proxy_save(frame, geometry.buttons, state);
+    render_hint(frame, geometry.hint, state);
     render_status(frame, geometry.status, state);
 }
 
@@ -2963,12 +3044,13 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
     if area.height == 0 {
         return;
     }
-    let value_x = area.x.saturating_add(LABEL_WIDTH + 1);
-    let value_width = area.width.saturating_sub(LABEL_WIDTH + 1);
+    // Icon-style label like the other card rows, but the value stays
+    // left-aligned: the auto-computed CIDR list is longer than the value
+    // column, and right-aligning it would clip the `auto:` prefix.
     frame.render_widget(
         Paragraph::new(format!(
             "{:<width$}",
-            "no_proxy",
+            "⊘  no_proxy",
             width = LABEL_WIDTH as usize
         )),
         Rect::new(area.x, area.y, LABEL_WIDTH, 1),
@@ -2977,7 +3059,12 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
         Paragraph::new(format!("auto: {}", no_proxy_for_install(&state.host, "")))
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: false }),
-        Rect::new(value_x, area.y, value_width, area.height),
+        Rect::new(
+            area.x.saturating_add(LABEL_WIDTH + 1),
+            area.y,
+            area.width.saturating_sub(LABEL_WIDTH + 1),
+            area.height,
+        ),
     );
 }
 
@@ -3374,6 +3461,12 @@ fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
         Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
         Focus::Connect => "Enter: connect · Tab: next".to_string(),
         Focus::Delete => "Enter: delete · Tab: next".to_string(),
+        Focus::ProxyName | Focus::AllProxy | Focus::HttpsProxy => {
+            "Enter: edit · Ctrl-V: paste · Tab: next".to_string()
+        }
+        Focus::ProxyActive => "Enter: set active · Tab: next".to_string(),
+        Focus::ProxySave => "Enter: save · Tab: next".to_string(),
+        Focus::ProxyDelete => "Enter: delete · Tab: next".to_string(),
         Focus::RelayAddress | Focus::RelayToken => {
             "Enter: edit · Ctrl-V: paste · Tab: next".to_string()
         }
@@ -4896,15 +4989,167 @@ mod tests {
         let output = rendered_text(100, 26, &state);
         let save_row = output
             .lines()
-            .nth(details.save.y as usize)
+            .nth(details.buttons.y as usize)
             .expect("save row should render");
         let save_col = save_row
             .find("Save")
             .map(|index| display_width(&save_row[..index]))
             .expect("Save should render") as u16;
 
-        assert!(save_col > details.save.x + 8);
-        assert!(save_col + 4 < details.save.x + details.save.width);
+        assert!(save_col > details.buttons.x + 8);
+        assert!(save_col + 4 < details.buttons.x + details.buttons.width);
+    }
+
+    #[test]
+    fn proxy_details_geometry_follows_host_page_layout() {
+        let state = ConnectRemoteHostState::load();
+        let popup = PopupGeometry::from_terminal_size((100, 30), &state);
+        let details = ProxyDetailsGeometry::from_area(popup.details);
+
+        assert_eq!(details.header.height, 3);
+        assert_eq!(details.proxy.height, 5);
+        assert_eq!(details.no_proxy.height, 3);
+        assert_eq!(details.info.height, 3);
+        assert_eq!(details.buttons.height, 1);
+        assert_eq!(details.hint.height, 1);
+        assert_eq!(details.hint.y, details.buttons.y + 1);
+        assert!(details.status.y > details.hint.y);
+        assert_eq!(
+            details.rows.action,
+            details.buttons.y.saturating_sub(popup.details.y)
+        );
+    }
+
+    fn proxy_settings_fixture() -> RemoteInstallProxySettings {
+        RemoteInstallProxySettings {
+            active: Some("Office".to_string()),
+            profiles: vec![
+                RemoteInstallProxyProfile {
+                    name: "Home".to_string(),
+                    all_proxy: "socks5://192.168.31.1:7897".to_string(),
+                    https_proxy: "http://192.168.31.1:7897".to_string(),
+                },
+                RemoteInstallProxyProfile {
+                    name: "Office".to_string(),
+                    all_proxy: "socks5://127.0.0.1:7897".to_string(),
+                    https_proxy: "http://127.0.0.1:7897".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn proxy_details_match_host_page_skeleton_for_saved_profile() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.proxy_settings = proxy_settings_fixture();
+        state.selected = state.proxy_profile_selection_start() + 1;
+        state.sync_selected_proxy();
+        state.set_focus(Focus::ProxyName);
+
+        let popup = PopupGeometry::from_terminal_size((100, 30), &state);
+        let details = ProxyDetailsGeometry::from_area(popup.details);
+        let output = rendered_text(100, 30, &state);
+
+        let header_row = output
+            .lines()
+            .nth(details.header.y as usize + 1)
+            .expect("proxy header row renders");
+        assert!(
+            header_row.contains('⛓') && header_row.contains("Office"),
+            "header shows the proxy identity: {header_row}"
+        );
+        assert!(
+            header_row.contains("Saved"),
+            "saved profile badge renders: {header_row}"
+        );
+        assert!(
+            header_row.contains('★'),
+            "active profile shows the yellow star: {header_row}"
+        );
+
+        assert!(output.contains("all_proxy"), "proxy card row renders");
+        assert!(output.contains("https_proxy"), "proxy card row renders");
+        assert!(
+            output.contains("no_proxy"),
+            "no proxy card row renders: {output}"
+        );
+        assert!(
+            output.contains("auto:"),
+            "no proxy auto-computed value renders: {output}"
+        );
+        assert!(
+            output.contains("ⓘ Environment used when the remote host downloads"),
+            "info box renders: {output}"
+        );
+        assert!(output.contains("Active"), "active button renders");
+        assert!(output.contains("Save"), "save button renders");
+        assert!(output.contains("Delete"), "delete button renders");
+
+        let hint_row = output
+            .lines()
+            .nth(details.hint.y as usize)
+            .expect("proxy hint row renders");
+        assert!(
+            hint_row.contains(&bottom_hint_text(&state)),
+            "proxy hint arm renders on the proxy page: {hint_row}"
+        );
+    }
+
+    #[test]
+    fn proxy_details_match_host_page_skeleton_for_new_proxy_draft() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.proxy_settings = proxy_settings_fixture();
+        state.selected = state.new_proxy_selection_index();
+        state.sync_selected_proxy();
+        state.set_focus(Focus::ProxySave);
+
+        let popup = PopupGeometry::from_terminal_size((100, 30), &state);
+        let details = ProxyDetailsGeometry::from_area(popup.details);
+        let output = rendered_text(100, 30, &state);
+
+        let header_row = output
+            .lines()
+            .nth(details.header.y as usize + 1)
+            .expect("proxy header row renders");
+        assert!(
+            header_row.contains("New Proxy"),
+            "draft header shows the New Proxy identity: {header_row}"
+        );
+        assert!(
+            header_row.contains("Draft"),
+            "draft badge renders: {header_row}"
+        );
+        assert!(
+            !header_row.contains('★') && !header_row.contains('☆'),
+            "draft shows no active marker: {header_row}"
+        );
+
+        let hint_row = output
+            .lines()
+            .nth(details.hint.y as usize)
+            .expect("proxy hint row renders");
+        assert!(
+            hint_row.contains("Enter: save · Tab: next"),
+            "proxy hint arm renders on the draft page: {hint_row}"
+        );
+    }
+
+    #[test]
+    fn proxy_page_hint_text_matches_focused_control() {
+        let mut state = ConnectRemoteHostState::load();
+        for (focus, expected) in [
+            (Focus::ProxyName, "Enter: edit · Ctrl-V: paste · Tab: next"),
+            (Focus::AllProxy, "Enter: edit · Ctrl-V: paste · Tab: next"),
+            (Focus::HttpsProxy, "Enter: edit · Ctrl-V: paste · Tab: next"),
+            (Focus::ProxyActive, "Enter: set active · Tab: next"),
+            (Focus::ProxySave, "Enter: save · Tab: next"),
+            (Focus::ProxyDelete, "Enter: delete · Tab: next"),
+        ] {
+            state.set_focus(focus);
+            assert_eq!(bottom_hint_text(&state), expected, "hint for {focus:?}");
+        }
     }
 
     #[test]
