@@ -1,4 +1,9 @@
-use crate::host::ssh::remote_host_history_store::{RemoteHostAuthProfile, RemoteHostProfile};
+use crate::host::ssh::local_artifact_cache::{
+    ArtifactTarget, LocalArtifactCache, UreqArtifactFetcher,
+};
+use crate::host::ssh::remote_host_history_store::{
+    InstallSource, RemoteHostAuthProfile, RemoteHostProfile,
+};
 use crate::host::ssh::remote_host_secret_store::{
     DefaultRemoteHostSecretStore, KeyringRemoteHostSecretStore, RemoteHostSecretId,
     RemoteHostSecretStore, RemoteHostSecretValue,
@@ -142,6 +147,11 @@ pub struct RemoteHostBootstrapPlan {
     pub remote_bin_path: String,
     /// OpenSSH-formatted operator public key to install on the remote host.
     pub operator_public_key: Option<String>,
+    /// Where the install artifact comes from (issue #168). `LocalUpload`
+    /// downloads the release artifact on this machine (reusing the local
+    /// cache) and uploads it to the remote host over the SSH exec channel;
+    /// POSIX targets only — Windows targets error out explicitly.
+    pub install_source: InstallSource,
     /// Detected shell family of the remote host. Every remote command
     /// generator (`install_or_update_command`, `start_plan`, version check,
     /// daemon check, ...) emits a POSIX or PowerShell script based on this
@@ -191,6 +201,7 @@ impl RemoteHostBootstrapPlan {
             deploy_script_path: None,
             remote_bin_path,
             operator_public_key: None,
+            install_source: profile.install_source,
             remote_shell,
         }
     }
@@ -273,6 +284,11 @@ impl std::error::Error for RemoteHostBootstrapError {}
 pub struct SshRemoteHostBootstrapper<S = DefaultRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
     secret_store: S,
     ssh_executor: E,
+    /// Local cache of verified release artifacts for the `LocalUpload`
+    /// install source (issue #168). Production resolves the real
+    /// `~/.waitagent/cache/`; tests inject a temp dir via
+    /// [`Self::with_artifact_cache`].
+    artifact_cache: LocalArtifactCache,
 }
 
 impl Default for SshRemoteHostBootstrapper<DefaultRemoteHostSecretStore, RusshRemoteSshExecutor> {
@@ -280,6 +296,7 @@ impl Default for SshRemoteHostBootstrapper<DefaultRemoteHostSecretStore, RusshRe
         Self {
             secret_store: KeyringRemoteHostSecretStore,
             ssh_executor: RusshRemoteSshExecutor,
+            artifact_cache: LocalArtifactCache::default(),
         }
     }
 }
@@ -291,6 +308,7 @@ impl<S> SshRemoteHostBootstrapper<S, RusshRemoteSshExecutor> {
         Self {
             secret_store,
             ssh_executor: RusshRemoteSshExecutor,
+            artifact_cache: LocalArtifactCache::default(),
         }
     }
 }
@@ -302,7 +320,17 @@ impl<S, E> SshRemoteHostBootstrapper<S, E> {
         Self {
             secret_store,
             ssh_executor,
+            artifact_cache: LocalArtifactCache::default(),
         }
+    }
+
+    /// Scope the local artifact cache to a custom directory. Tests point it
+    /// at a temp dir primed with a fixture artifact so the upload path can
+    /// run without network access; production relies on `Default`, which
+    /// resolves the real `~/.waitagent/cache/`.
+    pub fn with_artifact_cache(mut self, artifact_cache: LocalArtifactCache) -> Self {
+        self.artifact_cache = artifact_cache;
+        self
     }
 }
 
@@ -332,6 +360,10 @@ where
                     plan.start_plan.local_connect_endpoint, error, plan.host
                 ))
             })?;
+        }
+
+        if plan.install_source == InstallSource::LocalUpload {
+            return self.ensure_waitagent_and_start_via_upload(plan);
         }
 
         if plan.deploy_script_path.is_some() {
@@ -425,7 +457,23 @@ where
         remote_command: &str,
         allow_sudo: bool,
     ) -> Result<(), RemoteHostBootstrapError> {
-        let output = self.run_ssh_output(plan, remote_command, allow_sudo)?;
+        self.run_ssh_command_with_stdin(plan, remote_command, None, allow_sudo)
+    }
+
+    /// Like [`Self::run_ssh_command`] but with an explicit stdin payload
+    /// (the upload path streams base64 chunk data this way). A sudo password
+    /// always wins the stdin slot: sudo-wrapped commands are exactly the
+    /// ones that need the password prompt answered, and the upload chunks
+    /// never run sudo-wrapped.
+    fn run_ssh_command_with_stdin(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        remote_command: &str,
+        stdin_payload: Option<&str>,
+        allow_sudo: bool,
+    ) -> Result<(), RemoteHostBootstrapError> {
+        let output =
+            self.run_ssh_output_with_stdin(plan, remote_command, stdin_payload, allow_sudo)?;
         if output.status == 0 {
             Ok(())
         } else {
@@ -443,6 +491,16 @@ where
         remote_command: &str,
         allow_sudo: bool,
     ) -> Result<RemoteSshOutput, RemoteHostBootstrapError> {
+        self.run_ssh_output_with_stdin(plan, remote_command, None, allow_sudo)
+    }
+
+    fn run_ssh_output_with_stdin(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        remote_command: &str,
+        stdin_payload: Option<&str>,
+        allow_sudo: bool,
+    ) -> Result<RemoteSshOutput, RemoteHostBootstrapError> {
         let ssh_password = self.ssh_password(plan)?;
         let sudo_password = if allow_sudo {
             self.sudo_password(plan)?
@@ -455,9 +513,10 @@ where
         } else {
             remote_command.to_string()
         };
-        let stdin = sudo_password
-            .as_ref()
-            .map(|secret| format!("{}\n", secret.expose_secret()));
+        let stdin = match (&sudo_password, stdin_payload) {
+            (Some(secret), _) => Some(format!("{}\n", secret.expose_secret())),
+            (None, payload) => payload.map(str::to_string),
+        };
         self.ssh_executor
             .exec(&target, &remote_command, stdin.as_deref())
             .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))
@@ -467,7 +526,144 @@ where
         &self,
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<(String, u16), RemoteHostBootstrapError> {
-        let output = self.run_ssh_output(plan, &plan.start_plan.credentials_command, false)?;
+        self.generate_credentials_output(plan, &plan.start_plan.credentials_command)
+    }
+
+    /// Upload install source (issue #168): this machine provides the
+    /// artifact and the remote host installs it. The remote needs no
+    /// outbound access — the download happens locally (reusing the
+    /// `~/.waitagent/cache/` artifact when a verified copy exists) and the
+    /// bytes travel over the SSH exec channel as base64 chunks — so the
+    /// install-URL reachability preflight and the remote-install proxy
+    /// wrapping do not apply to this path and are skipped by design.
+    fn ensure_waitagent_and_start_via_upload(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<RemoteHostBootstrapResult, RemoteHostBootstrapError> {
+        if plan.remote_shell == RemoteShellKind::Windows {
+            return Err(RemoteHostBootstrapError::new(
+                "install source Upload is not supported for Windows remote hosts: the local upload path only supports POSIX targets; switch Install Source to Remote for this host",
+            ));
+        }
+        self.run_ssh_command(
+            plan,
+            &ensure_waitagent_home_command(plan.remote_shell),
+            false,
+        )?;
+        // One exec per connect detects the remote target triple and uid
+        // before any artifact selection; the arch is deliberately not
+        // persisted in the profile because reprovisioning can change it.
+        let detection = self.detect_upload_target(plan)?;
+        let install_dir = if detection.uid == 0 || plan.sudo_password_secret_id.is_some() {
+            "/usr/local/bin"
+        } else {
+            // install.sh parity: no root and no sudo password means the
+            // per-user location (the layout the deploy script already uses).
+            "$HOME/.local/bin"
+        };
+        let bin_path = format!("{install_dir}/waitagent");
+        if !self.upload_waitagent_is_current(plan, &bin_path)? {
+            let artifact = self
+                .artifact_cache
+                .ensure_artifact(
+                    detection.target,
+                    env!("CARGO_PKG_VERSION"),
+                    &UreqArtifactFetcher,
+                )
+                .map_err(|error| {
+                    RemoteHostBootstrapError::new(format!(
+                        "failed to prepare the local waitagent artifact for upload: {error}"
+                    ))
+                })?;
+            let data = std::fs::read(&artifact).map_err(|error| {
+                RemoteHostBootstrapError::new(format!(
+                    "failed to read cached artifact {}: {error}",
+                    artifact.display()
+                ))
+            })?;
+            self.upload_artifact(plan, &data)?;
+            // sudo only wraps the decode+install step, and only when the
+            // remote user is not root and a sudo password is configured.
+            let allow_sudo = detection.uid != 0 && plan.sudo_password_secret_id.is_some();
+            self.run_ssh_command(
+                plan,
+                &upload_install_command(plan, detection.target, install_dir, &bin_path),
+                allow_sudo,
+            )?;
+        }
+        // The credentials/start commands reference the explicit install path
+        // instead of relying on the remote PATH (the $HOME fallback dir is
+        // not necessarily on it for non-interactive exec sessions).
+        let credentials_command = upload_credentials_command(plan, &bin_path);
+        let (tls_pin_sha256, remote_port) =
+            self.generate_credentials_output(plan, &credentials_command)?;
+        if let Some(public_key) = &plan.operator_public_key {
+            self.install_operator_public_key(plan, public_key)?;
+        }
+        let start_command = upload_start_command(plan, &bin_path);
+        if !self.remote_waitagent_daemon_is_running(plan)? {
+            self.run_ssh_command(plan, &start_command, false)?;
+        }
+        Ok(RemoteHostBootstrapResult {
+            tls_pin_sha256,
+            remote_port,
+        })
+    }
+
+    /// Runs the single arch/uid detection exec and parses its three lines
+    /// (`uname -s`, `uname -m`, `id -u`). Cached per connect by the caller.
+    fn detect_upload_target(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<UploadTargetDetection, RemoteHostBootstrapError> {
+        let output = self.run_ssh_output(plan, "uname -s && uname -m && id -u", false)?;
+        if output.status != 0 {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "remote arch detection failed with status {}{}",
+                output.status,
+                stderr_summary(&output.stderr)
+            )));
+        }
+        parse_upload_detection(&output.stdout)
+    }
+
+    /// Version gate against the explicit upload install location (the
+    /// generic `command -v waitagent` check cannot see the `$HOME` fallback
+    /// directory on a non-interactive remote PATH).
+    fn upload_waitagent_is_current(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        bin_path: &str,
+    ) -> Result<bool, RemoteHostBootstrapError> {
+        let command = format!(
+            "{} --version 2>/dev/null | grep -q {}",
+            remote_shell_path(std::path::Path::new(bin_path)),
+            shell_single_quote(env!("CARGO_PKG_VERSION"))
+        );
+        Ok(self.run_ssh_output(plan, &command, false)?.status == 0)
+    }
+
+    /// Streams the artifact to a fixed-name remote temp file as base64
+    /// chunks, one SSH exec per chunk (the executor opens exec channels
+    /// only; there is no SFTP dependency). The payload rides the exec's
+    /// stdin — sshd caps exec command lines far below one chunk's size.
+    fn upload_artifact(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        data: &[u8],
+    ) -> Result<(), RemoteHostBootstrapError> {
+        for (command, payload) in upload_chunks(plan.start_plan.remote_port, data) {
+            self.run_ssh_command_with_stdin(plan, &command, Some(&payload), false)?;
+        }
+        Ok(())
+    }
+
+    fn generate_credentials_output(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        credentials_command: &str,
+    ) -> Result<(String, u16), RemoteHostBootstrapError> {
+        let output = self.run_ssh_output(plan, credentials_command, false)?;
         if output.status != 0 {
             return Err(RemoteHostBootstrapError::new(format!(
                 "remote credential generation failed with status {}{}",
@@ -665,6 +861,145 @@ pub fn install_or_update_command_for(remote_shell: RemoteShellKind) -> String {
     match remote_shell {
         RemoteShellKind::Posix => install_or_update_command(),
         RemoteShellKind::Windows => windows_install_or_update_command(None, None),
+    }
+}
+
+/// Binary bytes per base64 upload chunk: 768 KiB encodes to exactly 1 MiB of
+/// base64 text — a comfortable single SSH exec command line, and few enough
+/// execs for a ~10 MB artifact (issue #168).
+const UPLOAD_CHUNK_BYTES: usize = 768 * 1024;
+
+/// Remote arch/uid detection result for one connect (issue #168). Deliberately
+/// not persisted: reprovisioning can change the remote arch under the same
+/// profile name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadTargetDetection {
+    target: ArtifactTarget,
+    uid: u32,
+}
+
+/// Parses the three-line output of `uname -s && uname -m && id -u` into a
+/// target triple and uid. An unsupported pair produces a typed error naming
+/// what was detected and what the upload path supports.
+fn parse_upload_detection(
+    stdout: &[u8],
+) -> Result<UploadTargetDetection, RemoteHostBootstrapError> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut lines = text.lines();
+    let system = lines.next().unwrap_or_default().trim();
+    let machine = lines.next().unwrap_or_default().trim();
+    let uid_line = lines.next().unwrap_or_default().trim();
+    let uid = uid_line.parse::<u32>().map_err(|_| {
+        RemoteHostBootstrapError::new(format!(
+            "remote arch detection returned an unparsable uid `{uid_line}`; stdout: {text}"
+        ))
+    })?;
+    let target = ArtifactTarget::from_uname(system, machine)
+        .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))?;
+    Ok(UploadTargetDetection { target, uid })
+}
+
+fn upload_b64_path(remote_port: u16) -> String {
+    format!("/tmp/.waitagent-upload-{remote_port}.b64")
+}
+
+fn upload_tarball_path(remote_port: u16) -> String {
+    format!("/tmp/.waitagent-upload-{remote_port}.tar.gz")
+}
+
+/// One base64 append exec per chunk: the command is a tiny `cat > tmp` /
+/// `cat >> tmp`, and the base64 payload travels as the exec's stdin —
+/// channel data is packetized to the negotiated size, while a megabyte-long
+/// command line exceeds sshd's exec-request limit (`Bad packet length`).
+/// The first chunk's `>` truncates any stale temp file from a failed
+/// attempt. Kept side-effect free so the chunking and command construction
+/// are unit-testable without SSH.
+fn upload_chunks(remote_port: u16, data: &[u8]) -> Vec<(String, String)> {
+    let b64_path = upload_b64_path(remote_port);
+    data.chunks(UPLOAD_CHUNK_BYTES)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let redirect = if index == 0 { ">" } else { ">>" };
+            let command = format!("cat {redirect} {}", shell_single_quote(&b64_path));
+            let payload = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk);
+            (command, payload)
+        })
+        .collect()
+}
+
+/// One-shot decode + install pipeline, run after the last chunk lands. Keeps
+/// install.sh parity: unpack the release tarball, atomic chmod-755 install
+/// into the install dir, `setcap cap_net_admin+ep` on Linux where available
+/// (never fatal, matching install.sh), then verify the installed binary
+/// reports the expected version before the exec reports success. Temp files
+/// are removed regardless of the outcome.
+fn upload_install_command(
+    plan: &RemoteHostBootstrapPlan,
+    target: ArtifactTarget,
+    install_dir: &str,
+    bin_path: &str,
+) -> String {
+    let remote_port = plan.start_plan.remote_port;
+    let b64_path = upload_b64_path(remote_port);
+    let tarball_path = upload_tarball_path(remote_port);
+    let bin = remote_shell_path(std::path::Path::new(bin_path));
+    let version = shell_single_quote(env!("CARGO_PKG_VERSION"));
+    let setcap = if target == ArtifactTarget::LinuxX86_64 {
+        format!(
+            "(command -v setcap >/dev/null 2>&1 && setcap cap_net_admin+ep {bin} 2>/dev/null || true) && "
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "tmpd=\"$(mktemp -d)\" && {{ base64 -d {b64_path} > {tarball_path} \
+&& tar xzf {tarball_path} -C \"$tmpd\" \
+&& test -f \"$tmpd/waitagent\" \
+&& mkdir -p \"{install_dir}\" \
+&& cp \"$tmpd/waitagent\" \"{install_dir}/.waitagent.tmp\" \
+&& chmod 755 \"{install_dir}/.waitagent.tmp\" \
+&& mv -f \"{install_dir}/.waitagent.tmp\" {bin} \
+&& {setcap}rm -rf \"$tmpd\" {b64_path} {tarball_path} \
+&& {bin} --version 2>/dev/null | grep -q {version}; }}; \
+rc=$?; rm -rf \"$tmpd\" >/dev/null 2>&1; exit $rc"
+    )
+}
+
+/// Credentials command for the upload path: identical to the POSIX flow but
+/// referencing the explicit install location (`$HOME` paths stay
+/// double-quoted so the remote shell expands them).
+fn upload_credentials_command(plan: &RemoteHostBootstrapPlan, bin_path: &str) -> String {
+    format!(
+        "{} --port {} --node-key-path {} --node-cert-path {} __generate-node-credentials",
+        remote_shell_path(std::path::Path::new(bin_path)),
+        shell_single_quote(&plan.start_plan.remote_port.to_string()),
+        remote_shell_path(&plan.start_plan.credential_paths.key_path),
+        remote_shell_path(&plan.start_plan.credential_paths.cert_path),
+    )
+}
+
+/// Start command for the upload path: the POSIX nohup form with the explicit
+/// install location instead of the bare `waitagent` PATH lookup.
+fn upload_start_command(plan: &RemoteHostBootstrapPlan, bin_path: &str) -> String {
+    let bin = remote_shell_path(std::path::Path::new(bin_path));
+    let remote_port = plan.start_plan.remote_port;
+    if plan.start_plan.outbound_dial {
+        format!(
+            "nohup {bin} --port {remote_port} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null & {}",
+            shell_single_quote(&plan.start_plan.authority_id),
+            remote_shell_path(&plan.start_plan.credential_paths.key_path),
+            remote_shell_path(&plan.start_plan.credential_paths.cert_path),
+            wait_for_port_ready_shell(remote_port),
+        )
+    } else {
+        format!(
+            "nohup {bin} --port {remote_port} --connect {} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null & {}",
+            shell_single_quote(&plan.start_plan.local_connect_endpoint),
+            shell_single_quote(&plan.start_plan.authority_id),
+            remote_shell_path(&plan.start_plan.credential_paths.key_path),
+            remote_shell_path(&plan.start_plan.credential_paths.cert_path),
+            wait_for_port_ready_shell(remote_port),
+        )
     }
 }
 
@@ -1229,6 +1564,10 @@ mod tests {
         calls: Rc<RefCell<SshCallLog>>,
         statuses: Rc<RefCell<Vec<u32>>>,
         credentials_stdout: Rc<RefCell<Option<String>>>,
+        /// First matching substring wins and is consumed; canned stdout for
+        /// commands that are not the credentials generator (e.g. the
+        /// upload path's `uname` detection exec).
+        stdout_by_substring: Rc<RefCell<Vec<(String, String)>>>,
     }
 
     impl RecordingSshExecutor {
@@ -1269,7 +1608,13 @@ mod tests {
                     .unwrap_or_default()
                     .into_bytes()
             } else {
-                Vec::new()
+                let mut canned = self.stdout_by_substring.borrow_mut();
+                let index = canned
+                    .iter()
+                    .position(|(needle, _)| plain_command.contains(needle));
+                index
+                    .map(|index| canned.remove(index).1.into_bytes())
+                    .unwrap_or_default()
             };
             Ok(RemoteSshOutput {
                 status,
@@ -1388,6 +1733,7 @@ mod tests {
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -1476,6 +1822,7 @@ mod tests {
                 calls: calls.clone(),
                 statuses: Rc::new(RefCell::new(vec![1])),
                 credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -1669,6 +2016,7 @@ mod tests {
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -1744,6 +2092,7 @@ mod tests {
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -1809,6 +2158,7 @@ mod tests {
                 calls: calls.clone(),
                 statuses: Rc::new(RefCell::new(vec![1])),
                 credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -1873,6 +2223,7 @@ mod tests {
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -1941,6 +2292,7 @@ mod tests {
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -2015,6 +2367,7 @@ mod tests {
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
             },
         );
 
@@ -2086,5 +2439,350 @@ mod tests {
         assert!(plan.start_plan.command.contains("__ratatui-node-server"));
         assert!(!plan.start_plan.command.contains("--connect"));
         assert!(plan.start_plan.command.contains("--node-id"));
+    }
+
+    fn upload_plan() -> RemoteHostBootstrapPlan {
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("/home/kk/.ssh/id_ed25519"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            ssh_port: None,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            tls_pin_sha256: None,
+            install_source: InstallSource::LocalUpload,
+            ..RemoteHostProfile::default()
+        };
+        let mut plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+            RemoteShellKind::Posix,
+        );
+        plan.install_source = InstallSource::LocalUpload;
+        plan
+    }
+
+    /// Builds a valid release-layout artifact (tar.gz with a top-level
+    /// `waitagent` entry) and primes the cache directory the way a real
+    /// first download would, including the sha256 sidecar.
+    fn prime_artifact_cache() -> LocalArtifactCache {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        let body = b"#!/bin/sh\necho waitagent 0.1.90\n";
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "waitagent", &body[..])
+            .expect("append waitagent entry");
+        let encoder = builder.into_inner().expect("finish tar archive");
+        let artifact = encoder.finish().expect("finish gzip stream");
+        let dir = std::path::PathBuf::from(format!(
+            "{}/waitagent-upload-cache-{}-{}",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_name = ArtifactTarget::LinuxX86_64.file_name(env!("CARGO_PKG_VERSION"));
+        std::fs::write(dir.join(&file_name), &artifact).unwrap();
+        let digest = {
+            use sha2::Digest;
+            sha2::Sha256::digest(&artifact)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        std::fs::write(
+            dir.join(format!("{file_name}.sha256")),
+            format!("{digest}  {file_name}\n"),
+        )
+        .unwrap();
+        LocalArtifactCache::new(dir)
+    }
+
+    #[test]
+    fn parse_upload_detection_maps_uname_and_uid() {
+        let detection = parse_upload_detection(b"Linux\nx86_64\n0\n").unwrap();
+        assert_eq!(detection.target, ArtifactTarget::LinuxX86_64);
+        assert_eq!(detection.uid, 0);
+
+        let detection = parse_upload_detection(b"Darwin\narm64\n501\n").unwrap();
+        assert_eq!(detection.target, ArtifactTarget::MacosAArch64);
+        assert_eq!(detection.uid, 501);
+    }
+
+    #[test]
+    fn parse_upload_detection_rejects_garbage_and_unsupported_targets() {
+        let error = parse_upload_detection(b"Linux\nx86_64\nnot-a-uid\n").unwrap_err();
+        assert!(error.to_string().contains("unparsable uid"));
+
+        let error = parse_upload_detection(b"Linux\nriscv64\n0\n").unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported remote target"),
+            "the error names the unsupported pair: {error}"
+        );
+
+        let error = parse_upload_detection(b"Linux\n").unwrap_err();
+        assert!(error.to_string().contains("unparsable uid"));
+    }
+
+    #[test]
+    fn upload_chunks_split_and_append_via_stdin() {
+        let data = vec![7_u8; UPLOAD_CHUNK_BYTES * 2 + 1];
+        let chunks = upload_chunks(7476, &data);
+        assert_eq!(chunks.len(), 3);
+        let b64_path = shell_single_quote(&upload_b64_path(7476));
+        assert_eq!(chunks[0].0, format!("cat > {b64_path}"));
+        assert_eq!(chunks[1].0, format!("cat >> {b64_path}"));
+        assert_eq!(chunks[2].0, format!("cat >> {b64_path}"));
+        // The command line stays tiny; the payload rides the exec's stdin —
+        // sshd rejects command lines close to one chunk's base64 size.
+        assert!(chunks[0].0.len() < 64);
+        // Every stdin payload decodes back to its source chunk.
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut decoded = Vec::new();
+        for (_, payload) in &chunks {
+            decoded.extend_from_slice(
+                &base64::Engine::decode(&engine, payload).expect("valid base64 payload"),
+            );
+        }
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn upload_install_command_keeps_install_sh_steps() {
+        let plan = upload_plan();
+        let command = upload_install_command(
+            &plan,
+            ArtifactTarget::LinuxX86_64,
+            "/usr/local/bin",
+            "/usr/local/bin/waitagent",
+        );
+        assert!(command.contains("base64 -d /tmp/.waitagent-upload-7476.b64"));
+        assert!(command.contains("tar xzf /tmp/.waitagent-upload-7476.tar.gz"));
+        assert!(command.contains("test -f \"$tmpd/waitagent\""));
+        assert!(command.contains("mkdir -p \"/usr/local/bin\""));
+        assert!(command.contains("chmod 755"));
+        assert!(
+            command.contains("mv -f \"/usr/local/bin/.waitagent.tmp\" '/usr/local/bin/waitagent'")
+        );
+        assert!(command.contains("setcap cap_net_admin+ep"));
+        assert!(command.contains("rm -rf \"$tmpd\""));
+        assert!(command.contains("'/usr/local/bin/waitagent' --version 2>/dev/null | grep -q"));
+        assert!(command.contains(env!("CARGO_PKG_VERSION")));
+
+        let macos = upload_install_command(
+            &plan,
+            ArtifactTarget::MacosAArch64,
+            "/usr/local/bin",
+            "/usr/local/bin/waitagent",
+        );
+        assert!(
+            !macos.contains("setcap"),
+            "macOS assets skip the Linux capability step"
+        );
+    }
+
+    #[test]
+    fn upload_commands_quote_home_fallback_for_remote_expansion() {
+        let plan = upload_plan();
+        let credentials = upload_credentials_command(&plan, "$HOME/.local/bin/waitagent");
+        assert!(
+            credentials.starts_with("\"$HOME/.local/bin/waitagent\" --port"),
+            "$HOME paths must stay double-quoted for remote expansion: {credentials}"
+        );
+        let start = upload_start_command(&plan, "$HOME/.local/bin/waitagent");
+        assert!(start.contains("nohup \"$HOME/.local/bin/waitagent\" --port 7476"));
+        assert!(start.contains(">/tmp/waitagent-7476.log"));
+        assert!(start.contains("__ratatui-node-server"));
+        let system = upload_install_command(
+            &plan,
+            ArtifactTarget::LinuxX86_64,
+            "$HOME/.local/bin",
+            "$HOME/.local/bin/waitagent",
+        );
+        assert!(system.contains("mkdir -p \"$HOME/.local/bin\""));
+        assert!(system
+            .contains("mv -f \"$HOME/.local/bin/.waitagent.tmp\" \"$HOME/.local/bin/waitagent\""));
+    }
+
+    #[test]
+    fn upload_start_command_supports_inbound_connect_mode() {
+        let mut plan = upload_plan();
+        plan.start_plan = RemoteWaitAgentStartPlan::new_with_mode(
+            plan.start_plan.remote_port,
+            plan.start_plan.local_connect_endpoint.clone(),
+            plan.start_plan.authority_id.clone(),
+            false,
+            RemoteShellKind::Posix,
+        );
+        let start = upload_start_command(&plan, "/usr/local/bin/waitagent");
+        assert!(start.contains("--connect '10.1.26.84:7474'"));
+        assert!(start.contains("--node-id '10.1.29.130#7476'"));
+    }
+
+    #[test]
+    fn upload_flow_installs_from_primed_cache() {
+        let cache = prime_artifact_cache();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // Statuses pop from the end: mkdir, uname, version check (not
+        // current), one chunk, install, credentials, daemon check (not
+        // running), start.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                // Statuses pop from the end: start, daemon check (not
+                // running), credentials, install, one chunk, version check
+                // (not current), uname, mkdir.
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 1, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(vec![(
+                    "uname -s".to_string(),
+                    "Linux\nx86_64\n0\n".to_string(),
+                )])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper
+            .ensure_waitagent_and_start(&upload_plan())
+            .unwrap();
+
+        assert_eq!(result.tls_pin_sha256, "deadbeef");
+        assert_eq!(result.remote_port, 7476);
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.len(),
+            8,
+            "mkdir, uname, version, chunk, install, credentials, daemon, start: {calls:?}"
+        );
+        assert!(calls[0].1.contains("mkdir -p"));
+        assert_eq!(calls[1].1, "uname -s && uname -m && id -u");
+        assert_eq!(calls[1].2, None);
+        assert!(
+            calls[2].1.contains("'/usr/local/bin/waitagent' --version"),
+            "version gate checks the explicit upload install path: {}",
+            calls[2].1
+        );
+        assert!(
+            calls[3].1.starts_with("cat > ") && calls[3].1.contains("waitagent-upload-7476.b64"),
+            "first chunk truncates the upload temp file: {}",
+            calls[3].1
+        );
+        let chunk_payload = calls[3]
+            .2
+            .as_deref()
+            .expect("chunk payload travels on stdin");
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, chunk_payload)
+            .expect("valid base64 chunk");
+        assert!(calls[4].1.contains("base64 -d"));
+        assert!(calls[4].1.contains("setcap cap_net_admin+ep"));
+        assert!(calls[5].1.contains("__generate-node-credentials"));
+        assert!(
+            calls[5].1.starts_with("'/usr/local/bin/waitagent' --port"),
+            "credentials command uses the explicit install path: {}",
+            calls[5].1
+        );
+        assert!(calls[6].1.contains("ps -eo args="));
+        assert!(
+            calls[7]
+                .1
+                .contains("nohup '/usr/local/bin/waitagent' --port 7476"),
+            "start command uses the explicit install path: {}",
+            calls[7].1
+        );
+        assert!(
+            !calls.iter().any(|(_, command, _)| command.contains("sudo")),
+            "root upload installs never invoke sudo"
+        );
+    }
+
+    #[test]
+    fn upload_flow_skips_install_when_remote_is_current() {
+        let cache = prime_artifact_cache();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 0, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(vec![(
+                    "uname -s".to_string(),
+                    "Linux\nx86_64\n0\n".to_string(),
+                )])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        bootstrapper
+            .ensure_waitagent_and_start(&upload_plan())
+            .unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.len(),
+            5,
+            "mkdir, uname, version, credentials, daemon: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|(_, command, _)| {
+                command.contains("base64 -d")
+                    || command.starts_with("cat > ")
+                    || command.starts_with("cat >> ")
+            }),
+            "a current remote must not upload anything"
+        );
+    }
+
+    #[test]
+    fn upload_flow_rejects_windows_without_any_exec() {
+        let mut plan = upload_plan();
+        plan.remote_shell = RemoteShellKind::Windows;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(Vec::new())),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        );
+
+        let error = bootstrapper.ensure_waitagent_and_start(&plan).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("not supported for Windows remote hosts"),
+            "typed, actionable error: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("switch Install Source to Remote"),
+            "the error tells the user how to fix it: {error}"
+        );
+        assert_eq!(calls.borrow().len(), 0, "no SSH exec may run");
     }
 }

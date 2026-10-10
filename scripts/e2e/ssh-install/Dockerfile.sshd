@@ -1,0 +1,24 @@
+# SSH target image for the install-source e2e (issue #168).
+#
+# A minimal sshd host: the scenario uploads waitagent to it over the SSH
+# exec channel, so the image deliberately does NOT contain a waitagent
+# binary — the whole point is that the control host provides it. Tools the
+# bootstrap pipeline needs: tar/base64/coreutils (ubuntu base), ps (procps,
+# daemon check), ss (iproute2, remote port probe). The runtime network is
+# docker-internal, so this host cannot download anything: any code path
+# that tried a remote download would fail by construction.
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        openssh-server \
+        procps \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY sshd_config /etc/ssh/sshd_config
+COPY entrypoint.sh /usr/local/bin/e2e-sshd-entrypoint
+RUN chmod 755 /usr/local/bin/e2e-sshd-entrypoint
+
+# The orchestrator bind-mounts the authorized_keys file here.
+ENTRYPOINT ["e2e-sshd-entrypoint"]

@@ -52,6 +52,65 @@ impl std::str::FromStr for RemoteHostKind {
     }
 }
 
+/// Where the waitagent artifact comes from when a remote host needs an
+/// install or upgrade (issue #168).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstallSource {
+    /// The remote host downloads the release artifact itself through
+    /// `scripts/install.sh` (or the Windows zip installer) — the historical
+    /// behavior, and the only source Windows targets support.
+    #[default]
+    RemoteDownload,
+    /// This machine downloads the release artifact (reusing the local cache
+    /// under `~/.waitagent/cache/` when a verified copy exists) and uploads
+    /// it to the remote host over the SSH exec channel for install. POSIX
+    /// targets only.
+    LocalUpload,
+}
+
+impl InstallSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteDownload => "remote",
+            Self::LocalUpload => "upload",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RemoteDownload => "Remote",
+            Self::LocalUpload => "Upload",
+        }
+    }
+
+    pub fn shift(self, step: i32) -> Self {
+        let values = [Self::RemoteDownload, Self::LocalUpload];
+        let index = values.iter().position(|value| *value == self).unwrap_or(0) as i32;
+        let len = values.len() as i32;
+        values[((index + step).rem_euclid(len)) as usize]
+    }
+}
+
+impl std::str::FromStr for InstallSource {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "remote" => Ok(Self::RemoteDownload),
+            "upload" => Ok(Self::LocalUpload),
+            other => Err(format!(
+                "unknown install source `{other}` (expected \"remote\" or \"upload\")"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for InstallSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoteHostProfile {
     pub name: String,
@@ -89,6 +148,10 @@ pub struct RemoteHostProfile {
     /// effective path without rewriting the user's choice (issue #156
     /// slice 2). Validated at load.
     pub last_via_used: Option<String>,
+    /// Where the waitagent artifact comes from when this host needs an
+    /// install or upgrade. Absent in profiles written before issue #168 and
+    /// loads as `RemoteDownload`, the historical remote-download behavior.
+    pub install_source: InstallSource,
 }
 
 impl RemoteHostProfile {
@@ -307,6 +370,10 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         if let Some(last_via_used) = &host.last_via_used {
             push_string(&mut out, "last_via_used", last_via_used);
         }
+        out.push_str(&format!(
+            "install_source = \"{}\"\n",
+            host.install_source.as_str()
+        ));
         out.push('\n');
     }
     out
@@ -382,6 +449,7 @@ struct RawProfile {
     remote_shell: Option<String>,
     via: Option<String>,
     last_via_used: Option<String>,
+    install_source: Option<String>,
 }
 
 impl RawProfile {
@@ -405,6 +473,7 @@ impl RawProfile {
             "remote_shell" => self.remote_shell = Some(value),
             "via" => self.via = Some(value),
             "last_via_used" => self.last_via_used = Some(value),
+            "install_source" => self.install_source = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -449,6 +518,7 @@ impl RawProfile {
             remote_shell: parse_remote_shell(self.remote_shell)?,
             via: parse_via(self.via)?,
             last_via_used: parse_last_via_used(self.last_via_used)?,
+            install_source: parse_install_source(self.install_source)?,
         })
     }
 }
@@ -550,6 +620,21 @@ fn parse_remote_shell(
     value
         .parse::<RemoteShellKind>()
         .map(Some)
+        .map_err(RemoteHostHistoryStoreError::new)
+}
+
+/// Loads the install-source choice. Profiles written before issue #168 have
+/// no `install_source` key and upgrade to `RemoteDownload`, the behavior
+/// they were created under; the guiding error names both legal values so a
+/// hand-edited file is fixable from the message alone.
+fn parse_install_source(
+    value: Option<String>,
+) -> Result<InstallSource, RemoteHostHistoryStoreError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(InstallSource::RemoteDownload);
+    };
+    value
+        .parse::<InstallSource>()
         .map_err(RemoteHostHistoryStoreError::new)
 }
 
@@ -775,6 +860,7 @@ mod tests {
                 remote_shell: None,
                 via: None,
                 last_via_used: None,
+                install_source: InstallSource::RemoteDownload,
             })
             .unwrap();
         store
@@ -797,6 +883,7 @@ mod tests {
                 remote_shell: None,
                 via: None,
                 last_via_used: None,
+                install_source: InstallSource::RemoteDownload,
             })
             .unwrap();
 
@@ -838,6 +925,7 @@ mod tests {
                 remote_shell: None,
                 via: None,
                 last_via_used: None,
+                install_source: InstallSource::RemoteDownload,
             })
             .unwrap();
 
@@ -1077,6 +1165,91 @@ last_via_used = "auto"
         RemoteHostHistoryStore::new(&path)
             .load()
             .expect_err("last_via_used must name a concrete path, never auto");
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_install_source() {
+        let path = unique_path("remote-hosts-install-source.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        let mut uploaded = profile("uploaded", "10.1.29.150");
+        uploaded.install_source = InstallSource::LocalUpload;
+        store.upsert_profile(uploaded).unwrap();
+        store
+            .upsert_profile(profile("remote", "10.1.29.151"))
+            .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("install_source = \"upload\""));
+        assert!(content.contains("install_source = \"remote\""));
+
+        let loaded = store.load().unwrap();
+        let uploaded = loaded.hosts.iter().find(|h| h.name == "uploaded").unwrap();
+        let remote = loaded.hosts.iter().find(|h| h.name == "remote").unwrap();
+        assert_eq!(uploaded.install_source, InstallSource::LocalUpload);
+        assert_eq!(remote.install_source, InstallSource::RemoteDownload);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_without_install_source_field_loads_as_remote_download() {
+        let path = unique_path("remote-hosts-legacy-no-install-source.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "legacy"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+"#,
+        )
+        .unwrap();
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+
+        assert_eq!(loaded.hosts.len(), 1);
+        assert_eq!(loaded.hosts[0].name, "legacy");
+        assert_eq!(
+            loaded.hosts[0].install_source,
+            InstallSource::RemoteDownload,
+            "profiles written before issue #168 keep the remote-download behavior"
+        );
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_rejects_an_unknown_install_source_value() {
+        let path = unique_path("remote-hosts-bad-install-source.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "typo"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+install_source = "push"
+"#,
+        )
+        .unwrap();
+
+        let error = RemoteHostHistoryStore::new(&path)
+            .load()
+            .expect_err("an unknown install source must fail the load");
+        let message = error.to_string();
+        assert!(
+            message.contains("\"remote\"") && message.contains("\"upload\""),
+            "the error names all legal values: {message}"
+        );
 
         crate::infra::best_effort::remove_file(path);
     }

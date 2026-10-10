@@ -896,6 +896,10 @@ fn profile_from_direct_args(
         tls_pin_sha256: None,
         host_kind: host_kind.unwrap_or_default(),
         remote_shell: None,
+        // CLI-driven ad-hoc connects download from the remote host (the
+        // historical behavior); the install-source choice lives on saved
+        // profiles (issue #168).
+        install_source: crate::host::ssh::remote_host_history_store::InstallSource::RemoteDownload,
         // CLI-driven ad-hoc connects stay direct (no relay fallback); the
         // profile file is where the `via` choice lives. Explicit here so
         // the file-level absent-means-auto default cannot change CLI
@@ -2066,6 +2070,60 @@ mod tests {
             "10.1.29.130#7476"
         );
         assert_eq!(outcome.created_target.address.session_id(), "seed");
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_carries_install_source_to_the_bootstrap_plan() {
+        // The node reads the profile by name, so a persisted install_source
+        // choice flows into the bootstrap plan without any wire-protocol
+        // change (issue #168).
+        let path = unique_path("remote-host-connect-install-source.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let mut stored = profile();
+        stored.install_source =
+            crate::host::ssh::remote_host_history_store::InstallSource::LocalUpload;
+        history.upsert_profile(stored).unwrap();
+        let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store());
+
+        runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap();
+
+        let plans = bootstrap_plans.lock().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].install_source,
+            crate::host::ssh::remote_host_history_store::InstallSource::LocalUpload
+        );
         crate::infra::best_effort::remove_file(path);
     }
 

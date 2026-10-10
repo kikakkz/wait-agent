@@ -2,8 +2,8 @@
 
 use crate::cli::{prepend_global_network_args, ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::host::ssh::remote_host_history_store::{
-    RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostKind, RemoteHostProfile,
-    RemotePortPreference,
+    InstallSource, RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostKind,
+    RemoteHostProfile, RemotePortPreference,
 };
 use crate::host::ssh::remote_host_secret_store::{
     KeyringRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
@@ -411,6 +411,10 @@ struct ConnectRemoteHostState {
     show_sudo_password: bool,
     remember: bool,
     use_install_proxy: bool,
+    /// Where the waitagent artifact comes from on install/upgrade: the
+    /// remote host downloads it (Remote) or this machine downloads and
+    /// uploads it (Upload) (issue #168).
+    install_source: InstallSource,
     proxy_settings: RemoteInstallProxySettings,
     proxy_draft: RemoteInstallProxyProfile,
     proxy_all_proxy_autofilled: bool,
@@ -463,6 +467,7 @@ impl ConnectRemoteHostState {
             show_sudo_password: false,
             remember: true,
             use_install_proxy: true,
+            install_source: InstallSource::RemoteDownload,
             proxy_settings: load_proxy_settings(),
             proxy_draft: RemoteInstallProxyProfile {
                 name: String::new(),
@@ -508,6 +513,7 @@ impl ConnectRemoteHostState {
             self.show_sudo_password = false;
             self.remember = true;
             self.use_install_proxy = true;
+            self.install_source = InstallSource::RemoteDownload;
             self.status = default_hint_status();
             return None;
         }
@@ -563,6 +569,7 @@ impl ConnectRemoteHostState {
         self.show_sudo_password = false;
         self.remember = true;
         self.use_install_proxy = profile.use_install_proxy;
+        self.install_source = profile.install_source;
         if request.has_work() {
             self.status = Status::Loading("Loading saved credentials...".to_string());
             self.secret_load = SecretLoadState::Loading {
@@ -716,7 +723,10 @@ impl ConnectRemoteHostState {
                     self.use_install_proxy = !self.use_install_proxy;
                 } else if self.focus == Focus::Password || self.focus == Focus::Sudo {
                     self.toggle_password_visibility();
-                } else if self.focus == Focus::HostKind || self.focus == Focus::Via {
+                } else if self.focus == Focus::HostKind
+                    || self.focus == Focus::Via
+                    || self.focus == Focus::InstallSource
+                {
                     self.adjust_choice(1);
                 }
                 PaneAction::None
@@ -1149,6 +1159,10 @@ impl ConnectRemoteHostState {
                 self.delete_confirm = DeleteConfirmState::Idle;
                 self.use_install_proxy = !self.use_install_proxy;
             }
+            row if row == details.rows.install_source => {
+                self.set_focus(Focus::InstallSource);
+                self.install_source = self.install_source.shift(1);
+            }
             _ if point_in_rect(x, y, details.buttons) => {
                 if let Some(focus) = button_action_from_x(x, details.buttons, self) {
                     self.set_focus(focus);
@@ -1181,7 +1195,7 @@ impl ConnectRemoteHostState {
         } else {
             let next = match self.focus {
                 Focus::ProxySave | Focus::ProxyDelete => Focus::HttpsProxy,
-                Focus::Delete => Focus::InstallProxy,
+                Focus::Delete => Focus::InstallSource,
                 _ => {
                     let candidate = self.prev_focus();
                     if candidate == Focus::Hosts {
@@ -1327,6 +1341,10 @@ impl ConnectRemoteHostState {
                 self.use_install_proxy = !self.use_install_proxy;
                 PaneAction::None
             }
+            Focus::InstallSource => {
+                self.adjust_choice(1);
+                PaneAction::None
+            }
             Focus::Delete => self.delete_action(),
             Focus::Connect => self.connect_action(),
             Focus::ProxyActive => PaneAction::ActivateProxyConfig,
@@ -1410,6 +1428,10 @@ impl ConnectRemoteHostState {
             Focus::Via => {
                 self.via = self.via.shift(step);
                 self.set_focus(Focus::Via);
+            }
+            Focus::InstallSource => {
+                self.install_source = self.install_source.shift(step);
+                self.set_focus(Focus::InstallSource);
             }
             Focus::Auth => {
                 if self.host_kind == RemoteHostKind::Cloud {
@@ -1870,6 +1892,7 @@ enum Focus {
     Sudo,
     Remember,
     InstallProxy,
+    InstallSource,
     Delete,
     Connect,
     ProxyName,
@@ -1887,7 +1910,10 @@ enum Focus {
 
 impl Focus {
     fn uses_horizontal_choice(self) -> bool {
-        matches!(self, Self::HostKind | Self::Via | Self::Auth)
+        matches!(
+            self,
+            Self::HostKind | Self::Via | Self::Auth | Self::InstallSource
+        )
     }
 
     fn edit_field(self, auth: AuthChoice) -> Option<EditField> {
@@ -1955,6 +1981,7 @@ impl Focus {
             Self::Sudo,
             Self::Remember,
             Self::InstallProxy,
+            Self::InstallSource,
         ];
         ordered.push(Self::Connect);
         if has_saved_selection {
@@ -2214,6 +2241,7 @@ struct DetailsRows {
     sudo: u16,
     remember: u16,
     install_proxy: u16,
+    install_source: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2362,9 +2390,10 @@ impl PopupGeometry {
         // instead of stretching to the full terminal height. The height is
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
-        // terminals to keep a visible margin; 28 rows fit the framed
-        // sidebar and detail sections including the Via choice row.
-        const POPUP_HEIGHT: u16 = 28;
+        // terminals to keep a visible margin; 29 rows fit the framed
+        // sidebar and detail sections including the Via and Install Source
+        // choice rows (issue #168).
+        const POPUP_HEIGHT: u16 = 29;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -2531,7 +2560,7 @@ impl DetailsGeometry {
                 Constraint::Length(3), // framed header bar
                 Constraint::Length(8), // Connection card (Host/Port/Last Port/User/Host Kind/Via)
                 Constraint::Length(5), // Authentication card
-                Constraint::Length(4), // Options card
+                Constraint::Length(5), // Options card (Remember/Use proxy/Install Source)
                 Constraint::Length(3), // info box card
                 Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
@@ -2549,6 +2578,7 @@ impl DetailsGeometry {
             sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
             remember: sections[3].y.saturating_add(1).saturating_sub(area.y),
             install_proxy: sections[3].y.saturating_add(2).saturating_sub(area.y),
+            install_source: sections[3].y.saturating_add(3).saturating_sub(area.y),
         };
         Self {
             header: sections[0],
@@ -3681,6 +3711,12 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         row_width,
         1,
     );
+    let source_area = Rect::new(
+        inner.x.saturating_add(SECTION_CONTENT_INDENT),
+        inner.y.saturating_add(2),
+        row_width,
+        1,
+    );
     render_checkbox_row(
         frame,
         remember_area,
@@ -3697,6 +3733,22 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         state,
         Focus::InstallProxy,
     );
+    let focused = state.focus == Focus::InstallSource;
+    let label_style = if focused {
+        active_focus_style()
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![Span::styled(
+        format!(
+            "{:<width$}",
+            "⇩  Install Source",
+            width = LABEL_WIDTH as usize
+        ),
+        label_style,
+    )];
+    spans.extend(choice_spans(install_source_tabs(state), focused));
+    frame.render_widget(Paragraph::new(Line::from(spans)), source_area);
 }
 
 fn render_checkbox_row(
@@ -3850,7 +3902,7 @@ fn render_hint(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState
 fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
     match state.focus {
         Focus::Password | Focus::Sudo => "Enter: edit · Space: show/hide · Tab: next".to_string(),
-        Focus::HostKind | Focus::Via | Focus::Auth => {
+        Focus::HostKind | Focus::Via | Focus::Auth | Focus::InstallSource => {
             "←/→: switch · Space: toggle · Tab: next".to_string()
         }
         Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
@@ -4084,7 +4136,20 @@ fn via_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
     ]
 }
 
-fn choice_line(segments: Vec<ChoiceSegment>, focused: bool) -> Line<'static> {
+fn install_source_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
+    vec![
+        ChoiceSegment {
+            label: InstallSource::RemoteDownload.label(),
+            selected: state.install_source == InstallSource::RemoteDownload,
+        },
+        ChoiceSegment {
+            label: InstallSource::LocalUpload.label(),
+            selected: state.install_source == InstallSource::LocalUpload,
+        },
+    ]
+}
+
+fn choice_spans(segments: Vec<ChoiceSegment>, focused: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (index, segment) in segments.into_iter().enumerate() {
         if index > 0 {
@@ -4099,7 +4164,11 @@ fn choice_line(segments: Vec<ChoiceSegment>, focused: bool) -> Line<'static> {
         };
         spans.push(Span::styled(segment.label, style));
     }
-    Line::from(spans)
+    spans
+}
+
+fn choice_line(segments: Vec<ChoiceSegment>, focused: bool) -> Line<'static> {
+    Line::from(choice_spans(segments, focused))
 }
 
 #[cfg(test)]
@@ -4841,6 +4910,7 @@ where
         last_via_used: state
             .selected_profile()
             .and_then(|profile| profile.last_via_used.clone()),
+        install_source: state.install_source,
     };
 
     history_store
@@ -5235,6 +5305,7 @@ fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostS
         && profile.via() == state.via
         && auth_matches_state(&profile.auth, state)
         && profile.use_install_proxy == state.use_install_proxy
+        && profile.install_source == state.install_source
 }
 
 fn normalized_port_matches_profile(value: &str, profile: &RemoteHostProfile) -> bool {
@@ -6365,7 +6436,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
-        assert_eq!(state.focus, Focus::InstallProxy);
+        assert_eq!(state.focus, Focus::InstallSource);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Down)),
             PaneAction::None
@@ -6380,7 +6451,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
-        assert_eq!(state.focus, Focus::InstallProxy);
+        assert_eq!(state.focus, Focus::InstallSource);
 
         state.set_focus(Focus::Remember);
         assert_eq!(
@@ -6542,6 +6613,64 @@ mod tests {
             PaneAction::None
         );
         assert!(!state.use_install_proxy);
+    }
+
+    #[test]
+    fn install_source_choice_is_host_detail_state() {
+        let mut state = ConnectRemoteHostState::load();
+        assert_eq!(state.install_source, InstallSource::RemoteDownload);
+        state.set_focus(Focus::InstallSource);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
+            PaneAction::None
+        );
+        assert_eq!(state.install_source, InstallSource::LocalUpload);
+        assert_eq!(state.focus, Focus::InstallSource);
+        // Arrow keys cycle the segmented choice and Tab reaches Connect.
+        state.apply_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(state.install_source, InstallSource::RemoteDownload);
+        state.apply_key(KeyEvent::from(KeyCode::Left));
+        assert_eq!(state.install_source, InstallSource::LocalUpload);
+        state.apply_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(state.focus, Focus::Connect);
+    }
+
+    #[test]
+    fn sync_selected_profile_syncs_install_source() {
+        let mut state = ConnectRemoteHostState::load();
+        let mut profile = saved_key_profile();
+        profile.install_source = InstallSource::LocalUpload;
+        state.profiles = vec![profile];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        assert_eq!(state.install_source, InstallSource::LocalUpload);
+        // New-host entries reset to the default remote-download source.
+        state.selected = state.profiles.len();
+        let _ = state.sync_selected_profile();
+        assert_eq!(state.install_source, InstallSource::RemoteDownload);
+    }
+
+    #[test]
+    fn ensure_connectable_profile_persists_install_source() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_key_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::InstallSource);
+        state.apply_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!profile_matches_state(
+            state.selected_profile().unwrap(),
+            &state
+        ));
+
+        let secret_store = test_secret_store();
+        let (history_store, temp_dir) = test_history_store();
+        let profile = ensure_connectable_profile(&state, &secret_store, &history_store).unwrap();
+        assert_eq!(profile.install_source, InstallSource::LocalUpload);
+        let loaded = history_store.load().unwrap();
+        assert_eq!(loaded.hosts[0].install_source, InstallSource::LocalUpload);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -7586,6 +7715,7 @@ mod tests {
             remote_shell: None,
             via: Some("relay".to_string()),
             last_via_used: None,
+            install_source: InstallSource::RemoteDownload,
         };
         state.profiles = vec![profile];
         state.selected = 0;
@@ -7704,6 +7834,7 @@ mod tests {
             remote_shell: None,
             via: Some("relay".to_string()),
             last_via_used: None,
+            install_source: InstallSource::RemoteDownload,
         };
         state.profiles = vec![profile.clone()];
         state.selected = 0;
@@ -7886,6 +8017,7 @@ mod tests {
             remote_shell: None,
             via: None,
             last_via_used: None,
+            install_source: InstallSource::RemoteDownload,
         };
 
         let mut state = ConnectRemoteHostState::load();
@@ -7934,6 +8066,7 @@ mod tests {
             remote_shell: None,
             via: None,
             last_via_used: None,
+            install_source: InstallSource::RemoteDownload,
         };
 
         let mut state = ConnectRemoteHostState::load();
