@@ -2581,7 +2581,7 @@ impl DetailsGeometry {
                 Constraint::Length(3), // framed header bar
                 Constraint::Length(8), // Connection card (Host/Port/Last Port/User/Host Kind/Via)
                 Constraint::Length(5), // Authentication card
-                Constraint::Length(6), // Options card (Remember/Use proxy/Install From/Relay role)
+                Constraint::Length(6), // Options card (Remember/Use proxy/Install From/Install as relay)
                 Constraint::Length(3), // info box card
                 Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
@@ -3780,7 +3780,7 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         frame,
         relay_area,
         state.relay_role,
-        "Relay role",
+        "Install as relay",
         state,
         Focus::RelayRole,
     );
