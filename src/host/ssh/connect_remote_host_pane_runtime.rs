@@ -385,6 +385,15 @@ impl ConnectRemoteHostPaneRuntime {
     }
 }
 
+/// Issue #188: key-path completion popup state. Empty while not editing the
+/// key path or when the current prefix has no matches (then no popup
+/// renders). Reset whenever the edited field changes or editing exits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CompletionState {
+    candidates: Vec<PathCompletion>,
+    selection: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectRemoteHostState {
     profiles: Vec<RemoteHostProfile>,
@@ -435,6 +444,8 @@ struct ConnectRemoteHostState {
     relay_mismatch: RelayMismatchState,
     editing: Option<EditField>,
     edit_cursor: usize,
+    /// Issue #188: visible key-path completions (empty = no popup).
+    completions: CompletionState,
     status: Status,
     delete_confirm: DeleteConfirmState,
     secret_load: SecretLoadState,
@@ -487,6 +498,7 @@ impl ConnectRemoteHostState {
             relay_mismatch: RelayMismatchState::Idle,
             editing: None,
             edit_cursor: 0,
+            completions: CompletionState::default(),
             status: default_hint_status(),
             delete_confirm: DeleteConfirmState::Idle,
             secret_load: SecretLoadState::Idle,
@@ -929,11 +941,43 @@ impl ConnectRemoteHostState {
         if field == EditField::SshPassword && self.password_mode == PasswordMode::Saved {
             self.password_mode = PasswordMode::Enter;
         }
+        // Issue #188: while key-path completions are visible they own
+        // Up/Down (selection), Enter/Tab (accept), and Esc (dismiss only;
+        // the next Esc does the normal editing escape).
+        if field == EditField::KeyPath && !self.completions.candidates.is_empty() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.completions = CompletionState::default();
+                    return PaneAction::None;
+                }
+                KeyCode::Down => {
+                    self.completion_selection_move(1);
+                    return PaneAction::None;
+                }
+                KeyCode::Up => {
+                    self.completion_selection_move(-1);
+                    return PaneAction::None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.accept_key_path_completion();
+                    return PaneAction::None;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => self.set_focus(Focus::Hosts),
-            KeyCode::Left => self.move_edit_cursor_left_or_leave(),
+            KeyCode::Left => {
+                self.move_edit_cursor_left_or_leave();
+                if self.editing == Some(EditField::KeyPath) {
+                    self.refresh_key_path_completions();
+                }
+            }
             KeyCode::Right => {
                 self.move_edit_cursor_right(field);
+                if field == EditField::KeyPath {
+                    self.refresh_key_path_completions();
+                }
             }
             KeyCode::Tab => self.set_focus(self.next_focus()),
             KeyCode::BackTab => self.set_focus(self.prev_focus()),
@@ -1272,6 +1316,10 @@ impl ConnectRemoteHostState {
         self.focus = focus;
         self.editing = focus.edit_field(self.auth);
         self.sync_edit_cursor_to_end();
+        self.completions = CompletionState::default();
+        if focus == Focus::Password && self.editing == Some(EditField::KeyPath) {
+            self.refresh_key_path_completions();
+        }
         if focus == Focus::Password
             && self.auth == AuthChoice::Password
             && self.ssh_password.is_empty()
@@ -1287,6 +1335,10 @@ impl ConnectRemoteHostState {
         self.focus = edit_focus(field);
         self.editing = Some(field);
         self.sync_edit_cursor_to_end();
+        self.completions = CompletionState::default();
+        if field == EditField::KeyPath {
+            self.refresh_key_path_completions();
+        }
     }
 
     fn start_sudo_password_edit(&mut self) {
@@ -1440,6 +1492,9 @@ impl ConnectRemoteHostState {
                     if self.sudo_mode == SudoMode::SameAsSsh {
                         self.sudo_mode = SudoMode::None;
                     }
+                    if let Some(ssh_dir) = Self::default_ssh_dir() {
+                        self.apply_default_key_path_for_draft(&ssh_dir);
+                    }
                 }
                 self.set_focus(Focus::HostKind);
             }
@@ -1462,6 +1517,11 @@ impl ConnectRemoteHostState {
                 }
                 if self.auth != AuthChoice::Password && self.sudo_mode == SudoMode::SameAsSsh {
                     self.sudo_mode = SudoMode::None;
+                }
+                if self.auth == AuthChoice::Key {
+                    if let Some(ssh_dir) = Self::default_ssh_dir() {
+                        self.apply_default_key_path_for_draft(&ssh_dir);
+                    }
                 }
                 self.set_focus(Focus::Auth);
             }
@@ -1536,8 +1596,77 @@ impl ConnectRemoteHostState {
                 self.proxy_https_proxy_autofilled = false;
                 self.apply_proxy_default_from_https_proxy();
             }
+            EditField::KeyPath => self.refresh_key_path_completions(),
             _ => {}
         }
+    }
+
+    /// Issue #188: recompute the visible key-path completions from the text
+    /// before the cursor. The real directory lister is used; the pure engine
+    /// (`list_path_completions`) is unit-tested with an injected one.
+    fn refresh_key_path_completions(&mut self) {
+        let before_cursor: String = self.key_path.chars().take(self.edit_cursor).collect();
+        let (dir_part, file_part) = split_path_prefix(&before_cursor);
+        let home = crate::host::ssh::remote_host_home::user_home_dir();
+        self.completions = CompletionState {
+            candidates: list_path_completions(
+                &dir_part,
+                &file_part,
+                home.as_deref(),
+                &real_dir_listing,
+            ),
+            selection: 0,
+        };
+    }
+
+    fn completion_selection_move(&mut self, step: i32) {
+        let len = self.completions.candidates.len();
+        if len == 0 {
+            return;
+        }
+        let index = self.completions.selection as i32;
+        let len = len as i32;
+        self.completions.selection = ((index + step).rem_euclid(len)) as usize;
+    }
+
+    /// Accepts the selected completion: the text before the cursor is
+    /// replaced by the candidate (directories keep their trailing `/` and
+    /// completion continues); accepting a file exits the field like Enter.
+    fn accept_key_path_completion(&mut self) {
+        let Some(candidate) = self.completions.candidates.get(self.completions.selection) else {
+            return;
+        };
+        let candidate = candidate.clone();
+        let after_cursor: String = self.key_path.chars().skip(self.edit_cursor).collect();
+        let is_dir = candidate.value.ends_with('/');
+        self.key_path = format!("{}{after_cursor}", candidate.value);
+        self.edit_cursor = candidate.value.chars().count();
+        self.completions = CompletionState::default();
+        if is_dir {
+            self.refresh_key_path_completions();
+        } else {
+            self.set_focus(self.next_focus());
+        }
+    }
+
+    /// Issue #188: fills an empty key path on a New Host draft with the first
+    /// usable default private key. Saved profiles are never touched; the ssh
+    /// directory is injected so tests use temp dirs.
+    fn apply_default_key_path_for_draft(&mut self, ssh_dir: &std::path::Path) {
+        if self.selected < self.profiles.len() {
+            return;
+        }
+        if self.auth != AuthChoice::Key || !self.key_path.is_empty() {
+            return;
+        }
+        if let Some(path) = default_key_path_in(ssh_dir) {
+            self.key_path = path.to_string_lossy().into_owned();
+            self.completions = CompletionState::default();
+        }
+    }
+
+    fn default_ssh_dir() -> Option<std::path::PathBuf> {
+        crate::host::ssh::remote_host_home::user_home_dir().map(|home| home.join(".ssh"))
     }
 
     fn apply_proxy_default_from_all_proxy(&mut self) {
@@ -2675,6 +2804,7 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     render_hosts(frame, geometry.hosts, state);
     render_details(frame, geometry.details, state);
     render_cursor(frame, geometry.details, state);
+    render_path_completions(frame, geometry.details, state);
     render_connecting_popup(frame, state);
     render_connect_error_popup(frame, state);
     render_delete_confirm(frame, state);
@@ -4500,6 +4630,63 @@ fn render_cursor(frame: &mut Frame<'_>, details: Rect, state: &ConnectRemoteHost
     }
 }
 
+/// Issue #188: one-column path-completion popup rendered directly under the
+/// key path field row while it is being edited. Nothing renders when there
+/// are no candidates. The selected candidate is highlighted; its `value` is
+/// what Enter/Tab would insert.
+fn render_path_completions(frame: &mut Frame<'_>, details: Rect, state: &ConnectRemoteHostState) {
+    if state.editing != Some(EditField::KeyPath) || state.completions.candidates.is_empty() {
+        return;
+    }
+    let rows = DetailsGeometry::from_area(details, state).rows;
+    let popup_height = (state.completions.candidates.len() as u16).saturating_add(2);
+    let name_width = state
+        .completions
+        .candidates
+        .iter()
+        .map(|candidate| candidate.name.width())
+        .max()
+        .unwrap_or(8) as u16;
+    let popup_width = name_width.clamp(16, 48).saturating_add(2);
+    let x = details.x.saturating_add(DETAIL_VALUE_START).min(
+        details
+            .x
+            .saturating_add(details.width.saturating_sub(popup_width)),
+    );
+    let y = details
+        .y
+        .saturating_add(rows.password)
+        .saturating_add(1)
+        .min(
+            details
+                .y
+                .saturating_add(details.height.saturating_sub(popup_height)),
+        );
+    let area = Rect::new(x, y, popup_width, popup_height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SECTION_BORDER_UNIFIED))
+        .style(Style::default().bg(SECTION_BG_UNIFIED));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    let lines: Vec<Line<'_>> = state
+        .completions
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let style = if index == state.completions.selection {
+                active_focus_style()
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(candidate.name.clone(), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16, u16)> {
     let field = state.editing?;
     if state.selected_proxy_config() {
@@ -5434,6 +5621,126 @@ fn split_host_port(raw: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
+/// Issue #188: default private-key candidates for the New Host draft, in
+/// preference order. Each candidate must exist AND be readable AND have its
+/// `.pub` counterpart, so a half-imported key never becomes the default.
+const DEFAULT_KEY_CANDIDATES: [&str; 3] = ["id_ed25519", "id_rsa", "id_ecdsa"];
+
+/// Resolves the first usable default private key inside `ssh_dir` (pure over
+/// the injected directory so tests use temp dirs; the caller passes
+/// `~/.ssh` in production). Readability is probed with a read-only open —
+/// the only check that accounts for permissions and ACLs together.
+fn default_key_path_in(ssh_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for name in DEFAULT_KEY_CANDIDATES {
+        let key = ssh_dir.join(name);
+        let public_key = ssh_dir.join(format!("{name}.pub"));
+        if !public_key.is_file() {
+            continue;
+        }
+        let readable = std::fs::File::open(&key).is_ok();
+        if readable {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// One directory entry as the completion engine needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathListing {
+    name: String,
+    is_dir: bool,
+}
+
+/// One completion candidate: `name` is what the popup shows (with a trailing
+/// `/` for directories), `value` is what gets inserted into the field
+/// (the typed directory prefix kept verbatim plus the name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathCompletion {
+    name: String,
+    value: String,
+}
+
+/// Real directory lister behind the completion engine (`std::fs::read_dir`).
+fn real_dir_listing(dir: &std::path::Path) -> Vec<PathListing> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            PathListing { name, is_dir }
+        })
+        .collect()
+}
+
+/// Maps the typed directory prefix to a path the lister can open: `~`
+/// resolves through `home`, an empty prefix means the current directory.
+fn resolve_listing_dir(dir_part: &str, home: Option<&std::path::Path>) -> std::path::PathBuf {
+    if dir_part == "~" {
+        return home
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("~"));
+    }
+    if let Some(rest) = dir_part.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(rest);
+        }
+    }
+    if dir_part.is_empty() {
+        return std::path::PathBuf::from(".");
+    }
+    std::path::PathBuf::from(dir_part)
+}
+
+/// Splits the text before the cursor into the directory prefix (kept
+/// verbatim, including its trailing `/`) and the partial file name.
+fn split_path_prefix(text: &str) -> (String, String) {
+    match text.rfind('/') {
+        Some(index) => (text[..=index].to_string(), text[index + 1..].to_string()),
+        None => (String::new(), text.to_string()),
+    }
+}
+
+/// Maximum number of completion candidates shown in the popup.
+const COMPLETION_CAP: usize = 8;
+
+/// Issue #188: path completion engine. Pure over the injected lister so unit
+/// tests never touch the real filesystem: entries under the directory prefix
+/// are filtered by the partial name (prefix match, case-sensitive), sorted
+/// directories-first then alphabetically, and capped at
+/// [`COMPLETION_CAP`]. Directory candidates keep a trailing `/` so accepting
+/// one continues completion naturally.
+fn list_path_completions(
+    dir_part: &str,
+    file_part: &str,
+    home: Option<&std::path::Path>,
+    list_dir: &dyn Fn(&std::path::Path) -> Vec<PathListing>,
+) -> Vec<PathCompletion> {
+    let dir = resolve_listing_dir(dir_part, home);
+    let mut entries = list_dir(&dir);
+    entries.retain(|entry| entry.name.starts_with(file_part));
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    entries
+        .into_iter()
+        .take(COMPLETION_CAP)
+        .map(|entry| {
+            let suffix = if entry.is_dir { "/" } else { "" };
+            PathCompletion {
+                name: format!("{}{suffix}", entry.name),
+                value: format!("{dir_part}{}{suffix}", entry.name),
+            }
+        })
+        .collect()
+}
+
 fn saved_ssh_secret_id(state: &ConnectRemoteHostState) -> Option<String> {
     match state.selected_profile().map(|profile| &profile.auth) {
         Some(RemoteHostAuthProfile::Password {
@@ -5472,6 +5779,7 @@ fn write_error(error: io::Error) -> LifecycleError {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
     use unicode_width::UnicodeWidthStr;
 
     fn display_width(text: &str) -> usize {
@@ -6687,6 +6995,397 @@ mod tests {
         assert_eq!(state.focus, Focus::RelayRole);
         state.apply_key(KeyEvent::from(KeyCode::Tab));
         assert_eq!(state.focus, Focus::Connect);
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "waitagent-pane-test-{name}-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("test dir");
+        dir
+    }
+
+    #[test]
+    fn default_key_path_prefers_ed25519_then_rsa_then_ecdsa() {
+        let dir = unique_test_dir("default-order");
+        // Only id_rsa present (with pub): chosen.
+        std::fs::write(dir.join("id_rsa"), "key").unwrap();
+        std::fs::write(dir.join("id_rsa.pub"), "pub").unwrap();
+        assert_eq!(default_key_path_in(&dir), Some(dir.join("id_rsa")));
+
+        // ed25519 appears later and wins by preference order.
+        std::fs::write(dir.join("id_ed25519"), "key").unwrap();
+        std::fs::write(dir.join("id_ed25519.pub"), "pub").unwrap();
+        assert_eq!(default_key_path_in(&dir), Some(dir.join("id_ed25519")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_key_path_skips_keys_without_public_counterpart() {
+        let dir = unique_test_dir("default-no-pub");
+        std::fs::write(dir.join("id_ed25519"), "key").unwrap();
+        std::fs::write(dir.join("id_rsa"), "key").unwrap();
+        std::fs::write(dir.join("id_rsa.pub"), "pub").unwrap();
+        assert_eq!(
+            default_key_path_in(&dir),
+            Some(dir.join("id_rsa")),
+            "a private key without its .pub is half-imported and must be skipped"
+        );
+
+        std::fs::remove_file(dir.join("id_rsa.pub")).unwrap();
+        assert!(default_key_path_in(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_key_path_skips_unreadable_keys() {
+        let dir = unique_test_dir("default-unreadable");
+        let key = dir.join("id_ed25519");
+        std::fs::write(&key, "key").unwrap();
+        std::fs::write(dir.join("id_ed25519.pub"), "pub").unwrap();
+        std::fs::set_permissions(&key, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o000)
+        })
+        .unwrap();
+        if std::fs::File::open(&key).is_ok() {
+            // Elevated privileges bypass permission bits; nothing readable
+            // to assert in that environment.
+            std::fs::set_permissions(&key, {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::Permissions::from_mode(0o600)
+            })
+            .unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(default_key_path_in(&dir).is_none());
+        std::fs::set_permissions(&key, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o600)
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_key_path_empty_dir_yields_none() {
+        let dir = unique_test_dir("default-empty");
+        assert!(default_key_path_in(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn draft_default_key_path_fills_only_new_host_key_drafts() {
+        let ssh_dir = unique_test_dir("draft-default");
+        std::fs::write(ssh_dir.join("id_ecdsa"), "key").unwrap();
+        std::fs::write(ssh_dir.join("id_ecdsa.pub"), "pub").unwrap();
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0; // New Host draft
+        state.auth = AuthChoice::Key;
+        state.apply_default_key_path_for_draft(&ssh_dir);
+        assert_eq!(state.key_path, ssh_dir.join("id_ecdsa").to_string_lossy());
+
+        // Saved profiles are never overwritten.
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_key_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        let original = state.key_path.clone();
+        state.apply_default_key_path_for_draft(&ssh_dir);
+        assert_eq!(state.key_path, original, "saved profiles keep their key");
+
+        // A non-empty draft field is never overwritten.
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        state.auth = AuthChoice::Key;
+        state.key_path = "/custom/key".to_string();
+        state.apply_default_key_path_for_draft(&ssh_dir);
+        assert_eq!(state.key_path, "/custom/key");
+        let _ = std::fs::remove_dir_all(&ssh_dir);
+    }
+
+    #[test]
+    fn split_path_prefix_separates_directory_and_partial_name() {
+        assert_eq!(
+            split_path_prefix("/home/kk/.ssh/id_"),
+            ("/home/kk/.ssh/".to_string(), "id_".to_string())
+        );
+        assert_eq!(split_path_prefix("id_"), (String::new(), "id_".to_string()));
+        assert_eq!(split_path_prefix("/"), ("/".to_string(), String::new()));
+        assert_eq!(split_path_prefix("~/"), ("~/".to_string(), String::new()));
+    }
+
+    fn listing(names: &[(&str, bool)]) -> Vec<PathListing> {
+        names
+            .iter()
+            .map(|(name, is_dir)| PathListing {
+                name: name.to_string(),
+                is_dir: *is_dir,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn completions_filter_by_case_sensitive_prefix() {
+        let completions = list_path_completions("/keys/", "id_", None, &|_| {
+            listing(&[
+                ("id_ed25519", false),
+                ("id_ed25519.pub", false),
+                ("ID_RSA", false),
+                ("readme", false),
+            ])
+        });
+        let names: Vec<&str> = completions
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["id_ed25519", "id_ed25519.pub"],
+            "case-sensitive prefix match"
+        );
+        assert!(
+            completions
+                .iter()
+                .all(|candidate| candidate.value.starts_with("/keys/")),
+            "the typed directory prefix is kept verbatim"
+        );
+    }
+
+    #[test]
+    fn completions_sort_dirs_first_then_alphabetical_and_keep_trailing_slash() {
+        let completions = list_path_completions("", "", None, &|_| {
+            listing(&[
+                ("zeta.txt", false),
+                ("beta", true),
+                ("alpha", true),
+                ("aardvark", false),
+            ])
+        });
+        let names: Vec<&str> = completions
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha/", "beta/", "aardvark", "zeta.txt"]);
+        assert_eq!(completions[0].value, "alpha/");
+    }
+
+    #[test]
+    fn completions_cap_at_eight() {
+        let completions = list_path_completions("", "f", None, &|_| {
+            listing(&[
+                ("f01", false),
+                ("f02", false),
+                ("f03", false),
+                ("f04", false),
+                ("f05", false),
+                ("f06", false),
+                ("f07", false),
+                ("f08", false),
+                ("f09", false),
+                ("f10", false),
+            ])
+        });
+        assert_eq!(completions.len(), 8);
+    }
+
+    #[test]
+    fn completions_resolve_home_for_listing_but_keep_typed_prefix() {
+        let home = unique_test_dir("completion-home");
+        // Typed "~/.s" splits into dir "~/" + partial ".s": the lister sees
+        // the resolved home directory while insertion keeps the "~" prefix.
+        let completions = list_path_completions("~/", ".s", Some(&home), &|dir| {
+            assert_eq!(dir, &home, "the lister sees the resolved home dir");
+            listing(&[(".ssh", true)])
+        });
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].name, ".ssh/");
+        assert_eq!(
+            completions[0].value, "~/.ssh/",
+            "insertion keeps the ~ prefix"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn key_path_edit_shows_completions_and_keys_drive_them() {
+        let dir = unique_test_dir("key-edit");
+        std::fs::write(dir.join("id_ed25519"), "k").unwrap();
+        std::fs::write(dir.join("id_ed25519.pub"), "p").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let prefix = format!("{}/", dir.display());
+
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        state.auth = AuthChoice::Key;
+        state.key_path = prefix.clone();
+        state.start_edit(EditField::KeyPath);
+        let names: Vec<&str> = state
+            .completions
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["sub/", "id_ed25519", "id_ed25519.pub"],
+            "dirs first"
+        );
+
+        // Typing a partial name recomputes on each change.
+        for ch in "id_".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        let names: Vec<&str> = state
+            .completions
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["id_ed25519", "id_ed25519.pub"]);
+
+        // Down/Up move the selection without leaving the field.
+        state.apply_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(state.completions.selection, 1);
+        state.apply_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(state.completions.selection, 0);
+        assert_eq!(state.editing, Some(EditField::KeyPath));
+
+        // Esc dismisses the completions only; a second Esc leaves editing.
+        state.apply_key(KeyEvent::from(KeyCode::Esc));
+        assert!(state.completions.candidates.is_empty());
+        assert_eq!(state.editing, Some(EditField::KeyPath));
+        state.apply_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(state.focus, Focus::Hosts);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accepting_a_file_completion_fills_and_exits_like_enter() {
+        let dir = unique_test_dir("accept-file");
+        std::fs::write(dir.join("id_rsa"), "k").unwrap();
+        std::fs::write(dir.join("id_rsa.pub"), "p").unwrap();
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        state.auth = AuthChoice::Key;
+        state.key_path = format!("{}/", dir.display());
+        state.start_edit(EditField::KeyPath);
+
+        state.apply_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(state.key_path, dir.join("id_rsa").to_string_lossy());
+        assert!(state.completions.candidates.is_empty());
+        // Enter's existing semantics: leave the field for the next focus.
+        assert_eq!(
+            state.focus,
+            Focus::Sudo,
+            "accepting a file exits like Enter"
+        );
+        assert_ne!(state.editing, Some(EditField::KeyPath));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accepting_a_dir_completion_continues_completing() {
+        let dir = unique_test_dir("accept-dir");
+        std::fs::create_dir(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested/id_ed25519"), "k").unwrap();
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        state.auth = AuthChoice::Key;
+        state.key_path = format!("{}/", dir.display());
+        state.start_edit(EditField::KeyPath);
+
+        state.apply_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(state.key_path.ends_with("nested/"));
+        assert_eq!(
+            state.editing,
+            Some(EditField::KeyPath),
+            "directory accept keeps editing"
+        );
+        let names: Vec<&str> = state
+            .completions
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["id_ed25519"],
+            "completion continues inside the dir"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completion_popup_renders_under_the_key_path_row() {
+        let dir = unique_test_dir("render-popup");
+        std::fs::write(dir.join("id_ed25519"), "k").unwrap();
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        state.auth = AuthChoice::Key;
+        state.key_path = format!("{}/", dir.display());
+        state.start_edit(EditField::KeyPath);
+
+        let output = rendered_text(100, 36, &state);
+        // The value column right-aligns and left-clips the long path, so the
+        // field row is identified by the path's actual tail (the temp dir
+        // name ends with "-test/" and the prefix text ends with a slash, so
+        // "id_ed25519" appears only in the popup).
+        let path = format!("{}/", dir.display());
+        let path_tail = &path[path.len().saturating_sub(24)..];
+        let key_row = output
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(path_tail))
+            .map(|(index, _)| index)
+            .expect("key path row should render");
+        // The popup's top border sits directly under the field row, so the
+        // first candidate line is two rows below it.
+        let popup_row = output
+            .lines()
+            .enumerate()
+            .skip(key_row + 1)
+            .find(|(_, line)| line.contains("id_ed25519"))
+            .map(|(index, _)| index)
+            .expect("completion popup should render under the key path row");
+        assert_eq!(
+            popup_row,
+            key_row + 2,
+            "border directly under the field, candidate below"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_fields_resets_completions() {
+        let dir = unique_test_dir("reset-fields");
+        std::fs::write(dir.join("id_ed25519"), "k").unwrap();
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        state.auth = AuthChoice::Key;
+        state.key_path = format!("{}/", dir.display());
+        state.start_edit(EditField::KeyPath);
+        assert!(!state.completions.candidates.is_empty());
+
+        state.set_focus(Focus::Host);
+        assert!(state.completions.candidates.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
