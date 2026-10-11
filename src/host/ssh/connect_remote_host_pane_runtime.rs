@@ -3733,22 +3733,21 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         state,
         Focus::InstallProxy,
     );
-    let focused = state.focus == Focus::InstallSource;
-    let label_style = if focused {
-        active_focus_style()
-    } else {
-        Style::default()
-    };
-    let mut spans = vec![Span::styled(
-        format!(
-            "{:<width$}",
-            "⇩  Install Source",
-            width = LABEL_WIDTH as usize
-        ),
-        label_style,
-    )];
-    spans.extend(choice_spans(install_source_tabs(state), focused));
-    frame.render_widget(Paragraph::new(Line::from(spans)), source_area);
+    let source_row = icon_choice_row(
+        "⇩",
+        "Install From",
+        install_source_tabs(state),
+        state,
+        Focus::InstallSource,
+    );
+    frame.render_widget(
+        Table::new(
+            vec![source_row],
+            [Constraint::Length(LABEL_WIDTH), Constraint::Min(1)],
+        )
+        .column_spacing(1),
+        source_area,
+    );
 }
 
 fn render_checkbox_row(
@@ -7688,6 +7687,45 @@ mod tests {
 
         state.apply_key(KeyEvent::from(KeyCode::Char(' ')));
         assert_eq!(state.via, RemoteNodeVia::Auto);
+    }
+
+    #[test]
+    fn install_source_row_aligns_with_via_choice_row() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        // The popup needs a terminal taller than POPUP_HEIGHT + 2 so the
+        // Connection card keeps all six rows (Host/Port/User/Kind/Via).
+        let popup = PopupGeometry::from_terminal_size((100, 35), &state);
+        let details = DetailsGeometry::from_area(popup.details, &state);
+        let output = rendered_text(100, 35, &state);
+        let row_end = |needle: &str| -> usize {
+            let row = output
+                .lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} row should render"));
+            display_width(row.trim_end())
+        };
+
+        // Both choice rows render their selected segment right-aligned in
+        // the same-width value column, so their right edges must coincide.
+        assert_eq!(
+            row_end("Install From"),
+            row_end("⇄  Via"),
+            "Install From row must follow the same right-aligned layout as the Via row"
+        );
+        // The segment must not hug the padded label (the old hand-rolled
+        // layout): the selected value starts well past the label column.
+        let source_row = output
+            .lines()
+            .find(|line| line.contains("Install From"))
+            .expect("Install Source row should render");
+        let value_col = display_width(&source_row[..source_row.find("Remote").unwrap()]);
+        assert!(
+            value_col > (details.options.x + LABEL_WIDTH + 4) as usize,
+            "selected segment should sit in the value column, got column {value_col}"
+        );
     }
 
     #[test]
