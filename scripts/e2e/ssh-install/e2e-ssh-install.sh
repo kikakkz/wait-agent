@@ -35,7 +35,13 @@
 #                   5. no fallback without a cached artifact: with the cache
 #                      cleared, the same connect must fail with the ORIGINAL
 #                      remote-download error (annotated with the empty-cache
-#                      fact) and log no fallback marker.
+#                      fact) and log no fallback marker;
+#                   6. relay role (issue #180): a connect with relay_role =
+#                      true deploys the remote relay (serve + invite + remote
+#                      self-enrollment), pins the local node to host:7475, and
+#                      brings both nodes online at the relay admin; a forced
+#                      second connect reuses the running relay (exactly one
+#                      serve process) without whiplashing the pin.
 #
 # Images: WA_E2E_BINARY stages the prebuilt host binary into the runtime
 # image via scripts/e2e/relay/Dockerfile.runtime (same as the relay harness);
@@ -335,6 +341,73 @@ EOF
     [ "$markers_after" -eq "$markers_before" ] \
         || die "no fallback may be logged when the cache is empty"
     log "phase 5 OK: original error preserved, empty cache annotated, no fallback logged"
+
+    log "phase 6: relay role deploys the host as the active relay (issue #180)"
+    docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/remote-hosts.toml' <<PROFEOF
+[[hosts]]
+name = "ssh-host"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = "auto"
+use_install_proxy = false
+host_kind = "lan"
+install_source = "upload"
+relay_role = true
+PROFEOF
+    prime_local_artifact_cache
+    force_remote_reinstall
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "relay-role CONNECT_REMOTE_HOST was not accepted: $connect_out"
+    row=$(wait_for_online_remote_row "ssh-host#") \
+        || die "no online remote session row after the relay-role connect"
+    log "online remote row: $row"
+
+    log "waiting for the local relay pin (ssh-host:7475)"
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    local pinned=""
+    while ((SECONDS < deadline)); do
+        pinned=$(docker exec "$NODE" sh -c 'cat /root/.waitagent/relay.toml 2>/dev/null' || true)
+        if grep -q 'address = "ssh-host:7475"' <<<"$pinned"; then
+            break
+        fi
+        pinned=""
+        sleep 2
+    done
+    [ -n "$pinned" ] || die "local relay.toml was not pinned to ssh-host:7475"
+    log "local pin: $(grep 'address' <<<"$pinned")"
+
+    log "waiting for both nodes at the remote relay admin"
+    local relay_status=""
+    deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        relay_status=$(docker exec "$SSH_HOST" waitagent relay status --listen 0.0.0.0:7475 2>/dev/null || true)
+        if [ -n "$relay_status" ] \
+            && [ "$(jq -r '.ok' <<<"$relay_status" 2>/dev/null)" = "true" ] \
+            && [ "$(jq -r '.nodes | length' <<<"$relay_status" 2>/dev/null)" = "2" ]; then
+            break
+        fi
+        relay_status=""
+        sleep 2
+    done
+    [ -n "$relay_status" ] || die "relay admin never showed both nodes online"
+    log "relay admin: $(jq -c '{ok, nodes: [.nodes[].node_id]}' <<<"$relay_status")"
+
+    log "idempotent reconnect: bootstrap reruns, the running relay is reused"
+    force_remote_reinstall
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "relay-role reconnect was not accepted: $connect_out"
+    row=$(wait_for_online_remote_row "ssh-host#") \
+        || die "no online remote session row after the relay-role reconnect"
+    local serve_count
+    serve_count=$(docker exec "$SSH_HOST" sh -c 'pgrep -f "[r]elay serve --listen" | wc -l')
+    [ "$serve_count" = "1" ] || die "expected exactly one relay serve, got $serve_count"
+    docker exec "$NODE" sh -c 'grep -q "address = \"ssh-host:7475\"" /root/.waitagent/relay.toml' \
+        || die "the reconnect must not whiplash the relay pin"
+    log "phase 6 OK: one serve process, pin stable, host online"
 }
 
 count_fallback_markers() {

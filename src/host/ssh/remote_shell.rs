@@ -312,6 +312,7 @@ mod tests {
             last_via_used: None,
             install_source:
                 crate::host::ssh::remote_host_history_store::InstallSource::RemoteDownload,
+            relay_role: false,
         }
     }
 

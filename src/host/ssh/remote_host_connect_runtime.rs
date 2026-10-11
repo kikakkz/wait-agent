@@ -19,7 +19,7 @@ use crate::host::ssh::remote_shell::{
 use crate::host::ssh::ssh_remote_host_bootstrapper::{
     install_reachability_preflight_command, windows_install_or_update_command,
     windows_install_reachability_preflight_command, RemoteHostBootstrapPlan,
-    RemoteHostBootstrapper,
+    RemoteHostBootstrapper, RemoteRelayJoinRequest,
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::operator_auth::{self, OperatorKeyStore};
@@ -87,6 +87,9 @@ pub struct RemoteHostConnectOutcome {
     /// the discovery in the connect response so the operator knows the pin
     /// came from the relay, not from their own typing.
     pub pin_auto_discovered: bool,
+    /// Issue #180: a relay-role bootstrap produced this pending local relay
+    /// join; the state event loop drives it (never the connect worker).
+    pub relay_join: Option<RemoteRelayJoinRequest>,
 }
 
 pub struct RemoteHostConnectRuntime<H, P, B> {
@@ -366,6 +369,7 @@ where
             );
             return Ok(RemoteHostConnectOutcome {
                 pin_auto_discovered,
+                relay_join: None,
                 ..outcome
             });
         }
@@ -481,6 +485,7 @@ where
                 // No dial was queued: the target was already online.
                 dial_via: None,
                 pin_auto_discovered,
+                relay_join: None,
             });
         }
 
@@ -528,6 +533,7 @@ where
             reused_existing_endpoint: port.reused_existing_waitagent,
             dial_via: Some(resolved_via),
             pin_auto_discovered,
+            relay_join: bootstrap_result.relay_join,
         })
     }
 
@@ -628,6 +634,10 @@ where
                 // The caller knows whether the pin was relay-discovered and
                 // overwrites this on the way out.
                 pin_auto_discovered: false,
+                // The reuse fast path never re-runs the bootstrap, so a
+                // relay-role reconnect returns here without a fresh join
+                // request; the snapshot-reconnect path re-deploys instead.
+                relay_join: None,
             })),
             Err(error) => {
                 if is_auth_rejection_error(&error) {
@@ -898,7 +908,9 @@ fn profile_from_direct_args(
         remote_shell: None,
         // CLI-driven ad-hoc connects download from the remote host (the
         // historical behavior); the install-source choice lives on saved
-        // profiles (issue #168).
+        // profiles (issue #168). Relay-role deployment is a saved-profile
+        // feature too (issue #180).
+        relay_role: false,
         install_source: crate::host::ssh::remote_host_history_store::InstallSource::RemoteDownload,
         // CLI-driven ad-hoc connects stay direct (no relay fallback); the
         // profile file is where the `via` choice lives. Explicit here so
@@ -1252,6 +1264,7 @@ mod tests {
             Ok(RemoteHostBootstrapResult {
                 tls_pin_sha256: "deadbeef".to_string(),
                 remote_port: plan.start_plan.remote_port,
+                relay_join: None,
             })
         }
     }
@@ -2124,6 +2137,86 @@ mod tests {
             plans[0].install_source,
             crate::host::ssh::remote_host_history_store::InstallSource::LocalUpload
         );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[derive(Clone)]
+    struct RelayRoleBootstrapper {
+        request: Option<crate::host::ssh::ssh_remote_host_bootstrapper::RemoteRelayJoinRequest>,
+    }
+
+    impl RemoteHostBootstrapper for RelayRoleBootstrapper {
+        type Error = String;
+
+        fn ensure_waitagent_and_start(
+            &self,
+            plan: &RemoteHostBootstrapPlan,
+        ) -> Result<RemoteHostBootstrapResult, Self::Error> {
+            Ok(RemoteHostBootstrapResult {
+                tls_pin_sha256: "deadbeef".to_string(),
+                remote_port: plan.start_plan.remote_port,
+                relay_join: self.request.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn remote_host_connect_carries_relay_join_request_to_the_outcome() {
+        // Issue #180: the bootstrapper's pending local relay join must reach
+        // the connect outcome untouched so the state event loop can drive it.
+        let path = unique_path("remote-host-connect-relay-join.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        history.upsert_profile(profile()).unwrap();
+        let bootstrapper = RelayRoleBootstrapper {
+            request: Some(
+                crate::host::ssh::ssh_remote_host_bootstrapper::RemoteRelayJoinRequest {
+                    address: "10.1.29.130:7475".to_string(),
+                    token: "deploy-token".to_string(),
+                },
+            ),
+        };
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            bootstrapper,
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store());
+        let dial_targets = catalog_targets.clone();
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |_request| {
+                    dial_targets
+                        .lock()
+                        .unwrap()
+                        .push(remote_target("10.1.29.130#7476", "seed"));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let request = outcome
+            .relay_join
+            .expect("the relay join request must survive to the outcome");
+        assert_eq!(request.address, "10.1.29.130:7475");
+        assert_eq!(request.token, "deploy-token");
         crate::infra::best_effort::remove_file(path);
     }
 

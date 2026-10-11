@@ -415,6 +415,9 @@ struct ConnectRemoteHostState {
     /// remote host downloads it (Remote) or this machine downloads and
     /// uploads it (Upload) (issue #168).
     install_source: InstallSource,
+    /// When enabled, connecting this host also deploys it as the active
+    /// relay (remote `relay serve` + enrollment + local join) (issue #180).
+    relay_role: bool,
     proxy_settings: RemoteInstallProxySettings,
     proxy_draft: RemoteInstallProxyProfile,
     proxy_all_proxy_autofilled: bool,
@@ -468,6 +471,7 @@ impl ConnectRemoteHostState {
             remember: true,
             use_install_proxy: true,
             install_source: InstallSource::RemoteDownload,
+            relay_role: false,
             proxy_settings: load_proxy_settings(),
             proxy_draft: RemoteInstallProxyProfile {
                 name: String::new(),
@@ -514,6 +518,7 @@ impl ConnectRemoteHostState {
             self.remember = true;
             self.use_install_proxy = true;
             self.install_source = InstallSource::RemoteDownload;
+            self.relay_role = false;
             self.status = default_hint_status();
             return None;
         }
@@ -570,6 +575,7 @@ impl ConnectRemoteHostState {
         self.remember = true;
         self.use_install_proxy = profile.use_install_proxy;
         self.install_source = profile.install_source;
+        self.relay_role = profile.relay_role;
         if request.has_work() {
             self.status = Status::Loading("Loading saved credentials...".to_string());
             self.secret_load = SecretLoadState::Loading {
@@ -728,6 +734,8 @@ impl ConnectRemoteHostState {
                     || self.focus == Focus::InstallSource
                 {
                     self.adjust_choice(1);
+                } else if self.focus == Focus::RelayRole {
+                    self.relay_role = !self.relay_role;
                 }
                 PaneAction::None
             }
@@ -1163,6 +1171,11 @@ impl ConnectRemoteHostState {
                 self.set_focus(Focus::InstallSource);
                 self.install_source = self.install_source.shift(1);
             }
+            row if row == details.rows.relay_role => {
+                self.set_focus(Focus::RelayRole);
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.relay_role = !self.relay_role;
+            }
             _ if point_in_rect(x, y, details.buttons) => {
                 if let Some(focus) = button_action_from_x(x, details.buttons, self) {
                     self.set_focus(focus);
@@ -1195,7 +1208,7 @@ impl ConnectRemoteHostState {
         } else {
             let next = match self.focus {
                 Focus::ProxySave | Focus::ProxyDelete => Focus::HttpsProxy,
-                Focus::Delete => Focus::InstallSource,
+                Focus::Delete => Focus::RelayRole,
                 _ => {
                     let candidate = self.prev_focus();
                     if candidate == Focus::Hosts {
@@ -1343,6 +1356,11 @@ impl ConnectRemoteHostState {
             }
             Focus::InstallSource => {
                 self.adjust_choice(1);
+                PaneAction::None
+            }
+            Focus::RelayRole => {
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.relay_role = !self.relay_role;
                 PaneAction::None
             }
             Focus::Delete => self.delete_action(),
@@ -1893,6 +1911,7 @@ enum Focus {
     Remember,
     InstallProxy,
     InstallSource,
+    RelayRole,
     Delete,
     Connect,
     ProxyName,
@@ -1982,6 +2001,7 @@ impl Focus {
             Self::Remember,
             Self::InstallProxy,
             Self::InstallSource,
+            Self::RelayRole,
         ];
         ordered.push(Self::Connect);
         if has_saved_selection {
@@ -2242,6 +2262,7 @@ struct DetailsRows {
     remember: u16,
     install_proxy: u16,
     install_source: u16,
+    relay_role: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2390,10 +2411,10 @@ impl PopupGeometry {
         // instead of stretching to the full terminal height. The height is
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
-        // terminals to keep a visible margin; 29 rows fit the framed
+        // terminals to keep a visible margin; 30 rows fit the framed
         // sidebar and detail sections including the Via and Install Source
-        // choice rows (issue #168).
-        const POPUP_HEIGHT: u16 = 29;
+        // choice rows plus the Relay role checkbox (issues #168, #180).
+        const POPUP_HEIGHT: u16 = 30;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -2560,7 +2581,7 @@ impl DetailsGeometry {
                 Constraint::Length(3), // framed header bar
                 Constraint::Length(8), // Connection card (Host/Port/Last Port/User/Host Kind/Via)
                 Constraint::Length(5), // Authentication card
-                Constraint::Length(5), // Options card (Remember/Use proxy/Install Source)
+                Constraint::Length(6), // Options card (Remember/Use proxy/Install From/Relay role)
                 Constraint::Length(3), // info box card
                 Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
@@ -2579,6 +2600,7 @@ impl DetailsGeometry {
             remember: sections[3].y.saturating_add(1).saturating_sub(area.y),
             install_proxy: sections[3].y.saturating_add(2).saturating_sub(area.y),
             install_source: sections[3].y.saturating_add(3).saturating_sub(area.y),
+            relay_role: sections[3].y.saturating_add(4).saturating_sub(area.y),
         };
         Self {
             header: sections[0],
@@ -3717,6 +3739,12 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         row_width,
         1,
     );
+    let relay_area = Rect::new(
+        inner.x.saturating_add(SECTION_CONTENT_INDENT),
+        inner.y.saturating_add(3),
+        row_width,
+        1,
+    );
     render_checkbox_row(
         frame,
         remember_area,
@@ -3747,6 +3775,14 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         )
         .column_spacing(1),
         source_area,
+    );
+    render_checkbox_row(
+        frame,
+        relay_area,
+        state.relay_role,
+        "Relay role",
+        state,
+        Focus::RelayRole,
     );
 }
 
@@ -3904,7 +3940,9 @@ fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
         Focus::HostKind | Focus::Via | Focus::Auth | Focus::InstallSource => {
             "←/→: switch · Space: toggle · Tab: next".to_string()
         }
-        Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
+        Focus::Remember | Focus::InstallProxy | Focus::RelayRole => {
+            "Space: toggle · Tab: next".to_string()
+        }
         Focus::Connect => "Enter: connect · Tab: next".to_string(),
         Focus::Delete => "Enter: delete · Tab: next".to_string(),
         Focus::ProxyName | Focus::AllProxy | Focus::HttpsProxy => {
@@ -4910,6 +4948,7 @@ where
             .selected_profile()
             .and_then(|profile| profile.last_via_used.clone()),
         install_source: state.install_source,
+        relay_role: state.relay_role,
     };
 
     history_store
@@ -5305,6 +5344,7 @@ fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostS
         && auth_matches_state(&profile.auth, state)
         && profile.use_install_proxy == state.use_install_proxy
         && profile.install_source == state.install_source
+        && profile.relay_role == state.relay_role
 }
 
 fn normalized_port_matches_profile(value: &str, profile: &RemoteHostProfile) -> bool {
@@ -6435,7 +6475,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
-        assert_eq!(state.focus, Focus::InstallSource);
+        assert_eq!(state.focus, Focus::RelayRole);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Down)),
             PaneAction::None
@@ -6450,7 +6490,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
-        assert_eq!(state.focus, Focus::InstallSource);
+        assert_eq!(state.focus, Focus::RelayRole);
 
         state.set_focus(Focus::Remember);
         assert_eq!(
@@ -6630,6 +6670,21 @@ mod tests {
         assert_eq!(state.install_source, InstallSource::RemoteDownload);
         state.apply_key(KeyEvent::from(KeyCode::Left));
         assert_eq!(state.install_source, InstallSource::LocalUpload);
+        state.apply_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(state.focus, Focus::RelayRole);
+    }
+
+    #[test]
+    fn relay_role_toggle_is_host_detail_state() {
+        let mut state = ConnectRemoteHostState::load();
+        assert!(!state.relay_role);
+        state.set_focus(Focus::RelayRole);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
+            PaneAction::None
+        );
+        assert!(state.relay_role);
+        assert_eq!(state.focus, Focus::RelayRole);
         state.apply_key(KeyEvent::from(KeyCode::Tab));
         assert_eq!(state.focus, Focus::Connect);
     }
@@ -7754,6 +7809,7 @@ mod tests {
             via: Some("relay".to_string()),
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
+            relay_role: false,
         };
         state.profiles = vec![profile];
         state.selected = 0;
@@ -7873,6 +7929,7 @@ mod tests {
             via: Some("relay".to_string()),
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
+            relay_role: false,
         };
         state.profiles = vec![profile.clone()];
         state.selected = 0;
@@ -8056,6 +8113,7 @@ mod tests {
             via: None,
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
+            relay_role: false,
         };
 
         let mut state = ConnectRemoteHostState::load();
@@ -8105,6 +8163,7 @@ mod tests {
             via: None,
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
+            relay_role: false,
         };
 
         let mut state = ConnectRemoteHostState::load();

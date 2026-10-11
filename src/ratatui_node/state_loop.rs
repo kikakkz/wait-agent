@@ -253,6 +253,7 @@ fn run_state_event_loop(
                 profile_name,
                 result,
                 activate,
+                relay_join,
             } => {
                 connecting_profiles.remove(&profile_name);
                 let waiters = connect_waiters.remove(&profile_name).unwrap_or_default();
@@ -264,11 +265,13 @@ fn run_state_event_loop(
                     &client_writer,
                     &connected_clients,
                     &snapshot_store,
+                    &state_event_tx,
                     client_id,
                     profile_name,
                     *result,
                     activate,
                     waiters,
+                    relay_join,
                 );
             }
 
@@ -595,6 +598,20 @@ fn run_state_event_loop(
                 match *result {
                     Ok(outcome) => {
                         offline_nodes.remove(&authority_node_id);
+                        // Issue #180: a relay-role reconnect carries the same
+                        // pending local join as an explicit connect; drive it
+                        // off-loop after applying the outcome.
+                        if let Some(request) = outcome.relay_join.clone() {
+                            run_relay_join(
+                                shared.clone(),
+                                waiters.first().copied().unwrap_or(0),
+                                request.address,
+                                request.token,
+                                false,
+                                RelayJoinContext::RelayRoleDeploy,
+                                state_event_tx.clone(),
+                            );
+                        }
                         // A queued client explicitly asked to connect: activate
                         // the recovered session for them.
                         let outcome = apply_remote_host_connect_outcome(
@@ -841,6 +858,7 @@ fn handle_client_command_event(
             address.clone(),
             token.clone(),
             *force,
+            RelayJoinContext::Operator,
             state_event_tx,
         );
         return;
@@ -2156,11 +2174,18 @@ fn connect_remote_host_target(
     let state_event_tx = state_event_tx.clone();
     std::thread::spawn(move || {
         let result = perform_remote_host_connect(&shared, &remote_owner, &profile_name);
+        // A relay-role bootstrap attaches its pending local join to the
+        // result; the state loop drives the join after applying the outcome.
+        let relay_join = result
+            .as_ref()
+            .ok()
+            .and_then(|outcome| outcome.relay_join.clone());
         let _ = state_event_tx.send(StateEvent::RemoteHostConnectResult {
             client_id,
             profile_name: profile_name.clone(),
             result: Box::new(result),
             activate: true,
+            relay_join,
         });
     });
     CommandOutcome::Ok
@@ -2305,6 +2330,7 @@ fn perform_remote_host_connect(
         created_target: record,
         connection_info,
         pin_auto_discovered: outcome.pin_auto_discovered,
+        relay_join: outcome.relay_join,
     })
 }
 
@@ -2542,20 +2568,41 @@ fn handle_remote_host_connect_result(
     client_writer: &ClientWriterHandle,
     _connected_clients: &HashSet<u64>,
     snapshot_store: &OutboundConnectionSnapshotStore,
+    state_event_tx: &mpsc::Sender<StateEvent>,
     client_id: u64,
     profile_name: String,
     result: Result<RemoteHostConnectedOutcome, String>,
     activate: bool,
     waiters: Vec<u64>,
+    relay_join: Option<crate::host::ssh::ssh_remote_host_bootstrapper::RemoteRelayJoinRequest>,
 ) {
     let outcome = match result {
-        Ok(outcome) => apply_remote_host_connect_outcome(
-            shared,
-            snapshot_store,
-            &profile_name,
-            activate,
-            outcome,
-        ),
+        Ok(outcome) => {
+            // Issue #180: a relay-role connect carries the pending local
+            // relay join; the state loop drives it AFTER applying the
+            // connect outcome, reusing the same off-loop enrollment engine
+            // and pin-mismatch decision as the operator's `relay join`.
+            // force stays false: a different pinned relay refuses rather
+            // than force-switching (single-active relay).
+            if let Some(request) = relay_join {
+                run_relay_join(
+                    shared.clone(),
+                    client_id,
+                    request.address,
+                    request.token,
+                    false,
+                    RelayJoinContext::RelayRoleDeploy,
+                    state_event_tx.clone(),
+                );
+            }
+            apply_remote_host_connect_outcome(
+                shared,
+                snapshot_store,
+                &profile_name,
+                activate,
+                outcome,
+            )
+        }
         Err(message) => CommandOutcome::Error(message),
     };
     let response: ControlResponse = outcome.into();
@@ -2792,16 +2839,39 @@ fn run_relay_join(
     address: String,
     token: String,
     force: bool,
+    context: RelayJoinContext,
     state_event_tx: mpsc::Sender<StateEvent>,
 ) {
     std::thread::spawn(move || {
-        let result = perform_relay_join(&shared, &address, &token, force);
+        let result = perform_relay_join(&shared, &address, &token, force, context);
         let _ = state_event_tx.send(StateEvent::RelayJoinResult {
             client_id,
             address,
             result: Box::new(result),
         });
     });
+}
+
+/// Who initiated a relay join: the remediation text of a refused pin
+/// differs between the operator's explicit `relay join` and the automatic
+/// relay-role connect deployment (issue #180).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayJoinContext {
+    /// `RELAY_JOIN` from a client / the TUI Relay page.
+    Operator,
+    /// Automatic deployment of a relay-role host profile.
+    RelayRoleDeploy,
+}
+
+impl RelayJoinContext {
+    fn remediation(self) -> &'static str {
+        match self {
+            Self::Operator => "Use Switch anyway to accept the new identity.",
+            Self::RelayRoleDeploy => {
+                "remove or switch the pinned relay via the Relay page, then reconnect"
+            }
+        }
+    }
 }
 
 /// Enrolls at the relay through the same engine `relay join` uses, then
@@ -2815,6 +2885,7 @@ fn perform_relay_join(
     address: &str,
     token: &str,
     force: bool,
+    context: RelayJoinContext,
 ) -> Result<RelayJoinApplied, String> {
     let previous = current_relay_pin();
     let outcome =
@@ -2825,8 +2896,11 @@ fn perform_relay_join(
                 .save(&crate::infra::relay_toml_store::RelayTomlConfig::default_path())
                 .map_err(|error| format!("restore previous relay pin: {error}"))?;
             Err(format!(
-                "pin mismatch: relay at {address} presents fingerprint {}, but this node pinned {} ({}); aborting. Use Switch anyway to accept the new identity.",
-                outcome.relay_fingerprint, previous.relay_fingerprint, previous.address
+                "pin mismatch: relay at {address} presents fingerprint {}, but this node pinned {} ({}); aborting. {}.",
+                outcome.relay_fingerprint,
+                previous.relay_fingerprint,
+                previous.address,
+                context.remediation()
             ))
         }
         RelayJoinPinDecision::Consistent => {
@@ -2879,7 +2953,13 @@ fn handle_relay_join_result(
                 ))
             }
         }
-        Err(message) => CommandOutcome::Error(message),
+        Err(message) => {
+            // Refusals (pin mismatch, unreachable relay, expired token)
+            // must be greppable in the diagnostics log even when no client
+            // is listening for the response (issue #180 auto-joins).
+            ERROR_LOG.log_error(format!("[relay-join] join to {address} refused: {message}"));
+            CommandOutcome::Error(message)
+        }
     };
     let response: ControlResponse = outcome.into();
     let payload = response_json(&response);
@@ -4179,6 +4259,7 @@ mod state_loop_tests {
             profile_name: "dup-profile".to_string(),
             result: Box::new(Err("connect failed in test".to_string())),
             activate: true,
+            relay_join: None,
         });
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

@@ -152,6 +152,11 @@ pub struct RemoteHostBootstrapPlan {
     /// cache) and uploads it to the remote host over the SSH exec channel;
     /// POSIX targets only — Windows targets error out explicitly.
     pub install_source: InstallSource,
+    /// Issue #180: also deploy this host as the active relay during connect
+    /// (remote `relay serve` + invite + remote self-enrollment; the local
+    /// join is driven by the state event loop). Windows remotes are not
+    /// supported in this phase.
+    pub relay_role: bool,
     /// Detected shell family of the remote host. Every remote command
     /// generator (`install_or_update_command`, `start_plan`, version check,
     /// daemon check, ...) emits a POSIX or PowerShell script based on this
@@ -202,6 +207,7 @@ impl RemoteHostBootstrapPlan {
             remote_bin_path,
             operator_public_key: None,
             install_source: profile.install_source,
+            relay_role: profile.relay_role,
             remote_shell,
         }
     }
@@ -257,6 +263,54 @@ pub trait RemoteHostBootstrapper {
 pub struct RemoteHostBootstrapResult {
     pub tls_pin_sha256: String,
     pub remote_port: u16,
+    /// Issue #180: when the profile has the relay role, the remote relay was
+    /// deployed during bootstrap (serve + invite + remote self-enrollment)
+    /// and the local node must still join it — the state event loop drives
+    /// that join, never the connect worker thread.
+    pub relay_join: Option<RemoteRelayJoinRequest>,
+}
+
+/// Issue #180: a pending local `relay join` produced by a relay-role
+/// bootstrap. Carried through the connect outcome to the state event loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRelayJoinRequest {
+    /// Relay dial address for the local node (`<profile.host>:7475`).
+    pub address: String,
+    /// Fresh `--deploy` invite token.
+    pub token: String,
+}
+
+/// Relay listen address deployed on relay-role hosts (issue #180).
+pub(crate) const RELAY_ROLE_LISTEN: &str = "0.0.0.0:7475";
+/// Relay data port (the listen port); nodes dial the relay here.
+pub(crate) const RELAY_ROLE_PORT: u16 = 7475;
+
+/// Remote probe for the relay admin socket
+/// (`$TMPDIR/waitagent-relay-admin-0_0_0_0_7475.sock`, mirroring
+/// `infra::relay_admin::relay_admin_addr`). `TMPDIR` falls back to `/tmp`
+/// because non-interactive sshd sessions often leave it unset.
+fn relay_admin_socket_probe_command() -> String {
+    "test -S \"${TMPDIR:-/tmp}/waitagent-relay-admin-0_0_0_0_7475.sock\"".to_string()
+}
+
+/// Shell snippet that waits up to ~10 seconds for the relay admin socket to
+/// appear after `relay serve` starts, so the SSH exec does not return before
+/// the relay is actually usable.
+fn wait_for_relay_admin_socket_shell() -> String {
+    format!(
+        "i=0; while [ $i -lt 50 ]; do if {}; then break; fi; sleep 0.2; i=$((i+1)); done; if [ $i -eq 50 ]; then exit 1; fi",
+        relay_admin_socket_probe_command()
+    )
+}
+
+/// Parses the `token: <tok>` line printed by `waitagent relay invite`.
+fn parse_relay_invite_token(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("token: "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,6 +434,7 @@ where
             return Ok(RemoteHostBootstrapResult {
                 tls_pin_sha256,
                 remote_port,
+                relay_join: None,
             });
         }
 
@@ -395,6 +450,15 @@ where
             }
         }
 
+        // Relay role (issue #180): deploy the remote relay BEFORE the node
+        // server starts below so the remote node links to the relay at
+        // startup. The local join request travels with the bootstrap result.
+        let relay_join = if plan.relay_role {
+            Some(self.ensure_remote_relay_and_build_join_request(plan)?)
+        } else {
+            None
+        };
+
         let (tls_pin_sha256, remote_port) = self.generate_credentials_and_parse(plan)?;
 
         if let Some(public_key) = &plan.operator_public_key {
@@ -408,6 +472,7 @@ where
         Ok(RemoteHostBootstrapResult {
             tls_pin_sha256,
             remote_port,
+            relay_join,
         })
     }
 }
@@ -419,6 +484,64 @@ where
     E: RemoteSshExecutor,
     E::Error: ToString,
 {
+    /// Issue #180: deploy the remote host as the active relay. Idempotent:
+    /// a running relay (admin socket present) is left alone; the invite is
+    /// always fresh (one-shot tokens), and the remote's own node re-enrolls
+    /// every connect (the relay treats re-registration of a known identity
+    /// as an upsert). Runs before the remote node server starts so the node
+    /// links to the relay at startup. Windows remotes are not supported in
+    /// this phase.
+    fn ensure_remote_relay_and_build_join_request(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<RemoteRelayJoinRequest, RemoteHostBootstrapError> {
+        if plan.remote_shell == RemoteShellKind::Windows {
+            return Err(RemoteHostBootstrapError::new(
+                "relay role is not supported for Windows remote hosts in this phase: deploy a Linux or macOS host as the relay, or enroll both nodes manually",
+            ));
+        }
+        let listen = RELAY_ROLE_LISTEN;
+        let probe = relay_admin_socket_probe_command();
+        if self.run_ssh_output(plan, &probe, false)?.status != 0 {
+            let start = format!(
+                "nohup waitagent relay serve --listen {listen} >/tmp/waitagent-relay-7475.log 2>&1 < /dev/null & {}",
+                wait_for_relay_admin_socket_shell()
+            );
+            self.run_ssh_command(plan, &start, false)?;
+            if self.run_ssh_output(plan, &probe, false)?.status != 0 {
+                return Err(RemoteHostBootstrapError::new(
+                    "remote relay serve did not open its admin socket within 10s (see /tmp/waitagent-relay-7475.log on the remote host)",
+                ));
+            }
+        }
+        let invite = format!("waitagent relay invite --listen {listen} --deploy");
+        let output = self.run_ssh_output(plan, &invite, false)?;
+        if output.status != 0 {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "remote relay invite failed with status {}{}",
+                output.status,
+                stderr_summary(&output.stderr)
+            )));
+        }
+        let token = parse_relay_invite_token(&output.stdout).ok_or_else(|| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            RemoteHostBootstrapError::new(format!(
+                "remote relay invite did not print a `token:` line; stdout: {stdout}"
+            ))
+        })?;
+        // Enroll the remote host's own node at its loopback relay so the
+        // relay's whitelist (and presence) covers it before the local join.
+        let remote_join = format!(
+            "waitagent relay join 127.0.0.1:{RELAY_ROLE_PORT} {}",
+            shell_single_quote(&token)
+        );
+        self.run_ssh_command(plan, &remote_join, false)?;
+        Ok(RemoteRelayJoinRequest {
+            address: format!("{}:{RELAY_ROLE_PORT}", plan.host),
+            token,
+        })
+    }
+
     fn remote_waitagent_is_current(
         &self,
         plan: &RemoteHostBootstrapPlan,
@@ -663,6 +786,14 @@ where
                 allow_sudo,
             )?;
         }
+        // Relay role (issue #180): deploy the remote relay BEFORE the node
+        // server starts below so the remote node links to the relay at
+        // startup. The local join request travels with the bootstrap result.
+        let relay_join = if plan.relay_role {
+            Some(self.ensure_remote_relay_and_build_join_request(plan)?)
+        } else {
+            None
+        };
         // The credentials/start commands reference the explicit install path
         // instead of relying on the remote PATH (the $HOME fallback dir is
         // not necessarily on it for non-interactive exec sessions).
@@ -679,6 +810,7 @@ where
         Ok(RemoteHostBootstrapResult {
             tls_pin_sha256,
             remote_port,
+            relay_join,
         })
     }
 
@@ -2984,6 +3116,162 @@ mod tests {
                 .any(|(_, command, _)| command.starts_with("cat > ")
                     || command.contains("base64 -d")),
             "nothing may be uploaded without a cached artifact"
+        );
+    }
+
+    #[test]
+    fn parse_relay_invite_token_extracts_the_token_line() {
+        let stdout = b"token: abc-123-DEPLOY\nexpires_at: 1893456000\nkind: deploy invite token\n(clipboard unavailable, copy the token manually)\n";
+        assert_eq!(
+            parse_relay_invite_token(stdout).as_deref(),
+            Some("abc-123-DEPLOY")
+        );
+        assert!(parse_relay_invite_token(b"no token here").is_none());
+        assert!(parse_relay_invite_token(b"token:   \n").is_none());
+        assert!(parse_relay_invite_token(b"").is_none());
+    }
+
+    #[test]
+    fn relay_role_deploys_serve_invite_and_remote_enroll() {
+        let cache = prime_artifact_cache();
+        let mut plan = upload_plan();
+        plan.relay_role = true;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // Pop order: start, daemon check (not running), credentials, remote
+        // self-join, invite, socket probe (verify up), serve start, socket
+        // probe (not serving), upload install, chunk, upload version check,
+        // uname probe, mkdir.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(vec![
+                    ("uname -s".to_string(), "Linux\nx86_64\n0\n".to_string()),
+                    (
+                        "relay invite".to_string(),
+                        "token: e2e-deploy-token\nexpires_at: 1893456000\nkind: deploy invite token\n".to_string(),
+                    ),
+                ])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+
+        let request = result
+            .relay_join
+            .expect("a relay-role connect must produce a local join request");
+        assert_eq!(request.address, "10.1.29.130:7475");
+        assert_eq!(request.token, "e2e-deploy-token");
+        let calls = calls.borrow();
+        let serve_starts = calls
+            .iter()
+            .filter(|(_, command, _)| command.contains("relay serve --listen 0.0.0.0:7475"))
+            .count();
+        assert_eq!(serve_starts, 1, "exactly one serve start: {calls:?}");
+        assert!(
+            calls.iter().any(|(_, command, _)| {
+                command.contains("test -S")
+                    && command.contains("waitagent-relay-admin-0_0_0_0_7475.sock")
+            }),
+            "the admin socket probe must run: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|(_, command, _)| command
+                    .contains("relay invite --listen 0.0.0.0:7475 --deploy")),
+            "a deploy token must be requested: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|(_, command, _)| {
+                command.contains("relay join 127.0.0.1:7475 'e2e-deploy-token'")
+            }),
+            "the remote's own node must enroll at the loopback relay: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn relay_role_reconnect_skips_serve_when_admin_socket_exists() {
+        let cache = prime_artifact_cache();
+        let mut plan = upload_plan();
+        plan.relay_role = true;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // The socket probe answers 0 (already serving): no serve start.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(vec![
+                    ("uname -s".to_string(), "Linux\nx86_64\n0\n".to_string()),
+                    (
+                        "relay invite".to_string(),
+                        "token: reconnect-token\n".to_string(),
+                    ),
+                ])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+
+        assert_eq!(
+            result.relay_join.expect("join request").token,
+            "reconnect-token"
+        );
+        let calls = calls.borrow();
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, command, _)| command.contains("relay serve --listen")),
+            "a running relay must not be started twice: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn relay_role_rejects_windows_explicitly() {
+        let cache = prime_artifact_cache();
+        let mut plan = remote_download_plan();
+        plan.relay_role = true;
+        plan.remote_shell = RemoteShellKind::Windows;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // Remote-download flow on Windows: mkdir, version check (not
+        // current), reachability preflight, install command succeed; the
+        // relay-role step then refuses with the typed Windows error before
+        // any relay exec.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let error = bootstrapper.ensure_waitagent_and_start(&plan).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("relay role is not supported for Windows remote hosts"),
+            "typed, explicit error: {error}"
+        );
+        let calls = calls.borrow();
+        assert!(
+            !calls.iter().any(|(_, command, _)| {
+                command.contains("relay serve") || command.contains("relay invite")
+            }),
+            "no relay exec may run on Windows: {calls:?}"
         );
     }
 

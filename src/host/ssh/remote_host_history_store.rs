@@ -152,6 +152,12 @@ pub struct RemoteHostProfile {
     /// install or upgrade. Absent in profiles written before issue #168 and
     /// loads as `RemoteDownload`, the historical remote-download behavior.
     pub install_source: InstallSource,
+    /// When true, connecting this host also deploys it as the active relay:
+    /// `waitagent relay serve` on the remote (idempotent), an invite token,
+    /// enrollment of the remote's own node, and a local `relay join` driven
+    /// by the state event loop (issue #180). Absent in older profiles and
+    /// loads as `false`.
+    pub relay_role: bool,
 }
 
 impl RemoteHostProfile {
@@ -374,6 +380,7 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
             "install_source = \"{}\"\n",
             host.install_source.as_str()
         ));
+        out.push_str(&format!("relay_role = {}\n", host.relay_role));
         out.push('\n');
     }
     out
@@ -450,6 +457,7 @@ struct RawProfile {
     via: Option<String>,
     last_via_used: Option<String>,
     install_source: Option<String>,
+    relay_role: Option<String>,
 }
 
 impl RawProfile {
@@ -474,6 +482,7 @@ impl RawProfile {
             "via" => self.via = Some(value),
             "last_via_used" => self.last_via_used = Some(value),
             "install_source" => self.install_source = Some(value),
+            "relay_role" => self.relay_role = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -519,6 +528,7 @@ impl RawProfile {
             via: parse_via(self.via)?,
             last_via_used: parse_last_via_used(self.last_via_used)?,
             install_source: parse_install_source(self.install_source)?,
+            relay_role: parse_relay_role(self.relay_role)?,
         })
     }
 }
@@ -636,6 +646,12 @@ fn parse_install_source(
     value
         .parse::<InstallSource>()
         .map_err(RemoteHostHistoryStoreError::new)
+}
+
+/// Loads the relay-role flag. Profiles written before issue #180 have no
+/// `relay_role` key and load as `false` (a plain connectable host).
+fn parse_relay_role(value: Option<String>) -> Result<bool, RemoteHostHistoryStoreError> {
+    Ok(optional_bool(value, "relay_role")?.unwrap_or(false))
 }
 
 /// Validates the `via` dial-path key: `auto` (also the absent default),
@@ -861,6 +877,7 @@ mod tests {
                 via: None,
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
+                relay_role: false,
             })
             .unwrap();
         store
@@ -884,6 +901,7 @@ mod tests {
                 via: None,
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
+                relay_role: false,
             })
             .unwrap();
 
@@ -926,6 +944,7 @@ mod tests {
                 via: None,
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
+                relay_role: false,
             })
             .unwrap();
 
@@ -1220,6 +1239,82 @@ host_kind = "lan"
             InstallSource::RemoteDownload,
             "profiles written before issue #168 keep the remote-download behavior"
         );
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_relay_role() {
+        let path = unique_path("remote-hosts-relay-role.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        let mut relay = profile("relay", "10.1.29.160");
+        relay.relay_role = true;
+        store.upsert_profile(relay).unwrap();
+        store
+            .upsert_profile(profile("plain", "10.1.29.161"))
+            .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("relay_role = true"));
+        assert!(content.contains("relay_role = false"));
+
+        let loaded = store.load().unwrap();
+        let relay = loaded.hosts.iter().find(|h| h.name == "relay").unwrap();
+        let plain = loaded.hosts.iter().find(|h| h.name == "plain").unwrap();
+        assert!(relay.relay_role);
+        assert!(!plain.relay_role);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_without_relay_role_field_loads_as_false() {
+        let path = unique_path("remote-hosts-legacy-no-relay-role.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "legacy"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+"#,
+        )
+        .unwrap();
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+
+        assert_eq!(loaded.hosts.len(), 1);
+        assert!(!loaded.hosts[0].relay_role);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_rejects_a_non_boolean_relay_role() {
+        let path = unique_path("remote-hosts-bad-relay-role.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "typo"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+relay_role = maybe
+"#,
+        )
+        .unwrap();
+
+        let error = RemoteHostHistoryStore::new(&path)
+            .load()
+            .expect_err("a non-boolean relay_role must fail the load");
+        assert!(error.to_string().contains("`relay_role`"));
 
         crate::infra::best_effort::remove_file(path);
     }

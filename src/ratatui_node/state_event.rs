@@ -1,4 +1,5 @@
 use super::logical_key::LogicalKey;
+use crate::host::ssh::ssh_remote_host_bootstrapper::RemoteRelayJoinRequest;
 use crate::ratatui_node::runtime::RemoteNodeConnectionInfo;
 use std::sync::Arc;
 
@@ -16,6 +17,9 @@ pub(crate) struct RemoteHostConnectedOutcome {
     /// message names the discovery so the operator sees where the pin
     /// came from.
     pub pin_auto_discovered: bool,
+    /// Issue #180: a relay-role connect produced this pending local relay
+    /// join; the state loop drives it after applying the connect outcome.
+    pub relay_join: Option<RemoteRelayJoinRequest>,
 }
 
 /// Events that converge on `StateEventLoop`, the single writer of `SharedState`.
@@ -192,6 +196,11 @@ pub(crate) enum StateEvent {
         profile_name: String,
         result: Box<Result<RemoteHostConnectedOutcome, String>>,
         activate: bool,
+        /// Issue #180: a relay-role bootstrap's pending local relay join.
+        /// The state loop applies the connect outcome first and then drives
+        /// the join through `run_relay_join` (single-writer rule: the
+        /// connect worker thread never mutates relay/pin state).
+        relay_join: Option<RemoteRelayJoinRequest>,
     },
     /// The asynchronous remote session creation operation finished. The state
     /// loop applies catalog/active-target mutations and reports success or error
