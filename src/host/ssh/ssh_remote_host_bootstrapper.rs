@@ -1,5 +1,5 @@
 use crate::host::ssh::local_artifact_cache::{
-    ArtifactTarget, LocalArtifactCache, UreqArtifactFetcher,
+    ArtifactTarget, CurlArtifactFetcher, LocalArtifactCache,
 };
 use crate::host::ssh::remote_host_history_store::{
     InstallSource, RemoteHostAuthProfile, RemoteHostProfile,
@@ -563,13 +563,17 @@ where
         };
         let bin_path = format!("{install_dir}/waitagent");
         if !self.upload_waitagent_is_current(plan, &bin_path)? {
+            // Loaded per connect so proxy edits take effect without a node
+            // restart; a malformed store fails the connect with a clear
+            // message instead of silently downloading direct.
+            let fetcher = CurlArtifactFetcher::from_default_store().map_err(|error| {
+                RemoteHostBootstrapError::new(format!(
+                    "local download proxy configuration failed to load: {error}"
+                ))
+            })?;
             let artifact = self
                 .artifact_cache
-                .ensure_artifact(
-                    detection.target,
-                    env!("CARGO_PKG_VERSION"),
-                    &UreqArtifactFetcher,
-                )
+                .ensure_artifact(detection.target, env!("CARGO_PKG_VERSION"), &fetcher)
                 .map_err(|error| {
                     RemoteHostBootstrapError::new(format!(
                         "failed to prepare the local waitagent artifact for upload: {error}"

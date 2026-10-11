@@ -1,0 +1,15 @@
+# Runtime stage for the ssh-install e2e (issue #172): the control node's
+# Upload install path downloads artifacts through a curl subprocess, so the
+# node image needs curl + CA certificates on top of the plain runtime image
+# the relay harness uses (scripts/e2e/relay/Dockerfile.runtime is left
+# untouched). The orchestrator stages a prebuilt host binary next to this
+# file as `waitagent` and builds with the staged directory as the context.
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY waitagent /usr/local/bin/waitagent

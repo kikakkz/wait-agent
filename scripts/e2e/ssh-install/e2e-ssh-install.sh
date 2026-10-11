@@ -13,11 +13,20 @@
 #                   1. connect bootstraps the remote host end to end: arch
 #                      detection exec, cached-artifact upload (base64 chunks
 #                      over SSH exec), remote install into /usr/local/bin,
-#                      credentials, daemon start, online session row;
+#                      credentials, daemon start, online session row —
+#                      with a local-download-proxy.toml present (issue #172)
+#                      that must not disturb the cache-hit path;
 #                   2. cache hit: after killing the remote daemon and
 #                      deleting the remote binary, a second connect installs
 #                      again WITHOUT re-downloading — asserted via the local
-#                      artifact mtime.
+#                      artifact mtime;
+#                   3. local download proxy: with the artifact removed (cache
+#                      miss) the download must go through the configured
+#                      proxy — a bogus 127.0.0.1:1 proxy makes the connect
+#                      fail with that address in the error, proving the
+#                      config reached curl, for all_proxy and https_proxy;
+#                      removing the config and re-priming the cache restores
+#                      a successful connect (control).
 #
 # Images: WA_E2E_BINARY stages the prebuilt host binary into the runtime
 # image via scripts/e2e/relay/Dockerfile.runtime (same as the relay harness);
@@ -67,10 +76,17 @@ build_images() {
     if [ -n "${WA_E2E_BINARY:-}" ]; then
         [ -f "$WA_E2E_BINARY" ] || die "WA_E2E_BINARY not found: $WA_E2E_BINARY"
         cp "$WA_E2E_BINARY" "$STAGE/waitagent"
-        docker build -q -f "$SCRIPT_DIR/../relay/Dockerfile.runtime" -t "$IMAGE" "$STAGE" >/dev/null
+        # This scenario's runtime stage adds curl (the #172 download path
+        # shells out to it); the relay harness's plainer stage stays as-is.
+        docker build -q -f "$SCRIPT_DIR/Dockerfile.runtime" -t "$IMAGE" "$STAGE" >/dev/null
     else
         log "building $IMAGE (in-docker release build; set WA_E2E_BINARY to skip)"
         docker build -q -f "$SCRIPT_DIR/../relay/Dockerfile" -t "$IMAGE" "$REPO_ROOT" >/dev/null
+        log "adding curl to $IMAGE for the local download proxy scenario"
+        extract=$(docker create "$IMAGE")
+        docker cp "$extract:/usr/local/bin/waitagent" "$STAGE/waitagent" >/dev/null
+        docker rm "$extract" >/dev/null
+        docker build -q -f "$SCRIPT_DIR/Dockerfile.runtime" -t "$IMAGE" "$STAGE" >/dev/null
     fi
     docker build -q -f "$SCRIPT_DIR/Dockerfile.sshd" -t "$SSHD_IMAGE" "$SCRIPT_DIR" >/dev/null
 }
@@ -164,12 +180,30 @@ EOF
     WA_VERSION=$(docker exec "$NODE" waitagent --version | awk 'NR==1 {print $2}')
     [ -n "$WA_VERSION" ] || die "could not read the node version"
     log "priming the artifact cache with waitagent $WA_VERSION (x86_64-linux)"
+    prime_local_artifact_cache
+
+    log "seeding local-download-proxy.toml (issue #172: present config must not disturb cache hits)"
+    seed_local_download_proxy 'all_proxy = "http://127.0.0.1:1"' \
+        'https_proxy = "http://127.0.0.1:1"'
+}
+
+prime_local_artifact_cache() {
     docker exec "$NODE" sh -c "
         set -e
+        mkdir -p /root/.waitagent/cache
         tar czf /root/.waitagent/cache/waitagent-$WA_VERSION-x86_64-linux.tar.gz -C /usr/local/bin waitagent
         cd /root/.waitagent/cache
         sha256sum waitagent-$WA_VERSION-x86_64-linux.tar.gz > waitagent-$WA_VERSION-x86_64-linux.tar.gz.sha256
     "
+}
+
+seed_local_download_proxy() {
+    # One key = "value" line per argument, hand-rolled TOML subset.
+    {
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+    } | docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/local-download-proxy.toml'
 }
 
 assert_remote_binary() {
@@ -202,12 +236,9 @@ scenario_installsource() {
     log "phase 1 OK: artifact uploaded over SSH, installed, daemon online"
 
     log "phase 2: second connect must reuse the cache (no re-download)"
-    # Force a fresh install: kill the daemon (defeats the reuse fast path)
-    # and delete the binary (defeats the version gate). The artifact mtime
-    # before/after proves the local cache satisfied the miss. The bracket
-    # pattern keeps pkill from matching its own sh -c command line.
-    docker exec "$SSH_HOST" sh -c 'pkill -f "[r]atatui-node-server"; rm -f /usr/local/bin/waitagent'
-    sleep 1
+    # The artifact mtime before/after proves the local cache satisfied the
+    # forced re-install.
+    force_remote_reinstall
 
     local before after
     before=$(docker exec "$NODE" stat -c %y "$artifact")
@@ -223,6 +254,50 @@ scenario_installsource() {
     [ "$before" = "$after" ] \
         || die "artifact was re-downloaded on a cache hit (mtime $before -> $after)"
     log "phase 2 OK: second install reused the cached artifact (mtime unchanged: $after)"
+
+    log "phase 3: local download proxy config reaches curl (issue #172)"
+    # A cache miss on the internal network cannot reach github.com either
+    # way, so the discriminator is the error text: with the proxy honored,
+    # curl reports the configured 127.0.0.1:1 endpoint; a config that never
+    # reached curl would fail with a DNS error for github.com instead.
+    force_remote_reinstall
+    docker exec "$NODE" rm -f "$artifact" "$artifact.sha256"
+    assert_proxied_download_fails 'all_proxy = "http://127.0.0.1:1"'
+    assert_proxied_download_fails 'https_proxy = "http://127.0.0.1:1"'
+
+    log "control: without the proxy config and with the cache re-primed, the connect succeeds again"
+    force_remote_reinstall
+    docker exec "$NODE" rm -f /root/.waitagent/local-download-proxy.toml
+    prime_local_artifact_cache
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "control CONNECT_REMOTE_HOST was not accepted: $connect_out"
+    row=$(wait_for_online_remote_row "ssh-host#") \
+        || die "no online remote session row after the proxy-control connect"
+    log "online remote row: $row"
+    log "phase 3 OK: proxy config provably reached curl; direct path restored"
+}
+
+force_remote_reinstall() {
+    # Defeat the reuse fast path (dead daemon) and the version gate (no
+    # binary) so the connect reaches the artifact download. The bracket
+    # pattern keeps pkill from matching its own sh -c command line.
+    docker exec "$SSH_HOST" sh -c 'pkill -f "[r]atatui-node-server"; rm -f /usr/local/bin/waitagent'
+    sleep 1
+}
+
+assert_proxied_download_fails() {
+    seed_local_download_proxy "$@"
+    local connect_out message
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == false' <<<"$connect_out" >/dev/null \
+        || die "proxied CONNECT_REMOTE_HOST should fail: $connect_out"
+    message=$(jq -r '.payload.message' <<<"$connect_out")
+    grep -q '127.0.0.1' <<<"$message" \
+        || die "the download error must name the configured proxy (got: $message)"
+    grep -q 'port 1' <<<"$message" \
+        || die "the download error must name the configured proxy port (got: $message)"
+    log "proxied download failed through the configured proxy as expected ($1)"
 }
 
 scenario=${1:-installsource}

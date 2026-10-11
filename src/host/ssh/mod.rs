@@ -1,5 +1,6 @@
 pub mod connect_remote_host_pane_runtime;
 pub mod local_artifact_cache;
+pub mod local_download_proxy_toml_store;
 pub mod outbound_connection_snapshot_store;
 pub mod remote_host_connect_runtime;
 pub mod remote_host_history_store;

@@ -1,4 +1,6 @@
-//! Local cache for waitagent release artifacts (issue #168).
+//! Local cache for waitagent release artifacts (issue #168; the download
+//! itself is a curl subprocess honoring the local download proxy config,
+//! issue #172).
 //!
 //! When a saved host profile sets `install_source = "upload"`, this machine
 //! — not the remote host — downloads the release artifact and uploads it to
@@ -6,6 +8,11 @@
 //! `~/.waitagent/cache/` and stores one artifact plus a `.sha256` sidecar
 //! per (target triple, version) pair, named exactly like the published
 //! release asset (`waitagent-<version>-<target>.tar.gz`).
+//!
+//! Downloads run through `curl` (the engine `scripts/install.sh` uses) with
+//! the `all_proxy`/`https_proxy` URLs from
+//! `local_download_proxy_toml_store` injected as environment variables;
+//! curl applies them natively alongside any operator-exported `no_proxy`.
 //!
 //! Trust model: GitHub releases publish no checksum assets, so a first
 //! download has no upstream digest to compare against. The freshly
@@ -25,11 +32,15 @@
 //! No locks are involved and none may be added without documenting the
 //! lock order (m07-concurrency).
 
+use crate::host::ssh::local_download_proxy_toml_store::{
+    LocalDownloadProxyConfig, LocalDownloadProxyStoreError,
+};
 use crate::host::ssh::remote_host_home::waitagent_home;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Release download base; mirrors `REPO` in `scripts/install.sh`.
 const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/kikakkz/wait-agent/releases/download";
@@ -113,6 +124,8 @@ pub enum LocalArtifactError {
     Io(io::Error),
     /// The requested version is not a sane release version string.
     InvalidVersion(String),
+    /// The local download proxy config could not be read.
+    ProxyStore(LocalDownloadProxyStoreError),
 }
 
 impl fmt::Display for LocalArtifactError {
@@ -135,6 +148,9 @@ impl fmt::Display for LocalArtifactError {
             Self::InvalidVersion(version) => {
                 write!(f, "invalid release version `{version}`")
             }
+            Self::ProxyStore(error) => {
+                write!(f, "local download proxy config is invalid: {error}")
+            }
         }
     }
 }
@@ -147,26 +163,96 @@ pub trait ArtifactFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, LocalArtifactError>;
 }
 
-/// Production fetcher: plain HTTPS via `ureq` (rustls), matching the
-/// existing MSYS2 provisioning download in `src/platform/msys_env.rs`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UreqArtifactFetcher;
+/// Production fetcher (issue #172): a `curl` subprocess, the same download
+/// engine `scripts/install.sh` uses on hosts. The local download proxy
+/// config (`~/.waitagent/local-download-proxy.toml`) is loaded per connect
+/// and injected as `all_proxy`/`https_proxy` environment variables, which
+/// curl honors natively along with any operator-exported `no_proxy`.
+#[derive(Debug, Clone, Default)]
+pub struct CurlArtifactFetcher {
+    proxy: LocalDownloadProxyConfig,
+}
 
-impl ArtifactFetcher for UreqArtifactFetcher {
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, LocalArtifactError> {
-        let response = ureq::get(url)
-            .call()
+impl CurlArtifactFetcher {
+    /// Production: load the proxy config from the default store path. A
+    /// missing file means a direct connection; a malformed file surfaces as
+    /// an error so a typo cannot silently bypass the configured proxy.
+    pub fn from_default_store() -> Result<Self, LocalArtifactError> {
+        Self::from_store_path(&LocalDownloadProxyConfig::default_path())
+    }
+
+    /// Loads the proxy config from `store_path` (test seam included).
+    pub fn from_store_path(store_path: &Path) -> Result<Self, LocalArtifactError> {
+        let proxy = LocalDownloadProxyConfig::load(store_path)
+            .map_err(LocalArtifactError::ProxyStore)?
+            .unwrap_or_default();
+        Ok(Self { proxy })
+    }
+
+    /// Direct-connection fetcher (no proxy config consulted).
+    #[cfg(test)]
+    fn direct() -> Self {
+        Self {
+            proxy: LocalDownloadProxyConfig::default(),
+        }
+    }
+
+    fn run_curl(
+        &self,
+        url: &str,
+        proxy: &LocalDownloadProxyConfig,
+    ) -> Result<Vec<u8>, LocalArtifactError> {
+        // Flag set mirrors scripts/install.sh: fail on HTTP errors, follow
+        // redirects, silent progress; bound only the connection setup, then
+        // abort if the transfer stalls (<1 KB/s for 60s).
+        let mut command = Command::new("curl");
+        command
+            .arg("-fsSL")
+            .arg("--connect-timeout")
+            .arg("30")
+            .arg("--speed-limit")
+            .arg("1024")
+            .arg("--speed-time")
+            .arg("60")
+            .arg(url);
+        for (key, value) in proxy.env_assignments() {
+            command.env(key, value);
+        }
+        let output = command
+            .output()
             .map_err(|error| LocalArtifactError::Download {
                 url: url.to_string(),
-                attempts: vec![format!("http request failed: {error}")],
+                attempts: vec![format!("failed to spawn curl: {error}")],
             })?;
-        response
-            .into_body()
-            .read_to_vec()
-            .map_err(|error| LocalArtifactError::Download {
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            let detail = if stderr.len() > 400 {
+                format!("{}…", &stderr[..400])
+            } else {
+                stderr.to_string()
+            };
+            Err(LocalArtifactError::Download {
                 url: url.to_string(),
-                attempts: vec![format!("reading response body failed: {error}")],
+                attempts: vec![format!(
+                    "curl exited with {}: {}",
+                    output.status,
+                    if detail.is_empty() {
+                        "no stderr output"
+                    } else {
+                        detail.as_str()
+                    }
+                )],
             })
+        }
+    }
+}
+
+impl ArtifactFetcher for CurlArtifactFetcher {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, LocalArtifactError> {
+        self.run_curl(url, &self.proxy)
     }
 }
 
@@ -597,5 +683,86 @@ mod tests {
         assert!(validate_version("1.0.0-rc.1").is_ok());
         assert!(validate_version("").is_err());
         assert!(validate_version("0.1/90").is_err());
+    }
+
+    #[test]
+    fn curl_fetcher_reads_a_file_url_offline() {
+        // file:// exercises the real curl invocation (spawn, flags, stdout
+        // capture) without any network access.
+        let path = cache_dir("curl-file-fixture").join("payload.bin");
+        std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+        let payload = sample_artifact();
+        std::fs::write(&path, &payload).unwrap();
+
+        let fetcher = CurlArtifactFetcher::direct();
+        let data = fetcher
+            .fetch(&format!("file://{}", path.display()))
+            .expect("file fetch should succeed");
+
+        assert_eq!(data, payload);
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn curl_fetcher_surfaces_curl_failures() {
+        let fetcher = CurlArtifactFetcher::direct();
+        let url = "file:///definitely/missing/waitagent.tar.gz".to_string();
+
+        let error = fetcher.fetch(&url).unwrap_err();
+
+        match error {
+            LocalArtifactError::Download {
+                url: failed,
+                attempts,
+            } => {
+                assert_eq!(failed, url);
+                assert!(
+                    attempts[0].contains("curl exited with"),
+                    "the curl exit must be explained: {}",
+                    attempts[0]
+                );
+            }
+            other => panic!("expected a download error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn curl_fetcher_loads_proxy_store_per_construction() {
+        // Missing store file → direct connection.
+        let missing = cache_dir("curl-proxy-missing").join("local-download-proxy.toml");
+        let fetcher = CurlArtifactFetcher::from_store_path(&missing)
+            .expect("a missing store means direct connection");
+        assert!(!fetcher.proxy.has_proxy());
+
+        // Malformed store file → typed error (no silent direct fallback).
+        let malformed = cache_dir("curl-proxy-malformed").join("local-download-proxy.toml");
+        std::fs::create_dir_all(malformed.parent().expect("parent")).unwrap();
+        std::fs::write(&malformed, "all_proxy = \"x\"\nsurprise = 1\n").unwrap();
+        let error = CurlArtifactFetcher::from_store_path(&malformed).unwrap_err();
+        assert!(
+            matches!(error, LocalArtifactError::ProxyStore(_)),
+            "a malformed store must not silently bypass the proxy: {error}"
+        );
+
+        // Configured store → the fetcher carries the proxy into downloads.
+        let configured = cache_dir("curl-proxy-configured").join("local-download-proxy.toml");
+        std::fs::create_dir_all(configured.parent().expect("parent")).unwrap();
+        std::fs::write(
+            &configured,
+            "all_proxy = \"socks5://127.0.0.1:7897\"\nhttps_proxy = \"http://127.0.0.1:7890\"\n",
+        )
+        .unwrap();
+        let fetcher =
+            CurlArtifactFetcher::from_store_path(&configured).expect("a valid store loads");
+        assert_eq!(
+            fetcher.proxy.env_assignments(),
+            vec![
+                ("all_proxy", "socks5://127.0.0.1:7897".to_string()),
+                ("https_proxy", "http://127.0.0.1:7890".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(cache_dir("curl-proxy-missing"));
+        let _ = std::fs::remove_dir_all(cache_dir("curl-proxy-malformed"));
+        let _ = std::fs::remove_dir_all(cache_dir("curl-proxy-configured"));
     }
 }
