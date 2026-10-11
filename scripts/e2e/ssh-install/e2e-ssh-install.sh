@@ -41,7 +41,18 @@
 #                      self-enrollment), pins the local node to host:7475, and
 #                      brings both nodes online at the relay admin; a forced
 #                      second connect reuses the running relay (exactly one
-#                      serve process) without whiplashing the pin.
+#                      serve process) without whiplashing the pin;
+#                   7. Cloud inbound registration (issue #192 direction 1):
+#                      with the authority's advertised endpoint set to the
+#                      guaranteed-unroutable TEST-NET-1 address 192.0.2.1:7474
+#                      (WSL/NAT stand-in), a Cloud profile via=direct still
+#                      connects - the authority dials the remote ingress to
+#                      register, the remote node starts without --connect;
+#                   8. Cloud back-dial fallback (issue #192 direction 1): with
+#                      inbound to the remote node port dropped (iptables) but
+#                      the advertised endpoint reachable, the publish wait
+#                      times out and the remote restarts with --connect,
+#                      registering by dialing the authority itself.
 #
 # Images: WA_E2E_BINARY stages the prebuilt host binary into the runtime
 # image via scripts/e2e/relay/Dockerfile.runtime (same as the relay harness);
@@ -408,6 +419,56 @@ PROFEOF
     docker exec "$NODE" sh -c 'grep -q "address = \"ssh-host:7475\"" /root/.waitagent/relay.toml' \
         || die "the reconnect must not whiplash the relay pin"
     log "phase 6 OK: one serve process, pin stable, host online"
+
+    log "phase 7: Cloud via=direct registers with an unroutable advertised endpoint (issue #192)"
+    # TEST-NET-1 (RFC 5737) is guaranteed unroutable: any flow that needs the
+    # remote to reach the authority's advertised endpoint must fail, so a
+    # full success proves the authority dials the remote to register.
+    node_command "SET_PUBLIC 192.0.2.1:7474" >/dev/null         || die "SET_PUBLIC 192.0.2.1:7474 was not accepted"
+    docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/remote-hosts.toml' <<PROFEOF
+[[hosts]]
+name = "ssh-host"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = "auto"
+use_install_proxy = false
+host_kind = "cloud"
+via = "direct"
+install_source = "upload"
+PROFEOF
+    prime_local_artifact_cache
+    force_remote_reinstall
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null         || die "Cloud via=direct connect failed: $connect_out"
+    row=$(wait_for_online_remote_row "ssh-host#")         || die "no online remote session row for the Cloud inbound registration"
+    log "online remote row: $row"
+    docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port" | grep -q -- "--connect"         && die "the remote node must not back-dial when the authority registers inbound"
+    log "phase 7 OK: authority-side registration needs no inbound reachability"
+
+    log "phase 8: blocked inbound falls back to remote back-dial registration (issue #192)"
+    # Make the advertised endpoint REAL (the control node's docker address) so
+    # the fallback direction is reachable, then drop authority->node traffic
+    # on the node port. External interfaces only: loopback probes on the
+    # remote keep working.
+    local node_ip
+    node_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NODE")
+    [ -n "$node_ip" ] || die "could not resolve the control node container address"
+    node_command "SET_PUBLIC $node_ip:9001" >/dev/null         || die "SET_PUBLIC $node_ip:9001 was not accepted"
+    docker exec "$SSH_HOST" iptables -A INPUT -i eth+ -p tcp --dport 7474 -j DROP
+    force_remote_reinstall
+    # Fire the connect and poll for its outcome: the primary publish wait
+    # alone is 60s (the dial to the dropped port hangs) plus bootstrap and
+    # the fallback restart exceed __node-command's hardcoded 60s response
+    # window, while the connect itself keeps running server-side regardless.
+    node_command "CONNECT_REMOTE_HOST ssh-host" &
+    local connect_pid=$!
+    row=$(wait_for_online_remote_row "ssh-host#")         || die "no online remote session row after the back-dial fallback"
+    log "online remote row: $row"
+    wait "$connect_pid" || true
+    docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port" | grep -q -- "--connect $node_ip:9001"         || die "the remote node must carry the --connect fallback argument"
+    log "phase 8 OK: publish-timeout fallback restarted the remote in back-dial mode"
 }
 
 count_fallback_markers() {

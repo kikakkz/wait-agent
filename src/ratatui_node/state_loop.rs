@@ -2210,7 +2210,7 @@ fn perform_remote_host_connect(
         direct_profile: None,
         save_profile_name: None,
         replace_profile_name: None,
-        local_connect_endpoint: shared.network.advertised_public_endpoint_label(),
+        local_connect_endpoint: shared.advertised_public_endpoint_label(),
         cwd_hint: None,
         use_install_proxy: true,
     };

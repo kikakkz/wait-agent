@@ -117,6 +117,11 @@ pub struct RemoteHostConnectRuntime<H, P, B> {
     /// inject a deterministic resolver so the connect flow can be exercised
     /// without sockets.
     via_resolver: Option<ViaResolver>,
+    /// Issue #192: how long the publish wait runs before the Cloud-host
+    /// back-dial fallback kicks in. Tests shrink it via
+    /// [`Self::with_publish_timeout`]; production keeps
+    /// [`DEFAULT_ENDPOINT_WAIT_TIMEOUT`].
+    publish_timeout: Duration,
     /// Fingerprint auto-discovery for pin-less relay/auto profiles (issue
     /// #156 slice 3): maps the profile host to the peer's certificate
     /// fingerprint through the pinned relay's `resolve-node` admin request.
@@ -200,7 +205,20 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
             auth_rejection: None,
             via_resolver: None,
             fingerprint_discoverer: None,
+            publish_timeout: DEFAULT_ENDPOINT_WAIT_TIMEOUT,
         }
+    }
+
+    fn publish_wait_timeout(&self) -> Duration {
+        self.publish_timeout
+    }
+
+    /// Shrink the publish wait so fallback tests don't burn the production
+    /// 60-second timeout (issue #192).
+    #[cfg(test)]
+    pub fn with_publish_timeout(mut self, timeout: Duration) -> Self {
+        self.publish_timeout = timeout;
+        self
     }
 
     /// Install a checker that reports operator-auth rejections per node id
@@ -508,12 +526,48 @@ where
         initiate_outbound_dial(outbound_request)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
-        let default_target = self.wait_for_first_online_target(
+        let default_target = match self.wait_for_first_online_target(
             &authority_node_id,
             DEFAULT_ENDPOINT_POLL_INTERVAL,
-            DEFAULT_ENDPOINT_WAIT_TIMEOUT,
+            self.publish_wait_timeout(),
             self.auth_rejection.as_ref(),
-        )?;
+            &request.local_connect_endpoint,
+            port.port,
+        ) {
+            Ok(target) => target,
+            Err(wait_error) => {
+                // Issue #192 direction 1: Cloud profiles whose via allows a
+                // direct dial get one registration retry in the opposite
+                // direction — the remote restarts with `--connect` and
+                // registers by dialing the authority itself. LAN profiles
+                // keep the historical single-attempt behavior unchanged.
+                if profile.host_kind != RemoteHostKind::Cloud
+                    || profile.via() == RemoteNodeVia::Relay
+                {
+                    return Err(wait_error);
+                }
+                ERROR_LOG.log(format!(
+                    "[remote-host-connect] authority-side registration for {}#{} did not publish a target; falling back to remote back-dial registration: {wait_error}",
+                    profile.host, port.port
+                ));
+                self.bootstrapper
+                    .restart_for_back_dial_registration(&plan)
+                    .map_err(|error| {
+                        LifecycleError::Protocol(format!(
+                            "{wait_error}; back-dial registration fallback failed: {}",
+                            error.to_string()
+                        ))
+                    })?;
+                self.wait_for_first_online_target(
+                    &authority_node_id,
+                    DEFAULT_ENDPOINT_POLL_INTERVAL,
+                    self.publish_wait_timeout(),
+                    self.auth_rejection.as_ref(),
+                    &request.local_connect_endpoint,
+                    port.port,
+                )?
+            }
+        };
         // The dial worked: for an `auto` profile remember which concrete
         // path took effect, without rewriting the user's choice.
         if profile.via() == RemoteNodeVia::Auto {
@@ -582,7 +636,8 @@ where
     fn try_reuse_existing_connection(
         &self,
         profile: &RemoteHostProfile,
-        _request: &RemoteHostConnectRequest,
+        request: &RemoteHostConnectRequest,
+
         initiate_outbound_dial: &mut impl FnMut(OutboundNodeSessionRequest) -> Result<(), String>,
     ) -> Result<Option<RemoteHostConnectOutcome>, LifecycleError> {
         let Some(port) = profile.last_remote_port else {
@@ -625,6 +680,8 @@ where
             DEFAULT_ENDPOINT_POLL_INTERVAL,
             REUSE_CONNECTION_WAIT_TIMEOUT,
             self.auth_rejection.as_ref(),
+            &request.local_connect_endpoint,
+            profile.last_remote_port.unwrap_or_default(),
         ) {
             Ok(target) => Ok(Some(RemoteHostConnectOutcome {
                 authority_node_id,
@@ -712,6 +769,8 @@ where
         poll_interval: Duration,
         timeout: Duration,
         auth_check: Option<&AuthRejectionChecker>,
+        advertised_endpoint: &str,
+        remote_port: u16,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
         let expected = expected.to_string();
         let deadline = Instant::now() + timeout;
@@ -735,7 +794,7 @@ where
             }
             if Instant::now() >= deadline {
                 return Err(LifecycleError::Protocol(format!(
-                    "timed out after {}s waiting for remote WaitAgent `{expected}` to publish a target; check the `waitagent-*.log` in the remote host's temp directory (`/tmp` on POSIX, `%TEMP%` on Windows)",
+                    "timed out after {}s waiting for remote WaitAgent `{expected}` to publish a target; the authority advertised endpoint `{advertised_endpoint}` was not reachable from the remote host (or the authority's inbound dial to the remote on port {remote_port} failed); for Cloud hosts ensure port {remote_port} allows inbound, or set a public endpoint via Ctrl-P; check the `waitagent-*.log` in the remote host's temp directory (`/tmp` on POSIX, `%TEMP%` on Windows)",
                     timeout.as_secs()
                 )));
             }
@@ -1076,7 +1135,9 @@ mod tests {
         ManagedSessionAddress, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::{WorkspaceInstanceId, WorkspaceSessionRole};
-    use crate::host::ssh::ssh_remote_host_bootstrapper::RemoteHostBootstrapResult;
+    use crate::host::ssh::ssh_remote_host_bootstrapper::{
+        RemoteHostBootstrapResult, RemoteWaitAgentStartPlan,
+    };
     use crate::infra::operator_auth::MemoryOperatorKeyStore;
     use crate::ports::session_creation::{
         RemoteSessionCreationError, RemoteSessionCreationRequest, SessionCreationPort,
@@ -1250,6 +1311,13 @@ mod tests {
     impl RemoteHostBootstrapper for FakeBootstrapper {
         type Error = String;
 
+        fn restart_for_back_dial_registration(
+            &self,
+            _plan: &RemoteHostBootstrapPlan,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         fn ensure_waitagent_and_start(
             &self,
             plan: &RemoteHostBootstrapPlan,
@@ -1274,6 +1342,13 @@ mod tests {
 
     impl RemoteHostBootstrapper for FailingBootstrapper {
         type Error = String;
+
+        fn restart_for_back_dial_registration(
+            &self,
+            _plan: &RemoteHostBootstrapPlan,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
 
         fn ensure_waitagent_and_start(
             &self,
@@ -2148,6 +2223,13 @@ mod tests {
     impl RemoteHostBootstrapper for RelayRoleBootstrapper {
         type Error = String;
 
+        fn restart_for_back_dial_registration(
+            &self,
+            _plan: &RemoteHostBootstrapPlan,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         fn ensure_waitagent_and_start(
             &self,
             plan: &RemoteHostBootstrapPlan,
@@ -2378,6 +2460,8 @@ mod tests {
                 Duration::from_millis(0),
                 Duration::from_secs(1),
                 None,
+                "10.1.26.84:7474",
+                7476,
             )
             .unwrap();
 
@@ -2409,11 +2493,317 @@ mod tests {
                 Duration::from_millis(0),
                 Duration::from_millis(1),
                 None,
+                "192.0.2.1:7474",
+                7476,
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("timed out"));
+        assert!(message.contains("10.1.29.130#7476"));
+        // Direction 3: the error names the advertised endpoint, the remote
+        // port, and the remediation, so a WSL/NAT authority gets an
+        // actionable message instead of a bare timeout.
+        assert!(
+            message.contains("authority advertised endpoint `192.0.2.1:7474`"),
+            "the advertised endpoint is named: {message}"
+        );
+        assert!(
+            message.contains("ensure port 7476 allows inbound"),
+            "the remote port is named: {message}"
+        );
+        assert!(
+            message.contains("Ctrl-P"),
+            "the remediation names the public-endpoint control: {message}"
+        );
+    }
+
+    /// Issue #192: a Cloud via=direct profile (key auth, as Cloud requires).
+    fn cloud_direct_profile() -> RemoteHostProfile {
+        let mut stored = profile();
+        stored.auth = RemoteHostAuthProfile::Key {
+            key_path: PathBuf::from("/home/kk/.ssh/id_ed25519"),
+        };
+        stored.host_kind = RemoteHostKind::Cloud;
+        stored.via = Some("direct".to_string());
+        stored
+    }
+
+    /// Issue #192: bootstrapper whose registration always times out (feeds
+    /// no target) until `restart_for_back_dial_registration` runs, then
+    /// publishes the target — modeling the remote's back-connection
+    /// registration. Records every fallback call.
+    #[derive(Clone)]
+    struct BackDialFallbackBootstrapper {
+        fallback_calls: Arc<Mutex<usize>>,
+        catalog_targets: Arc<Mutex<Vec<ManagedSessionRecord>>>,
+        fail_fallback: bool,
+    }
+
+    impl RemoteHostBootstrapper for BackDialFallbackBootstrapper {
+        type Error = String;
+
+        fn ensure_waitagent_and_start(
+            &self,
+            plan: &RemoteHostBootstrapPlan,
+        ) -> Result<RemoteHostBootstrapResult, Self::Error> {
+            Ok(RemoteHostBootstrapResult {
+                tls_pin_sha256: "deadbeef".to_string(),
+                remote_port: plan.start_plan.remote_port,
+                relay_join: None,
+            })
+        }
+
+        fn restart_for_back_dial_registration(
+            &self,
+            _plan: &RemoteHostBootstrapPlan,
+        ) -> Result<(), Self::Error> {
+            *self.fallback_calls.lock().unwrap() += 1;
+            if self.fail_fallback {
+                return Err("advertised endpoint unreachable".to_string());
+            }
+            // The restarted remote dials back and its registration lands.
+            self.catalog_targets
+                .lock()
+                .unwrap()
+                .push(remote_target("10.1.29.130#7476", "back-dial"));
+            Ok(())
+        }
+    }
+
+    fn fallback_test_runtime(
+        path: &std::path::Path,
+        stored: RemoteHostProfile,
+        bootstrapper: BackDialFallbackBootstrapper,
+        registry: Arc<FakeRegistry>,
+    ) -> RemoteHostConnectRuntime<RemoteHostHistoryStore, FakeProbe, BackDialFallbackBootstrapper>
+    {
+        let history = RemoteHostHistoryStore::new(path);
+        history.upsert_profile(stored).unwrap();
+        RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            bootstrapper,
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store())
+        .with_publish_timeout(Duration::from_millis(1))
+        .with_via_resolver(Arc::new(|_via, _endpoint, _pin| RemoteNodeVia::Direct))
+    }
+
+    #[test]
+    fn cloud_direct_registration_falls_back_to_remote_back_dial() {
+        let path = unique_path("remote-host-connect-cloud-fallback.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: false,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = fallback_test_runtime(&path, cloud_direct_profile(), bootstrapper, registry);
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // The first wait timed out, the fallback restarted the remote in
+        // back-dial mode, and the second wait saw the back-connection
+        // registration.
+        assert_eq!(
+            *fallback_calls.lock().unwrap(),
+            1,
+            "Cloud via=direct must attempt exactly one back-dial fallback"
+        );
+        assert_eq!(outcome.created_target.address.session_id(), "back-dial");
+        assert!(!dials.lock().unwrap().is_empty());
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn lan_registration_never_attempts_the_back_dial_fallback() {
+        let path = unique_path("remote-host-connect-lan-no-fallback.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: false,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        // LAN profile: exactly today's behavior — one wait, no fallback.
+        let runtime = fallback_test_runtime(&path, profile(), bootstrapper, registry);
+
+        let error = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("timed out"),
+            "LAN keeps the historical timeout error: {error}"
+        );
+        assert!(
+            !error.to_string().contains("back-dial"),
+            "LAN must not mention the fallback: {error}"
+        );
+        assert_eq!(
+            *fallback_calls.lock().unwrap(),
+            0,
+            "LAN profiles never restart the remote for back-dial registration"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn cloud_relay_registration_never_attempts_the_back_dial_fallback() {
+        let path = unique_path("remote-host-connect-cloud-relay-no-fallback.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: false,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let mut stored = cloud_direct_profile();
+        stored.via = Some("relay".to_string());
+        let runtime = fallback_test_runtime(&path, stored, bootstrapper, registry);
+
+        let error = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
             )
             .unwrap_err();
 
         assert!(error.to_string().contains("timed out"));
-        assert!(error.to_string().contains("10.1.29.130#7476"));
+        assert_eq!(
+            *fallback_calls.lock().unwrap(),
+            0,
+            "via=relay paths are untouched by direction 1"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn cloud_fallback_failure_keeps_both_errors_actionable() {
+        let path = unique_path("remote-host-connect-cloud-fallback-fails.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: true,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = fallback_test_runtime(&path, cloud_direct_profile(), bootstrapper, registry);
+
+        let error = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("authority advertised endpoint `192.0.2.1:7474`"),
+            "the original timeout keeps its endpoint context: {message}"
+        );
+        assert!(
+            message.contains("back-dial registration fallback failed"),
+            "the fallback failure is preserved, not masked: {message}"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn cloud_primary_start_plan_has_no_connect_flag() {
+        // Direction 1 selector evidence: the Cloud primary plan starts the
+        // remote WITHOUT --connect (the authority dials in to register), the
+        // same shape LAN uses today.
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &cloud_direct_profile(),
+            7476,
+            "192.0.2.1:7474",
+            "10.1.29.130#7476",
+            RemoteShellKind::Posix,
+        );
+        assert!(plan.start_plan.outbound_dial);
+        assert!(!plan.start_plan.command.contains("--connect"));
+        assert!(plan.start_plan.endpoint_preflight_command.is_empty());
+    }
+
+    #[test]
+    fn cloud_back_dial_fallback_plan_rebuild_has_connect_flag() {
+        // The fallback start plan is the inverse: --connect plus the
+        // reachability preflight against the advertised endpoint.
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &cloud_direct_profile(),
+            7476,
+            "192.0.2.1:7474",
+            "10.1.29.130#7476",
+            RemoteShellKind::Posix,
+        );
+        let fallback = RemoteWaitAgentStartPlan::new_with_mode(
+            plan.start_plan.remote_port,
+            plan.start_plan.local_connect_endpoint.clone(),
+            plan.start_plan.authority_id.clone(),
+            false,
+            RemoteShellKind::Posix,
+        );
+        assert!(!fallback.outbound_dial);
+        assert!(fallback.command.contains("--connect '192.0.2.1:7474'"));
+        assert!(!fallback.endpoint_preflight_command.is_empty());
     }
 
     #[test]

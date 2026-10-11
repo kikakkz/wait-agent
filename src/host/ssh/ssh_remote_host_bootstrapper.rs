@@ -256,6 +256,16 @@ pub trait RemoteHostBootstrapper {
         &self,
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<RemoteHostBootstrapResult, Self::Error>;
+
+    /// Issue #192 direction 1: restart the remote node in back-dial mode
+    /// (`--connect <authority advertised endpoint>`) so it registers its
+    /// target by dialing the authority, after the authority-side
+    /// registration dial did not produce a target in time. Only the connect
+    /// runtime's Cloud-host fallback invokes this; LAN profiles never do.
+    fn restart_for_back_dial_registration(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<(), Self::Error>;
 }
 
 /// Result returned by a successful remote host bootstrap.
@@ -474,6 +484,60 @@ where
             remote_port,
             relay_join,
         })
+    }
+
+    /// Issue #192 direction 1: the authority-side registration dial timed
+    /// out, so restart the remote node with `--connect <advertised endpoint>`
+    /// and let IT dial the authority and register over that back-connection.
+    /// The remote's node server always listens on its port, so the primary
+    /// (listening) process is stopped first; the endpoint preflight proves
+    /// the advertised endpoint is reachable from the remote before the
+    /// switch, so a misconfigured `--public` fails fast with a clear reason.
+    fn restart_for_back_dial_registration(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<(), Self::Error> {
+        let mut back_dial_plan = plan.clone();
+        back_dial_plan.start_plan = RemoteWaitAgentStartPlan::new_with_mode(
+            plan.start_plan.remote_port,
+            plan.start_plan.local_connect_endpoint.clone(),
+            plan.start_plan.authority_id.clone(),
+            false, /* remote dials back with --connect */
+            plan.remote_shell,
+        );
+        if !back_dial_plan
+            .start_plan
+            .endpoint_preflight_command
+            .is_empty()
+        {
+            let preflight = back_dial_plan.start_plan.endpoint_preflight_command.clone();
+            self.run_ssh_command(&back_dial_plan, &preflight, false)
+                .map_err(|error| {
+                    RemoteHostBootstrapError::new(format!(
+                        "back-dial registration fallback aborted, the remote host cannot reach the authority advertised endpoint `{}`: {error}",
+                        plan.start_plan.local_connect_endpoint
+                    ))
+                })?;
+        }
+        // The bracket pattern keeps pkill from matching this shell's own
+        // command line (the pattern text would otherwise self-match and kill
+        // the session before the restart runs).
+        let kill = format!(
+            "pkill -f {} 2>/dev/null || true; sleep 1",
+            shell_single_quote(&format!(
+                "waitagent.*--port {}.*[r]atatui-node-server",
+                plan.start_plan.remote_port
+            ))
+        );
+        self.run_ssh_command(&back_dial_plan, &kill, false)?;
+        self.run_ssh_command(&back_dial_plan, &back_dial_plan.start_plan.command, false)?;
+        crate::infra::error_log::ERROR_LOG.log(format!(
+            "[remote-host-bootstrap] authority-side registration for {}:{} did not publish a target; restarted the remote node with --connect {} (back-dial registration)",
+            plan.host,
+            plan.start_plan.remote_port,
+            plan.start_plan.local_connect_endpoint
+        ));
+        Ok(())
     }
 }
 
@@ -3273,6 +3337,78 @@ mod tests {
             }),
             "no relay exec may run on Windows: {calls:?}"
         );
+    }
+
+    #[test]
+    fn back_dial_fallback_restarts_remote_with_connect() {
+        let cache = prime_artifact_cache();
+        let plan = remote_download_plan();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // Pop order: start (back-dial), pkill, endpoint preflight.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        bootstrapper
+            .restart_for_back_dial_registration(&plan)
+            .unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 3, "preflight, pkill, start: {calls:?}");
+        assert!(
+            calls[0].1.contains("10.1.26.84") && calls[0].1.contains("7474"),
+            "the advertised endpoint is probed first: {}",
+            calls[0].1
+        );
+        assert!(
+            calls[1].1.contains("pkill -f")
+                && calls[1].1.contains("[r]atatui-node-server")
+                && calls[1].1.contains("|| true; sleep 1"),
+            "the listening primary node is stopped best-effort without self-matching the shell: {}",
+            calls[1].1
+        );
+        assert!(
+            calls[2].1.contains("--connect '10.1.26.84:7474'"),
+            "the fallback start dials back to the advertised endpoint: {}",
+            calls[2].1
+        );
+        assert!(calls[2].1.contains("nohup"));
+    }
+
+    #[test]
+    fn back_dial_fallback_aborts_when_endpoint_unreachable() {
+        let cache = prime_artifact_cache();
+        let plan = remote_download_plan();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![1])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let error = bootstrapper
+            .restart_for_back_dial_registration(&plan)
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("back-dial registration fallback aborted"),
+            "actionable abort: {error}"
+        );
+        assert_eq!(calls.borrow().len(), 1, "no restart without reachability");
     }
 
     #[test]
