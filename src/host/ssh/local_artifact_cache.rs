@@ -284,19 +284,31 @@ impl LocalArtifactCache {
         fetcher: &dyn ArtifactFetcher,
     ) -> Result<PathBuf, LocalArtifactError> {
         validate_version(version)?;
-        let artifact = self.dir.join(target.file_name(version));
-        let sidecar = sidecar_path(&artifact);
-        if artifact.is_file() && sidecar.is_file() {
-            let data = fs::read(&artifact).map_err(LocalArtifactError::Io)?;
-            match read_sidecar_digest(&sidecar)? {
-                Some(expected) if expected == sha256_hex(&data) => return Ok(artifact),
-                // Corrupt or tampered cache: fall through and re-download.
-                _ => {}
-            }
+        if let Some(artifact) = self.peek_artifact(target, version) {
+            return Ok(artifact);
         }
         let data = download_verified(target, version, fetcher)?;
+        let artifact = self.dir.join(target.file_name(version));
+        let sidecar = sidecar_path(&artifact);
         write_artifact(&artifact, &sidecar, &data)?;
         Ok(artifact)
+    }
+
+    /// Pure cache probe used by the remote-download fallback (issue #173):
+    /// returns the artifact path only when the artifact and its `.sha256`
+    /// sidecar both exist and the recorded digest matches. Never downloads;
+    /// a missing, corrupt, or unvalidated cache answers `None`.
+    pub fn peek_artifact(&self, target: ArtifactTarget, version: &str) -> Option<PathBuf> {
+        if validate_version(version).is_err() {
+            return None;
+        }
+        let artifact = self.dir.join(target.file_name(version));
+        let data = fs::read(&artifact).ok()?;
+        let sidecar = sidecar_path(&artifact);
+        match read_sidecar_digest(&sidecar) {
+            Ok(Some(expected)) if expected == sha256_hex(&data) => Some(artifact),
+            _ => None,
+        }
     }
 }
 
@@ -683,6 +695,64 @@ mod tests {
         assert!(validate_version("1.0.0-rc.1").is_ok());
         assert!(validate_version("").is_err());
         assert!(validate_version("0.1/90").is_err());
+    }
+
+    #[test]
+    fn peek_artifact_returns_only_verified_hits() {
+        let dir = cache_dir("peek");
+        let cache = LocalArtifactCache::new(&dir);
+        let url = ArtifactTarget::LinuxX86_64.download_url("0.1.90");
+        let fetcher = FakeFetcher::default().serving(&url, sample_artifact());
+        cache
+            .ensure_artifact(ArtifactTarget::LinuxX86_64, "0.1.90", &fetcher)
+            .unwrap();
+
+        let artifact = cache.peek_artifact(ArtifactTarget::LinuxX86_64, "0.1.90");
+        assert!(
+            artifact.is_some(),
+            "a freshly downloaded artifact must peek successfully"
+        );
+
+        // Corrupt bytes defeat the recorded digest.
+        let path = artifact.unwrap();
+        std::fs::write(&path, b"tampered").unwrap();
+        assert!(cache
+            .peek_artifact(ArtifactTarget::LinuxX86_64, "0.1.90")
+            .is_none());
+
+        // Missing sidecar defeats the hit.
+        std::fs::write(&path, sample_artifact()).unwrap();
+        std::fs::remove_file(path.with_file_name("waitagent-0.1.90-x86_64-linux.tar.gz.sha256"))
+            .unwrap();
+        assert!(cache
+            .peek_artifact(ArtifactTarget::LinuxX86_64, "0.1.90")
+            .is_none());
+
+        // Wrong version / unsupported version string: no hit, no panic.
+        assert!(cache
+            .peek_artifact(ArtifactTarget::LinuxX86_64, "0.0.1")
+            .is_none());
+        assert!(cache
+            .peek_artifact(ArtifactTarget::LinuxX86_64, "../x")
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn peek_artifact_never_downloads() {
+        let dir = cache_dir("peek-no-download");
+        let cache = LocalArtifactCache::new(&dir);
+        let fetcher = FakeFetcher::default();
+
+        assert!(cache
+            .peek_artifact(ArtifactTarget::LinuxX86_64, "0.1.90")
+            .is_none());
+        assert_eq!(
+            fetcher.attempted_count(),
+            0,
+            "a peek is a pure filesystem probe"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

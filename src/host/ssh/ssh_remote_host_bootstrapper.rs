@@ -390,21 +390,9 @@ where
         )?;
 
         if !self.remote_waitagent_is_current(plan)? {
-            if let Some(command) = &plan.install_reachability_preflight_command {
-                self.run_ssh_command(plan, command, false)
-                    .map_err(|error| {
-                        RemoteHostBootstrapError::new(format!(
-                            "remote host cannot reach the WaitAgent install URL{}: {}",
-                            install_proxy_hint(command),
-                            error
-                        ))
-                    })?;
+            if let Err(remote_error) = self.install_via_remote_download(plan) {
+                return self.ensure_waitagent_and_start_via_fallback(plan, remote_error);
             }
-            // sudo only exists for the POSIX installer (root install into
-            // /usr/local/bin); the Windows installer is per-user and needs no
-            // elevation (`docs/windows-ssh-target-design.md` §6.5).
-            let allow_sudo = plan.remote_shell == RemoteShellKind::Posix;
-            self.run_ssh_command(plan, &plan.install_or_update_command, allow_sudo)?;
         }
 
         let (tls_pin_sha256, remote_port) = self.generate_credentials_and_parse(plan)?;
@@ -536,6 +524,75 @@ where
     /// bytes travel over the SSH exec channel as base64 chunks — so the
     /// install-URL reachability preflight and the remote-install proxy
     /// wrapping do not apply to this path and are skipped by design.
+    /// The curl-based remote self-download: reachability preflight (when
+    /// configured) plus the install.sh-style install command. Errors keep
+    /// their historical messages; the caller decides whether a failure may
+    /// fall back to the cached-artifact upload.
+    fn install_via_remote_download(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<(), RemoteHostBootstrapError> {
+        if let Some(command) = &plan.install_reachability_preflight_command {
+            self.run_ssh_command(plan, command, false)
+                .map_err(|error| {
+                    RemoteHostBootstrapError::new(format!(
+                        "remote host cannot reach the WaitAgent install URL{}: {}",
+                        install_proxy_hint(command),
+                        error
+                    ))
+                })?;
+        }
+        // sudo only exists for the POSIX installer (root install into
+        // /usr/local/bin); the Windows installer is per-user and needs no
+        // elevation (`docs/windows-ssh-target-design.md` §6.5).
+        let allow_sudo = plan.remote_shell == RemoteShellKind::Posix;
+        self.run_ssh_command(plan, &plan.install_or_update_command, allow_sudo)
+    }
+
+    /// Issue #173: the Remote install path failed. When the local artifact
+    /// cache already holds a verified artifact for the detected remote
+    /// target, upload it instead of failing the connect; otherwise
+    /// propagate the ORIGINAL remote-path error, annotated with the reason
+    /// no fallback ran (never masked by a cache error).
+    fn ensure_waitagent_and_start_via_fallback(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        remote_error: RemoteHostBootstrapError,
+    ) -> Result<RemoteHostBootstrapResult, RemoteHostBootstrapError> {
+        if plan.remote_shell == RemoteShellKind::Windows {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "remote download failed and the cached-artifact fallback is not available for Windows remote hosts (the local artifact cache holds no windows artifacts): {remote_error}"
+            )));
+        }
+        // The remote path never probes the target triple (install.sh detects
+        // the platform itself on the remote), so the fallback probes it
+        // once, only after the download already failed — the happy path
+        // keeps its zero-probe shape.
+        let detection = match self.detect_upload_target(plan) {
+            Ok(detection) => detection,
+            Err(probe_error) => {
+                return Err(RemoteHostBootstrapError::new(format!(
+                    "remote download failed and the cached-artifact fallback could not probe the remote target: {probe_error}; original error: {remote_error}"
+                )));
+            }
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        if self
+            .artifact_cache
+            .peek_artifact(detection.target, version)
+            .is_none()
+        {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "remote download failed and no verified locally cached artifact exists to fall back to (target `{}`, version `{version}`): {remote_error}",
+                detection.target.file_name(version),
+            )));
+        }
+        crate::infra::error_log::ERROR_LOG.log(format!(
+            "[remote-host-bootstrap] remote download failed ({remote_error}); falling back to locally cached artifact upload"
+        ));
+        self.ensure_waitagent_and_start_via_upload_detected(plan, detection)
+    }
+
     fn ensure_waitagent_and_start_via_upload(
         &self,
         plan: &RemoteHostBootstrapPlan,
@@ -554,6 +611,17 @@ where
         // before any artifact selection; the arch is deliberately not
         // persisted in the profile because reprovisioning can change it.
         let detection = self.detect_upload_target(plan)?;
+        self.ensure_waitagent_and_start_via_upload_detected(plan, detection)
+    }
+
+    /// The upload install path from an already-probed target detection. The
+    /// fallback (issue #173) probes once itself and enters here, so a
+    /// fallback connect pays for exactly one `uname` exec, not two.
+    fn ensure_waitagent_and_start_via_upload_detected(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        detection: UploadTargetDetection,
+    ) -> Result<RemoteHostBootstrapResult, RemoteHostBootstrapError> {
         let install_dir = if detection.uid == 0 || plan.sudo_password_secret_id.is_some() {
             "/usr/local/bin"
         } else {
@@ -2788,5 +2856,254 @@ mod tests {
             "the error tells the user how to fix it: {error}"
         );
         assert_eq!(calls.borrow().len(), 0, "no SSH exec may run");
+    }
+
+    /// A Remote-source plan whose reachability preflight is configured —
+    /// the shape the fallback (issue #173) decides on.
+    fn remote_download_plan() -> RemoteHostBootstrapPlan {
+        let mut plan = upload_plan();
+        plan.install_source = InstallSource::RemoteDownload;
+        plan.install_reachability_preflight_command =
+            Some(install_reachability_preflight_command(&[
+                "all_proxy='socks5://127.0.0.1:7897'".to_string(),
+            ]));
+        plan
+    }
+
+    fn fallback_marker_count() -> usize {
+        crate::infra::error_log::ERROR_LOG
+            .recent_entries(200)
+            .iter()
+            .filter(|(_, _, message)| {
+                message.contains("falling back to locally cached artifact upload")
+            })
+            .count()
+    }
+
+    #[test]
+    fn remote_download_failure_with_cached_artifact_falls_back() {
+        let cache = prime_artifact_cache();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // Pop order: start, daemon check (not running), credentials, upload
+        // install, chunk, upload version check (not current), fallback uname
+        // probe, preflight (FAILS), remote version check (not current),
+        // mkdir.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 1, 0, 1, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(vec![(
+                    "uname -s".to_string(),
+                    "Linux\nx86_64\n0\n".to_string(),
+                )])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper
+            .ensure_waitagent_and_start(&remote_download_plan())
+            .unwrap();
+
+        assert_eq!(result.tls_pin_sha256, "deadbeef");
+        assert_eq!(result.remote_port, 7476);
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.len(),
+            10,
+            "mkdir, version, preflight, uname probe, version, chunk, install, credentials, daemon, start: {calls:?}"
+        );
+        assert!(calls[1].1.contains("waitagent --version"));
+        assert!(
+            calls[2].1.contains("all_proxy="),
+            "the failing remote preflight runs before the fallback: {}",
+            calls[2].1
+        );
+        assert_eq!(calls[3].1, "uname -s && uname -m && id -u");
+        assert!(
+            calls[5].2.is_some(),
+            "the fallback uploads the cached artifact over stdin chunks"
+        );
+        assert!(calls[6].1.contains("base64 -d"));
+        assert!(
+            fallback_marker_count() > 0,
+            "the fallback decision must be greppable in the diagnostics log"
+        );
+    }
+
+    #[test]
+    fn remote_download_failure_without_cached_artifact_propagates_original_error() {
+        let cache = LocalArtifactCache::new(format!(
+            "{}/waitagent-empty-cache-{}",
+            std::env::temp_dir().display(),
+            std::process::id()
+        ));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // mkdir, version check (not current), preflight (FAILS), fallback
+        // uname probe succeeds, then the empty cache stops the fallback.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 1, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(vec![(
+                    "uname -s".to_string(),
+                    "Linux\nx86_64\n0\n".to_string(),
+                )])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let markers_before = fallback_marker_count();
+        let error = bootstrapper
+            .ensure_waitagent_and_start(&remote_download_plan())
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("remote host cannot reach the WaitAgent install URL"),
+            "the ORIGINAL remote-path error must be preserved: {message}"
+        );
+        assert!(
+            message.contains("no verified locally cached artifact exists to fall back to"),
+            "the missing cache is annotated, not substituted: {message}"
+        );
+        assert!(
+            fallback_marker_count() == markers_before,
+            "no fallback decision may be logged when the cache cannot serve it"
+        );
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 4, "mkdir, version, preflight, uname probe");
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, command, _)| command.starts_with("cat > ")
+                    || command.contains("base64 -d")),
+            "nothing may be uploaded without a cached artifact"
+        );
+    }
+
+    #[test]
+    fn remote_download_failure_on_windows_errors_explicitly_without_probing() {
+        let cache = prime_artifact_cache();
+        let mut plan = remote_download_plan();
+        plan.remote_shell = RemoteShellKind::Windows;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // mkdir, version check (not current), preflight (FAILS) — then the
+        // Windows guard refuses the fallback before any uname probe.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![1, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let error = bootstrapper.ensure_waitagent_and_start(&plan).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("not available for Windows remote hosts"),
+            "explicit no-fallback error: {message}"
+        );
+        assert!(
+            message.contains("remote download failed"),
+            "the original failure stays visible: {message}"
+        );
+        assert_eq!(calls.borrow().len(), 3, "no uname probe may run on Windows");
+    }
+
+    #[test]
+    fn remote_download_success_never_falls_back() {
+        let cache = LocalArtifactCache::new(format!(
+            "{}/waitagent-unused-cache-{}",
+            std::env::temp_dir().display(),
+            std::process::id()
+        ));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // mkdir, version check (not current), preflight (succeeds), install
+        // command (succeeds), credentials, daemon check (not running), start.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper
+            .ensure_waitagent_and_start(&remote_download_plan())
+            .unwrap();
+
+        assert_eq!(result.tls_pin_sha256, "deadbeef");
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.len(),
+            7,
+            "no fallback execs on the happy path: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|(_, command, _)| {
+                command == "uname -s && uname -m && id -u"
+                    || command.starts_with("cat > ")
+                    || command.contains("base64 -d")
+            }),
+            "a successful remote download must not touch the upload path: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn remote_already_current_never_falls_back() {
+        let cache = LocalArtifactCache::new(format!(
+            "{}/waitagent-current-cache-{}",
+            std::env::temp_dir().display(),
+            std::process::id()
+        ));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // mkdir, version check (CURRENT) — the flow proceeds without any
+        // install attempt, so there is nothing to fall back from.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(Vec::new())),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper
+            .ensure_waitagent_and_start(&remote_download_plan())
+            .unwrap();
+
+        assert_eq!(result.tls_pin_sha256, "deadbeef");
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.len(),
+            4,
+            "mkdir, version check, credentials, daemon check: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, command, _)| command.contains("install.sh")
+                    || command == "uname -s && uname -m && id -u"),
+            "a current remote runs no install and no fallback probe: {calls:?}"
+        );
     }
 }

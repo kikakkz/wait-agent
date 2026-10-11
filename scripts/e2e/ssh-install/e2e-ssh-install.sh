@@ -26,7 +26,16 @@
 #                      fail with that address in the error, proving the
 #                      config reached curl, for all_proxy and https_proxy;
 #                      removing the config and re-priming the cache restores
-#                      a successful connect (control).
+#                      a successful connect (control);
+#                   4. cached-upload fallback (issue #173): with the profile
+#                      switched to install_source = "remote" and the remote
+#                      download impossible (internal network), the connect
+#                      must log the fallback marker in the node diagnostics
+#                      and succeed by uploading the cached artifact;
+#                   5. no fallback without a cached artifact: with the cache
+#                      cleared, the same connect must fail with the ORIGINAL
+#                      remote-download error (annotated with the empty-cache
+#                      fact) and log no fallback marker.
 #
 # Images: WA_E2E_BINARY stages the prebuilt host binary into the runtime
 # image via scripts/e2e/relay/Dockerfile.runtime (same as the relay harness);
@@ -276,6 +285,62 @@ scenario_installsource() {
         || die "no online remote session row after the proxy-control connect"
     log "online remote row: $row"
     log "phase 3 OK: proxy config provably reached curl; direct path restored"
+
+    log "phase 4: remote download failure falls back to the cached artifact (issue #173)"
+    # Same profile, but the host now downloads by itself — impossible on the
+    # internal network. The primed cache must carry the connect: the node
+    # diagnostics must record the fallback decision, and the connect must
+    # succeed via the uploaded artifact.
+    docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/remote-hosts.toml' <<'EOF'
+[[hosts]]
+name = "ssh-host"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = "auto"
+use_install_proxy = false
+host_kind = "lan"
+install_source = "remote"
+EOF
+    force_remote_reinstall
+    local markers_before markers_after
+    markers_before=$(count_fallback_markers)
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
+        || die "fallback CONNECT_REMOTE_HOST was not accepted: $connect_out"
+    row=$(wait_for_online_remote_row "ssh-host#") \
+        || die "no online remote session row after the fallback connect"
+    log "online remote row: $row"
+    assert_remote_binary
+    markers_after=$(count_fallback_markers)
+    [ "$markers_after" -gt "$markers_before" ] \
+        || die "fallback marker missing from the node diagnostics log"
+    log "phase 4 OK: fallback marker logged; connect succeeded via the cached artifact"
+
+    log "phase 5: no fallback without a cached artifact — the original error propagates"
+    docker exec "$NODE" rm -rf /root/.waitagent/cache
+    force_remote_reinstall
+    markers_before=$(count_fallback_markers)
+    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
+    jq -e '.type == "Response" and .payload.ok == false' <<<"$connect_out" >/dev/null \
+        || die "the no-cache connect should fail: $connect_out"
+    local failure_message
+    failure_message=$(jq -r '.payload.message' <<<"$connect_out")
+    grep -q 'remote host cannot reach the WaitAgent install URL' <<<"$failure_message" \
+        || die "the ORIGINAL remote-download error must propagate (got: $failure_message)"
+    grep -q 'no verified locally cached artifact' <<<"$failure_message" \
+        || die "the empty cache must be annotated (got: $failure_message)"
+    markers_after=$(count_fallback_markers)
+    [ "$markers_after" -eq "$markers_before" ] \
+        || die "no fallback may be logged when the cache is empty"
+    log "phase 5 OK: original error preserved, empty cache annotated, no fallback logged"
+}
+
+count_fallback_markers() {
+    docker exec "$NODE" \
+        grep -c 'falling back to locally cached artifact upload' /tmp/waitagent-diag.log 2>/dev/null \
+        || true
 }
 
 force_remote_reinstall() {
