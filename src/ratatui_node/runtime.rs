@@ -1504,11 +1504,36 @@ pub(crate) fn start_relay_link(shared: &Arc<SharedState>, relay: RelayTomlConfig
         RelayClientConfig::from_relay_toml(relay, credentials),
         relay_event_tx,
     );
-    if let Ok(mut slot) = shared.relay_client.lock() {
-        *slot = Some(Arc::new(handle));
-    }
+    install_relay_client_handle(shared, Some(Arc::new(handle)));
     let state_tx = shared.state_sender();
     std::thread::spawn(move || forward_relay_link_events(relay_event_rx, state_tx));
+}
+
+/// Issue #192 direction 2: publish the relay client handle to BOTH the
+/// shared slot (UI/footer presence) and the ingress outbound transport
+/// (via = "relay" dials). The ingress update travels as an event so the
+/// ingress loop remains the only mutator of its transport (m07).
+fn install_relay_client_handle(
+    shared: &Arc<SharedState>,
+    handle: Option<Arc<crate::infra::relay_client::RelayClientHandle>>,
+) {
+    if let Ok(mut slot) = shared.relay_client.lock() {
+        *slot = handle.clone();
+    }
+    let ingress_tx = {
+        let guard = shared
+            .ingress_internal_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    };
+    if let Some(tx) = ingress_tx {
+        if let Err(error) = tx.send(crate::remote::node::remote_node_ingress_server_runtime::InternalEvent::SetRelayClient { handle }) {
+            ERROR_LOG.log(format!(
+                "[ratatui-node] relay client handle could not reach the ingress transport: {error}"
+            ));
+        }
+    }
 }
 
 /// The identity the persistent relay link enrolls/registers under. This

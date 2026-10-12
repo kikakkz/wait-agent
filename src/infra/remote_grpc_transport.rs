@@ -383,6 +383,17 @@ impl GrpcRemoteNodeTransport {
         self
     }
 
+    /// Issue #192 direction 2: install (or clear) the relay client at
+    /// runtime — a relay joined after the node (and its ingress transport)
+    /// started must still serve `via = "relay"` outbound dials. Called from
+    /// the ingress event loop on the relay-link lifecycle events.
+    pub(crate) fn set_relay_client(
+        &mut self,
+        relay_client: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
+    ) {
+        self.relay_client = relay_client;
+    }
+
     /// Configure the transport to serve inbound connections over TLS using the
     /// given certificate and private key.
     pub fn with_tls(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {

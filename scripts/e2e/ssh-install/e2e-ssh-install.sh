@@ -9,6 +9,11 @@
 # uploads it over the SSH exec channel.
 #
 # Coverage scenarios:
+# Every phase connects its own profile on its OWN remote port (7480+N):
+# retry/snapshot workers spawned by earlier kills keep re-dialing their
+# authority id for minutes, and a shared host#port across phases would let
+# them race (and evict) the next phase's fresh session.
+#
 #   installsource — profile with install_source = "upload":
 #                   1. connect bootstraps the remote host end to end: arch
 #                      detection exec, cached-artifact upload (base64 chunks
@@ -52,7 +57,15 @@
 #                      inbound to the remote node port dropped (iptables) but
 #                      the advertised endpoint reachable, the publish wait
 #                      times out and the remote restarts with --connect,
-#                      registering by dialing the authority itself.
+#                      registering by dialing the authority itself (the
+#                      iptables DROP stays in place for phase 9);
+#                   9. relay-presence registration (issue #192 direction 2):
+#                      with the advertised endpoint back to unroutable
+#                      192.0.2.1:7474 and 7474 still dropped, a Cloud
+#                      via=direct profile with relay role registers by the
+#                      remote node appearing online at the relay both nodes
+#                      share; the session routes via the relay and the
+#                      profile persists last_via_used = relay.
 #
 # Images: WA_E2E_BINARY stages the prebuilt host binary into the runtime
 # image via scripts/e2e/relay/Dockerfile.runtime (same as the relay harness);
@@ -262,6 +275,21 @@ scenario_installsource() {
     log "phase 1 OK: artifact uploaded over SSH, installed, daemon online"
 
     log "phase 2: second connect must reuse the cache (no re-download)"
+    # A fresh profile on its own port: this phase kills the daemon, and the
+    # retry/snapshot workers that spawn would race a reconnect on the same
+    # authority id.
+    docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/remote-hosts.toml' <<PROFEOF
+[[hosts]]
+name = "ssh-host"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = 7482
+use_install_proxy = false
+host_kind = "lan"
+install_source = "upload"
+PROFEOF
     # The artifact mtime before/after proves the local cache satisfied the
     # forced re-install.
     force_remote_reinstall
@@ -315,7 +343,7 @@ host = "ssh-host"
 ssh_user = "root"
 auth_kind = "key"
 key_path = "/root/.ssh/e2e_key"
-preferred_remote_port = "auto"
+preferred_remote_port = 7484
 use_install_proxy = false
 host_kind = "lan"
 install_source = "remote"
@@ -361,7 +389,7 @@ host = "ssh-host"
 ssh_user = "root"
 auth_kind = "key"
 key_path = "/root/.ssh/e2e_key"
-preferred_remote_port = "auto"
+preferred_remote_port = 7486
 use_install_proxy = false
 host_kind = "lan"
 install_source = "upload"
@@ -408,11 +436,14 @@ PROFEOF
 
     log "idempotent reconnect: bootstrap reruns, the running relay is reused"
     force_remote_reinstall
-    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
-    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
-        || die "relay-role reconnect was not accepted: $connect_out"
+    # Fire and poll: the full bootstrap plus relay deploy can exceed
+    # __node-command's 60s response window; the connect runs regardless.
+    node_command "CONNECT_REMOTE_HOST ssh-host" &
+    local reconnect_pid=$!
     row=$(wait_for_online_remote_row "ssh-host#") \
         || die "no online remote session row after the relay-role reconnect"
+    log "online remote row: $row"
+    wait "$reconnect_pid" || true
     local serve_count
     serve_count=$(docker exec "$SSH_HOST" sh -c 'pgrep -f "[r]elay serve --listen" | wc -l')
     [ "$serve_count" = "1" ] || die "expected exactly one relay serve, got $serve_count"
@@ -432,7 +463,7 @@ host = "ssh-host"
 ssh_user = "root"
 auth_kind = "key"
 key_path = "/root/.ssh/e2e_key"
-preferred_remote_port = "auto"
+preferred_remote_port = 7487
 use_install_proxy = false
 host_kind = "cloud"
 via = "direct"
@@ -456,7 +487,20 @@ PROFEOF
     node_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NODE")
     [ -n "$node_ip" ] || die "could not resolve the control node container address"
     node_command "SET_PUBLIC $node_ip:9001" >/dev/null         || die "SET_PUBLIC $node_ip:9001 was not accepted"
-    docker exec "$SSH_HOST" iptables -A INPUT -i eth+ -p tcp --dport 7474 -j DROP
+    docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/remote-hosts.toml' <<'EOF'
+[[hosts]]
+name = "ssh-host"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = 7488
+use_install_proxy = false
+host_kind = "cloud"
+via = "direct"
+install_source = "upload"
+EOF
+    docker exec "$SSH_HOST" iptables -A INPUT -i eth+ -p tcp --dport 7488 -j DROP
     force_remote_reinstall
     # Fire the connect and poll for its outcome: the primary publish wait
     # alone is 60s (the dial to the dropped port hangs) plus bootstrap and
@@ -469,6 +513,48 @@ PROFEOF
     wait "$connect_pid" || true
     docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port" | grep -q -- "--connect $node_ip:9001"         || die "the remote node must carry the --connect fallback argument"
     log "phase 8 OK: publish-timeout fallback restarted the remote in back-dial mode"
+
+    log "phase 9: relay-role Cloud host registers via relay presence (issue #192 direction 2)"
+    # The exact user scenario: WSL-style authority (unroutable advertised
+    # endpoint), cloud host, ONLY 7475 open. The remote relay still serves
+    # (phase 6) and the local node stays pinned to it, so the remote node
+    # coming online at its own relay must be accepted as registration and
+    # the session must flow through the relay. A FRESH profile name and
+    # remote port give this connect its own authority id (ssh-host#7477):
+    # the retry workers earlier phases spawned keep re-dialing ssh-host#7474
+    # for minutes and would race (and evict) this connect's relay dial.
+    node_command "SET_PUBLIC 192.0.2.1:7474" >/dev/null \
+        || die "SET_PUBLIC 192.0.2.1:7474 was not accepted"
+    docker exec "$SSH_HOST" iptables -D INPUT -i eth+ -p tcp --dport 7488 -j DROP
+    docker exec "$SSH_HOST" iptables -A INPUT -i eth+ -p tcp --dport 7489 -j DROP
+    docker exec -i "$NODE" sh -c 'cat >> /root/.waitagent/remote-hosts.toml' <<PROFEOF
+[[hosts]]
+name = "ssh-host-p9"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = 7489
+use_install_proxy = false
+host_kind = "cloud"
+via = "direct"
+install_source = "upload"
+relay_role = true
+PROFEOF
+    prime_local_artifact_cache
+    docker exec "$SSH_HOST" sh -c 'pkill -f "[r]atatui-node-server" || true; rm -f /usr/local/bin/waitagent'
+    sleep 1
+    node_command "CONNECT_REMOTE_HOST ssh-host-p9" &
+    local connect_pid=$!
+    row=$(wait_for_online_remote_row "ssh-host#7489") \
+        || die "no online remote session row after the relay-presence registration"
+    log "online remote row: $row"
+    wait "$connect_pid" || true
+    docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port 7477" | grep -q -- "--connect" \
+        && die "the remote node must start without --connect when presence registers it"
+    docker exec "$NODE" sh -c 'sed -n "/name = \"ssh-host-p9\"/,/^$/p" /root/.waitagent/remote-hosts.toml | grep -q "last_via_used = \"relay\""' \
+        || die "the profile must persist last_via_used = relay"
+    log "phase 9 OK: presence registration routed the session via the relay"
 }
 
 count_fallback_markers() {

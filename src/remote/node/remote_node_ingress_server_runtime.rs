@@ -246,8 +246,22 @@ pub(crate) enum InternalEvent {
     InitiateOutboundConnection {
         request: OutboundNodeSessionRequest,
     },
+    /// Issue #192 direction 2: install (or clear) the relay client the
+    /// outbound transport uses for `via = "relay"` dials. Sent by the
+    /// relay-link lifecycle so a relay joined after node startup still
+    /// works; the message (not a shared mutation) keeps the single-writer
+    /// ingress loop the only mutator of its transport.
+    SetRelayClient {
+        handle: Option<std::sync::Arc<crate::infra::relay_client::RelayClientHandle>>,
+    },
     CloseNodeIngressSession {
         node_id: String,
+        /// When true (the connect path replacing one of its own dials, e.g.
+        /// issue #192's relay-presence reroute), also abandon the in-flight
+        /// outbound dial bookkeeping so the replacement dial is not skipped
+        /// as a duplicate. The offline-triggered close keeps this false: a
+        /// pending retry-worker dial must survive session teardown.
+        cancel_pending_dial: bool,
     },
     LocalCatalogChanged,
     Shutdown,
@@ -1692,7 +1706,7 @@ fn run_node_ingress_server_loop<
     let mut outbound_guards = HashMap::<String, GrpcRemoteNodeTransportGuard>::new();
     let mut pending_outbound_guards = HashMap::<String, GrpcRemoteNodeTransportGuard>::new();
     let mut pending_outbound_dials = HashSet::<String>::new();
-    let outbound_transport = GrpcRemoteNodeTransport::new().with_relay_client(relay_client);
+    let mut outbound_transport = GrpcRemoteNodeTransport::new().with_relay_client(relay_client);
     let (outbound_guard_tx, outbound_guard_rx) = mpsc::channel::<(
         String,
         Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError>,
@@ -1794,6 +1808,9 @@ fn run_node_ingress_server_loop<
             }) => {
                 pending_create_sessions.remove(&request_id);
             }
+            IngressServerEvent::Internal(InternalEvent::SetRelayClient { handle }) => {
+                outbound_transport.set_relay_client(handle);
+            }
             IngressServerEvent::Internal(InternalEvent::InitiateOutboundConnection { request }) => {
                 // Do not block the single ingress loop on the TCP/TLS handshake and
                 // server hello exchange. Spawn a short-lived worker and drain the
@@ -1834,7 +1851,10 @@ fn run_node_ingress_server_loop<
                     let _ = outbound_guard_tx.send((dial_node_id, result));
                 });
             }
-            IngressServerEvent::Internal(InternalEvent::CloseNodeIngressSession { node_id }) => {
+            IngressServerEvent::Internal(InternalEvent::CloseNodeIngressSession {
+                node_id,
+                cancel_pending_dial,
+            }) => {
                 close_ingress_sessions_for_node(
                     &publication_runtime,
                     &mut sessions,
@@ -1843,6 +1863,7 @@ fn run_node_ingress_server_loop<
                     &mut pending_outbound_dials,
                     &mut closed_session_instances,
                     &node_id,
+                    cancel_pending_dial,
                 );
             }
             IngressServerEvent::Internal(event) => {
@@ -2290,6 +2311,7 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
     pending_outbound_dials: &mut HashSet<String>,
     closed_session_instances: &mut HashSet<String>,
     node_id: &str,
+    cancel_pending_dial: bool,
 ) {
     // Only re-signal "node offline" when this close actually removed something.
     // The state loop sends CloseNodeIngressSession in response to
@@ -2297,6 +2319,16 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
     // close would bounce the event straight back and self-sustain a flood.
     let had_pending =
         pending_outbound_guards.contains_key(node_id) || pending_outbound_dials.contains(node_id);
+    if cancel_pending_dial {
+        // The connect path replaces this node's dial with its own (queued
+        // next on the same ingress loop): abandon the in-flight bookkeeping
+        // so the replacement is not skipped as a duplicate. The canceled
+        // worker keeps running until its transport attempt finishes; its late
+        // guard is a no-op remove when it drains, and once the replacement
+        // session is active the duplicate-dial guard skips any stragglers.
+        pending_outbound_dials.remove(node_id);
+        pending_outbound_guards.remove(node_id);
+    }
     let removed_instance_ids: Vec<String> = sessions
         .iter()
         .filter(|(_session_instance_id, active)| active.session.node_id() == node_id)
@@ -2319,10 +2351,15 @@ fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
         closed_session_instances.insert(session_instance_id.clone());
         outbound_guards.remove(session_instance_id);
     }
-    // Never clear pending_outbound_guards/pending_outbound_dials here: they
-    // represent in-flight dial work owned by the retry worker / connect path.
-    // Clearing them re-opens the duplicate-dial race (two concurrent dials for
-    // the same node both pass the guard and create duplicate gRPC sessions,
+    // By default never clear pending_outbound_guards/pending_outbound_dials:
+    // they represent in-flight dial work owned by the retry worker / connect
+    // path. Clearing them re-opens the duplicate-dial race (two concurrent
+    // dials for the same node both pass the guard and create duplicate gRPC
+    // sessions). The connect path's OWN replacement dials (issue #192
+    // relay-presence reroute) pass `cancel_pending_dial` to abandon the dial
+    // they are replacing; the canceled worker's late guard is a no-op remove
+    // when it drains, and once the replacement session is active the
+    // duplicate-dial guard skips any stragglers.
     // which strands authority output on stale bridges). The pending entry is
     // cleared when the dial guard arrives (outbound_guard_rx handling).
     if !removed_instance_ids.is_empty() || had_pending {
@@ -2790,6 +2827,8 @@ fn handle_internal_event<B: RemoteTargetPublicationBackend, G: LocalSessionCatal
         | InternalEvent::LocalCreateSessionTimedOut { .. }
         | InternalEvent::InitiateOutboundConnection { .. }
         | InternalEvent::CloseNodeIngressSession { .. } => {}
+        // Consumed by the ingress event loop itself (transport update).
+        InternalEvent::SetRelayClient { .. } => {}
     }
 }
 
@@ -4136,6 +4175,7 @@ mod tests {
             &mut pending_outbound_dials,
             &mut closed_session_instances,
             "peer#42424",
+            false,
         );
 
         assert!(
@@ -4176,6 +4216,7 @@ mod tests {
             &mut pending_outbound_dials,
             &mut closed_session_instances,
             "peer#42424",
+            false,
         );
 
         assert!(
@@ -4297,6 +4338,7 @@ mod tests {
             &mut pending_outbound_dials,
             &mut closed_session_instances,
             "peer#42424",
+            false,
         );
 
         assert!(
@@ -4327,6 +4369,7 @@ mod tests {
             &mut pending_outbound_dials,
             &mut closed_session_instances,
             "peer#42424",
+            false,
         );
         assert!(
             sessions.is_empty(),

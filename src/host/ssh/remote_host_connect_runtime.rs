@@ -36,6 +36,11 @@ const DEFAULT_ENDPOINT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // First-time installs can take a while to download the release asset and
 // start the remote daemon, so give the endpoint more time to publish.
 const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the publish wait defers to the registry fast path before relay
+/// presence may accept the registration (issue #192 direction 2). A direct
+/// dial's catalog baseline lands within milliseconds; presence must never
+/// steal that win.
+const PRESENCE_ACCEPTANCE_GRACE: Duration = Duration::from_secs(3);
 // When reusing a previously connected remote waitagent, only wait a few seconds
 // for it to publish a target before falling back to SSH bootstrapping.
 const REUSE_CONNECTION_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -122,6 +127,14 @@ pub struct RemoteHostConnectRuntime<H, P, B> {
     /// [`Self::with_publish_timeout`]; production keeps
     /// [`DEFAULT_ENDPOINT_WAIT_TIMEOUT`].
     publish_timeout: Duration,
+    /// Issue #192 direction 2: probes the pinned relay's presence for the
+    /// remote node's enrolled fingerprint. Only consulted for relay-role
+    /// profiles; production maps `SharedState` relay state, tests inject.
+    relay_presence: Option<RelayPresenceChecker>,
+    /// Issue #192 direction 2: how long the publish wait defers to the
+    /// registry fast path before relay presence may accept the registration.
+    /// Tests shrink it; production keeps [`PRESENCE_ACCEPTANCE_GRACE`].
+    presence_grace: Duration,
     /// Fingerprint auto-discovery for pin-less relay/auto profiles (issue
     /// #156 slice 3): maps the profile host to the peer's certificate
     /// fingerprint through the pinned relay's `resolve-node` admin request.
@@ -146,6 +159,33 @@ pub type FingerprintDiscoverer = Arc<dyn Fn(&str) -> Result<Option<String>, Stri
 /// Reports whether the given node has actively rejected this host's operator
 /// key, returning the rejection message when it has.
 pub type AuthRejectionChecker = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Issue #192 direction 2: the local node's view of a peer's relay presence,
+/// paired with the local relay-link state. `LinkDown` means no relay client
+/// is connected locally, so any presence data would be stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayPresenceState {
+    Online,
+    Offline,
+    LinkDown,
+}
+
+/// Probes [`RelayPresenceState`] for a lowercase node fingerprint. The
+/// production closure takes brief locked snapshots of `SharedState` and
+/// declares the presence watch; tests inject deterministic answers.
+pub type RelayPresenceChecker = Arc<dyn Fn(&str) -> RelayPresenceState + Send + Sync>;
+
+/// How the bootstrap publish-wait accepted the remote node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishAcceptance {
+    /// An online target record reached the authority-local registry (the
+    /// historical fast path).
+    Target(ManagedSessionRecord),
+    /// Issue #192 direction 2: the remote node is online at the relay both
+    /// nodes share (matched by its enrolled fingerprint). No target record
+    /// exists yet; the caller routes the session through the relay.
+    Presence,
+}
 
 impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
     pub fn new(
@@ -206,7 +246,24 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
             via_resolver: None,
             fingerprint_discoverer: None,
             publish_timeout: DEFAULT_ENDPOINT_WAIT_TIMEOUT,
+            relay_presence: None,
+            presence_grace: PRESENCE_ACCEPTANCE_GRACE,
         }
+    }
+
+    /// Shrink the registry fast-path grace so presence-acceptance tests do
+    /// not wait (issue #192 direction 2).
+    #[cfg(test)]
+    pub fn with_presence_grace(mut self, grace: Duration) -> Self {
+        self.presence_grace = grace;
+        self
+    }
+
+    /// Install the relay-presence probe (issue #192 direction 2). Production
+    /// passes a `SharedState`-backed snapshot reader; tests pass fakes.
+    pub fn with_relay_presence_checker(mut self, checker: RelayPresenceChecker) -> Self {
+        self.relay_presence = Some(checker);
+        self
     }
 
     fn publish_wait_timeout(&self) -> Duration {
@@ -508,14 +565,14 @@ where
         }
 
         let endpoint_uri = format!("tls://{}:{}", profile.host, bootstrap_result.remote_port);
-        let resolved_via = self.resolve_dial_via(
+        let mut resolved_via = self.resolve_dial_via(
             profile.via(),
             &endpoint_uri,
             Some(&bootstrap_result.tls_pin_sha256),
         );
         let outbound_request = OutboundNodeSessionRequest {
             node_id: authority_node_id.clone(),
-            endpoint_uri,
+            endpoint_uri: endpoint_uri.clone(),
             tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
             via: request_via(resolved_via),
         };
@@ -526,6 +583,18 @@ where
         initiate_outbound_dial(outbound_request)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
+        // Issue #192 direction 2: relay-role profiles may also register when
+        // the remote node appears online at the relay both nodes share,
+        // matched by its enrolled fingerprint (the bootstrap pin). Offered
+        // between the registry fast path and direction 1's back-dial
+        // fallback; non-relay profiles never see it.
+        let presence_probe: Option<(RelayPresenceChecker, String)> = if profile.relay_role {
+            self.relay_presence
+                .clone()
+                .map(|checker| (checker, bootstrap_result.tls_pin_sha256.clone()))
+        } else {
+            None
+        };
         let default_target = match self.wait_for_first_online_target(
             &authority_node_id,
             DEFAULT_ENDPOINT_POLL_INTERVAL,
@@ -533,8 +602,52 @@ where
             self.auth_rejection.as_ref(),
             &request.local_connect_endpoint,
             port.port,
+            presence_probe
+                .as_ref()
+                .map(|(checker, fingerprint)| (checker, fingerprint.as_str())),
         ) {
-            Ok(target) => target,
+            Ok(PublishAcceptance::Target(target)) => target,
+            Ok(PublishAcceptance::Presence) => {
+                let (checker, fingerprint) = presence_probe
+                    .as_ref()
+                    .expect("presence acceptance implies an offered probe");
+                if checker(fingerprint) == RelayPresenceState::LinkDown {
+                    return Err(LifecycleError::Protocol(format!(
+                        "remote node `{authority_node_id}` is online via relay presence, but the local relay link is not active; refusing to register a ghost session. Re-check the relay pin on the Relay page and reconnect"
+                    )));
+                }
+                // The direct dial queued above cannot reach this host (no
+                // target ever registered); the working path is the relay.
+                ERROR_LOG.log(format!(
+                    "[remote-host-connect] remote node {authority_node_id} is online via relay presence; routing the session through the relay"
+                ));
+                resolved_via = RemoteNodeVia::Relay;
+                profile.last_via_used = Some(RemoteNodeVia::Relay.as_str().to_string());
+                let relay_request = OutboundNodeSessionRequest {
+                    node_id: authority_node_id.clone(),
+                    endpoint_uri,
+                    tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
+                    via: Some(RemoteNodeVia::Relay),
+                };
+                initiate_outbound_dial(relay_request)
+                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+                match self.wait_for_first_online_target(
+                    &authority_node_id,
+                    DEFAULT_ENDPOINT_POLL_INTERVAL,
+                    self.publish_wait_timeout(),
+                    self.auth_rejection.as_ref(),
+                    &request.local_connect_endpoint,
+                    port.port,
+                    None,
+                )? {
+                    PublishAcceptance::Target(target) => target,
+                    PublishAcceptance::Presence => {
+                        return Err(LifecycleError::Protocol(format!(
+                            "remote node `{authority_node_id}` registered via relay presence, but no session target appeared after the relay dial"
+                        )));
+                    }
+                }
+            }
             Err(wait_error) => {
                 // Issue #192 direction 1: Cloud profiles whose via allows a
                 // direct dial get one registration retry in the opposite
@@ -558,14 +671,22 @@ where
                             error.to_string()
                         ))
                     })?;
-                self.wait_for_first_online_target(
+                match self.wait_for_first_online_target(
                     &authority_node_id,
                     DEFAULT_ENDPOINT_POLL_INTERVAL,
                     self.publish_wait_timeout(),
                     self.auth_rejection.as_ref(),
                     &request.local_connect_endpoint,
                     port.port,
-                )?
+                    None,
+                )? {
+                    PublishAcceptance::Target(target) => target,
+                    PublishAcceptance::Presence => {
+                        return Err(LifecycleError::Protocol(format!(
+                            "remote node `{authority_node_id}` unexpectedly registered via relay presence during the back-dial fallback"
+                        )));
+                    }
+                }
             }
         };
         // The dial worked: for an `auto` profile remember which concrete
@@ -682,8 +803,9 @@ where
             self.auth_rejection.as_ref(),
             &request.local_connect_endpoint,
             profile.last_remote_port.unwrap_or_default(),
+            None,
         ) {
-            Ok(target) => Ok(Some(RemoteHostConnectOutcome {
+            Ok(PublishAcceptance::Target(target)) => Ok(Some(RemoteHostConnectOutcome {
                 authority_node_id,
                 created_target: target,
                 reused_existing_endpoint: true,
@@ -696,6 +818,12 @@ where
                 // request; the snapshot-reconnect path re-deploys instead.
                 relay_join: None,
             })),
+            Ok(PublishAcceptance::Presence) => {
+                // The reuse path never offers a presence probe.
+                return Err(LifecycleError::Protocol(format!(
+                    "remote node `{authority_node_id}` unexpectedly registered via relay presence on the reuse fast path"
+                )));
+            }
             Err(error) => {
                 if is_auth_rejection_error(&error) {
                     // The remote node actively refused this host's operator key.
@@ -763,6 +891,11 @@ where
         }
     }
 
+    /// Polls until the remote publishes an online target (registry fast
+    /// path), appears online at the pinned relay (issue #192 direction 2,
+    /// only when `presence` is offered — relay-role profiles), or the
+    /// deadline passes. The registry is checked first on every iteration;
+    /// presence never preempts a real target record.
     fn wait_for_first_online_target(
         &self,
         expected: &str,
@@ -771,9 +904,11 @@ where
         auth_check: Option<&AuthRejectionChecker>,
         advertised_endpoint: &str,
         remote_port: u16,
-    ) -> Result<ManagedSessionRecord, LifecycleError> {
+        presence: Option<(&RelayPresenceChecker, &str)>,
+    ) -> Result<PublishAcceptance, LifecycleError> {
         let expected = expected.to_string();
-        let deadline = Instant::now() + timeout;
+        let started_at = Instant::now();
+        let deadline = started_at + timeout;
         loop {
             if let Some(checker) = auth_check {
                 if let Some(message) = checker(&expected) {
@@ -790,7 +925,19 @@ where
                 .into_iter()
                 .find(|target| target.availability == SessionAvailability::Online)
             {
-                return Ok(target);
+                return Ok(PublishAcceptance::Target(target));
+            }
+            // Presence never preempts the registry fast path: a direct
+            // session's catalog lands within milliseconds of the dial, while
+            // the remote's relay link (and therefore its presence) can already
+            // be up by the first poll. Give the fast path a grace window
+            // before presence may accept the registration.
+            if let Some((checker, fingerprint)) = presence {
+                if started_at.elapsed() >= self.presence_grace
+                    && checker(fingerprint) == RelayPresenceState::Online
+                {
+                    return Ok(PublishAcceptance::Presence);
+                }
             }
             if Instant::now() >= deadline {
                 return Err(LifecycleError::Protocol(format!(
@@ -2462,8 +2609,12 @@ mod tests {
                 None,
                 "10.1.26.84:7474",
                 7476,
+                None,
             )
             .unwrap();
+        let PublishAcceptance::Target(target) = target else {
+            panic!("registry signal must arrive as a target");
+        };
 
         assert_eq!(target.address.authority_id(), "10.1.29.130#7476");
         assert_eq!(target.address.session_id(), "seed");
@@ -2495,6 +2646,7 @@ mod tests {
                 None,
                 "192.0.2.1:7474",
                 7476,
+                None,
             )
             .unwrap_err();
 
@@ -2763,6 +2915,430 @@ mod tests {
             message.contains("back-dial registration fallback failed"),
             "the fallback failure is preserved, not masked: {message}"
         );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    /// A scripted relay-presence probe: pops `states` (last element first),
+    /// answers `default_state` once empty, and only for the expected
+    /// fingerprint.
+    #[derive(Clone)]
+    struct ScriptedPresence {
+        states: Arc<Mutex<Vec<crate::host::ssh::remote_host_connect_runtime::RelayPresenceState>>>,
+        default_state: crate::host::ssh::remote_host_connect_runtime::RelayPresenceState,
+        expected_fingerprint: String,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ScriptedPresence {
+        fn checker(&self) -> RelayPresenceChecker {
+            let states = self.states.clone();
+            let default_state = self.default_state;
+            let expected = self.expected_fingerprint.clone();
+            let calls = self.calls.clone();
+            Arc::new(move |fingerprint| {
+                calls.lock().unwrap().push(fingerprint.to_string());
+                if fingerprint != expected {
+                    return crate::host::ssh::remote_host_connect_runtime::RelayPresenceState::Offline;
+                }
+                states.lock().unwrap().pop().unwrap_or(default_state)
+            })
+        }
+    }
+
+    #[test]
+    fn relay_role_registration_accepts_relay_presence_and_routes_via_relay() {
+        use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
+        let path = unique_path("remote-host-connect-presence-registration.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: true,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let mut stored = cloud_direct_profile();
+        stored.relay_role = true;
+        let runtime = fallback_test_runtime(&path, stored, bootstrapper, registry)
+            .with_presence_grace(Duration::from_millis(0))
+            .with_relay_presence_checker(
+                ScriptedPresence {
+                    states: Arc::new(Mutex::new(vec![
+                        RelayPresenceState::Offline,
+                        RelayPresenceState::Online, // accepted by the publish wait
+                        RelayPresenceState::Online, // ghost guard re-check
+                    ])),
+                    default_state: RelayPresenceState::Offline,
+                    expected_fingerprint: "deadbeef".to_string(),
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                }
+                .checker(),
+            );
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+        let relay_targets = catalog_targets.clone();
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request.clone());
+                    if request.via == Some(RemoteNodeVia::Relay) {
+                        relay_targets
+                            .lock()
+                            .unwrap()
+                            .push(remote_target("10.1.29.130#7476", "relay-session"));
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // Presence registered the node; the session is routed via relay and
+        // the profile annotates the effective path.
+        assert_eq!(outcome.created_target.address.session_id(), "relay-session");
+        assert_eq!(outcome.dial_via, Some(RemoteNodeVia::Relay));
+        let dials = dials.lock().unwrap();
+        assert_eq!(dials.len(), 2, "direct dial then relay dial: {dials:?}");
+        assert_eq!(dials[0].via, None, "first dial follows the profile");
+        assert_eq!(
+            dials[1].via,
+            Some(RemoteNodeVia::Relay),
+            "presence registration reroutes through the relay"
+        );
+        drop(dials);
+        assert_eq!(
+            *fallback_calls.lock().unwrap(),
+            0,
+            "presence acceptance must win over the back-dial fallback"
+        );
+        let saved = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_eq!(
+            saved.hosts[0].last_via_used.as_deref(),
+            Some("relay"),
+            "presence registration persists last_via_used = relay"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn registry_target_wins_over_relay_presence() {
+        use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
+        let path = unique_path("remote-host-connect-presence-registry-wins.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: true,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        // The direct dial registers the target immediately (pushed by the
+        // closure below), even though presence also reports the node online.
+        let runtime = fallback_test_runtime(
+            &path,
+            {
+                let mut stored = cloud_direct_profile();
+                stored.relay_role = true;
+                stored
+            },
+            bootstrapper,
+            registry,
+        )
+        .with_relay_presence_checker(
+            ScriptedPresence {
+                states: Arc::new(Mutex::new(vec![RelayPresenceState::Online])),
+                default_state: RelayPresenceState::Online,
+                expected_fingerprint: "deadbeef".to_string(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+            .checker(),
+        );
+        let dials = Arc::new(Mutex::new(Vec::new()));
+        let dial_log = dials.clone();
+        let direct_targets = catalog_targets.clone();
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_log.lock().unwrap().push(request.clone());
+                    direct_targets
+                        .lock()
+                        .unwrap()
+                        .push(remote_target("10.1.29.130#7476", "direct-session"));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome.created_target.address.session_id(),
+            "direct-session"
+        );
+        assert_eq!(dials.lock().unwrap().len(), 1, "no relay dial needed");
+        let saved = RemoteHostHistoryStore::new(&path).load().unwrap();
+        assert_ne!(
+            saved.hosts[0].last_via_used.as_deref(),
+            Some("relay"),
+            "registry registration keeps the direct path"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn foreign_fingerprint_presence_is_not_accepted() {
+        use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
+        let path = unique_path("remote-host-connect-presence-wrong-fingerprint.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: true,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = fallback_test_runtime(
+            &path,
+            {
+                let mut stored = cloud_direct_profile();
+                stored.relay_role = true;
+                stored
+            },
+            bootstrapper,
+            registry,
+        )
+        .with_relay_presence_checker(
+            ScriptedPresence {
+                // Online only for the EXPECTED fingerprint never happens:
+                // the scripted Online answers "deadbeef", so reprogram the
+                // expectation to a foreign fingerprint instead.
+                states: Arc::new(Mutex::new(vec![RelayPresenceState::Online])),
+                default_state: RelayPresenceState::Online,
+                expected_fingerprint: "foreignfingerprint".to_string(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+            .checker(),
+        );
+
+        let error = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("timed out"),
+            "foreign presence must not register the node: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("back-dial registration fallback failed"),
+            "presence rejection falls through to direction 1: {error}"
+        );
+        assert_eq!(
+            *fallback_calls.lock().unwrap(),
+            1,
+            "the back-dial fallback still runs for Cloud profiles"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn presence_accept_with_link_down_is_a_loud_error() {
+        use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
+        let path = unique_path("remote-host-connect-presence-ghost.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: true,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = fallback_test_runtime(
+            &path,
+            {
+                let mut stored = cloud_direct_profile();
+                stored.relay_role = true;
+                stored
+            },
+            bootstrapper,
+            registry,
+        )
+        .with_presence_grace(Duration::from_millis(0))
+        .with_relay_presence_checker(
+            ScriptedPresence {
+                // Accepted by the wait, then the ghost guard sees the link
+                // drop before the relay dial is queued.
+                states: Arc::new(Mutex::new(vec![
+                    RelayPresenceState::Online,
+                    RelayPresenceState::LinkDown,
+                ])),
+                default_state: RelayPresenceState::LinkDown,
+                expected_fingerprint: "deadbeef".to_string(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+            .checker(),
+        );
+
+        let error = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("ghost session"),
+            "stale presence with no local link must fail loudly: {error}"
+        );
+        assert_eq!(
+            *fallback_calls.lock().unwrap(),
+            0,
+            "the ghost guard aborts before the back-dial fallback"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn lan_connects_never_consult_the_presence_probe() {
+        use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
+        let path = unique_path("remote-host-connect-presence-lan-untouched.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: true,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        // LAN profile WITHOUT the relay role: today's behavior exactly.
+        let probe = ScriptedPresence {
+            states: Arc::new(Mutex::new(vec![RelayPresenceState::Online])),
+            default_state: RelayPresenceState::Online,
+            expected_fingerprint: "deadbeef".to_string(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let probe_calls = probe.calls.clone();
+        let runtime = fallback_test_runtime(&path, profile(), bootstrapper, registry)
+            .with_relay_presence_checker(probe.checker());
+        let direct_targets = catalog_targets.clone();
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |_request| {
+                    direct_targets
+                        .lock()
+                        .unwrap()
+                        .push(remote_target("10.1.29.130#7476", "lan-session"));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome.created_target.address.session_id(), "lan-session");
+        assert!(
+            probe_calls.lock().unwrap().is_empty(),
+            "non-relay profiles never consult the presence probe"
+        );
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn relay_role_presence_timeout_still_falls_back_for_cloud() {
+        use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
+        let path = unique_path("remote-host-connect-presence-timeout-fallback.toml");
+        let fallback_calls = Arc::new(Mutex::new(0));
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrapper = BackDialFallbackBootstrapper {
+            fallback_calls: fallback_calls.clone(),
+            catalog_targets: catalog_targets.clone(),
+            fail_fallback: false,
+        };
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = fallback_test_runtime(
+            &path,
+            {
+                let mut stored = cloud_direct_profile();
+                stored.relay_role = true;
+                stored
+            },
+            bootstrapper,
+            registry,
+        )
+        .with_relay_presence_checker(
+            ScriptedPresence {
+                // The remote never appears online at the relay.
+                states: Arc::new(Mutex::new(vec![])),
+                default_state: RelayPresenceState::Offline,
+                expected_fingerprint: "deadbeef".to_string(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+            .checker(),
+        );
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "192.0.2.1:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
+            .unwrap();
+
+        // The back-dial fallback pushes the "back-dial" target on restart.
+        assert_eq!(outcome.created_target.address.session_id(), "back-dial");
+        assert_eq!(*fallback_calls.lock().unwrap(), 1);
         crate::infra::best_effort::remove_file(path);
     }
 
