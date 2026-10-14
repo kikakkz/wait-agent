@@ -2303,6 +2303,9 @@ fn has_active_ingress_session_for_node(
         .any(|active| active.session.node_id() == node_id)
 }
 
+// The bookkeeping pointers are inherent to the eviction; grouped rather
+// than bundled into a state struct that would outlive this refactor.
+#[allow(clippy::too_many_arguments)]
 fn close_ingress_sessions_for_node<B: RemoteTargetPublicationBackend>(
     publication_runtime: &RemoteTargetPublicationRuntime<B>,
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,

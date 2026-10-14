@@ -202,6 +202,12 @@ pub(crate) enum StateEvent {
         /// connect worker thread never mutates relay/pin state).
         relay_join: Option<RemoteRelayJoinRequest>,
     },
+    /// Issue #197: the remote relay admin probe succeeded on a relay-role
+    /// connect and the session dial needs the local relay link NOW (a cold
+    /// node has no pin and no link yet). The state loop drives the same
+    /// off-loop join engine; the post-success join remains as an
+    /// idempotent quiet re-pin.
+    RemoteHostRelayJoinRequested { address: String, token: String },
     /// The asynchronous remote session creation operation finished. The state
     /// loop applies catalog/active-target mutations and reports success or error
     /// to the originating client.

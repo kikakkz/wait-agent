@@ -59,13 +59,19 @@
 #                      times out and the remote restarts with --connect,
 #                      registering by dialing the authority itself (the
 #                      iptables DROP stays in place for phase 9);
-#                   9. relay-presence registration (issue #192 direction 2):
-#                      with the advertised endpoint back to unroutable
-#                      192.0.2.1:7474 and 7474 still dropped, a Cloud
-#                      via=direct profile with relay role registers by the
-#                      remote node appearing online at the relay both nodes
-#                      share; the session routes via the relay and the
-#                      profile persists last_via_used = relay.
+#                   9. relay-role registration (issue #197): with the
+#                      advertised endpoint back to unroutable 192.0.2.1:7474
+#                      and the node port dropped, a Cloud via=direct profile
+#                      with relay role registers via the remote admin probe
+#                      over SSH; the session routes via the relay and the
+#                      profile persists last_via_used = relay;
+#                   10. cold-start relay-role connect (issue #197): a fresh
+#                      control node with NO relay pin and an unroutable
+#                      advertised endpoint connects a relay-role host with
+#                      only 7475 open between the containers - the SSH admin
+#                      probe carries the registration and the state loop's
+#                      post-success join brings the relay link up for the
+#                      session dial.
 #
 # Images: WA_E2E_BINARY stages the prebuilt host binary into the runtime
 # image via scripts/e2e/relay/Dockerfile.runtime (same as the relay harness);
@@ -397,12 +403,16 @@ relay_role = true
 PROFEOF
     prime_local_artifact_cache
     force_remote_reinstall
-    connect_out=$(node_command "CONNECT_REMOTE_HOST ssh-host")
-    jq -e '.type == "Response" and .payload.ok == true' <<<"$connect_out" >/dev/null \
-        || die "relay-role CONNECT_REMOTE_HOST was not accepted: $connect_out"
+    # Fire and poll: the cold relay-role connect serializes bootstrap, the
+    # remote admin probe, the early relay join, and the relay session -
+    # legitimately past __node-command's 60s response window (the TUI uses
+    # 300s); the connect runs server-side regardless.
+    node_command "CONNECT_REMOTE_HOST ssh-host" &
+    local connect_pid=$!
     row=$(wait_for_online_remote_row "ssh-host#") \
         || die "no online remote session row after the relay-role connect"
     log "online remote row: $row"
+    wait "$connect_pid" || true
 
     log "waiting for the local relay pin (ssh-host:7475)"
     local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
@@ -508,13 +518,26 @@ EOF
     # window, while the connect itself keeps running server-side regardless.
     node_command "CONNECT_REMOTE_HOST ssh-host" &
     local connect_pid=$!
-    row=$(wait_for_online_remote_row "ssh-host#")         || die "no online remote session row after the back-dial fallback"
+    # Assert the unambiguous evidence first, by polling: the --connect
+    # process only exists after the fallback restart, while an online row
+    # can occasionally be satisfied earlier by an unrelated registration.
+    local ps_deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    remote_ps=""
+    while ((SECONDS < ps_deadline)); do
+        remote_ps=$(docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port 7488" | grep -v grep || true)
+        if grep -q -- "--connect $node_ip:9001" <<<"$remote_ps"; then
+            break
+        fi
+        remote_ps=""
+        sleep 2
+    done
+    [ -n "$remote_ps" ] || die "the remote node never gained the --connect fallback argument"
+    row=$(wait_for_online_remote_row "ssh-host#7488")         || die "no online remote session row after the back-dial fallback"
     log "online remote row: $row"
     wait "$connect_pid" || true
-    docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port" | grep -q -- "--connect $node_ip:9001"         || die "the remote node must carry the --connect fallback argument"
     log "phase 8 OK: publish-timeout fallback restarted the remote in back-dial mode"
 
-    log "phase 9: relay-role Cloud host registers via relay presence (issue #192 direction 2)"
+    log "phase 9: relay-role Cloud host registers via the remote admin SSH probe (issue #197)"
     # The exact user scenario: WSL-style authority (unroutable advertised
     # endpoint), cloud host, ONLY 7475 open. The remote relay still serves
     # (phase 6) and the local node stays pinned to it, so the remote node
@@ -547,14 +570,57 @@ PROFEOF
     node_command "CONNECT_REMOTE_HOST ssh-host-p9" &
     local connect_pid=$!
     row=$(wait_for_online_remote_row "ssh-host#7489") \
-        || die "no online remote session row after the relay-presence registration"
+        || die "no online remote session row after the probe registration"
     log "online remote row: $row"
     wait "$connect_pid" || true
     docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port 7477" | grep -q -- "--connect" \
         && die "the remote node must start without --connect when presence registers it"
     docker exec "$NODE" sh -c 'sed -n "/name = \"ssh-host-p9\"/,/^$/p" /root/.waitagent/remote-hosts.toml | grep -q "last_via_used = \"relay\""' \
         || die "the profile must persist last_via_used = relay"
-    log "phase 9 OK: presence registration routed the session via the relay"
+    log "phase 9 OK: probe registration routed the session via the relay"
+
+    log "phase 10: cold-start relay-role connect with no local relay pin (issue #197)"
+    # True cold start: a FRESH control node (no relay.toml, no link) whose
+    # advertised endpoint is unroutable, with only 7475 (plus SSH) open
+    # toward the sshd host. The bootstrap starts the remote relay + node,
+    # the SSH admin probe carries the registration, the state loop joins the
+    # relay AFTER connect success (issue #180), and the relay dial's retry
+    # worker lands the session once the link is up.
+    docker rm -f "$NODE" >/dev/null
+    docker run -dt --name "$NODE" --network "$NET" "$IMAGE" \
+        sh -c "exec waitagent --port $NODE_PORT --public 192.0.2.1:7474" >/dev/null
+    wait_for_node_control
+    docker exec "$NODE" mkdir -p /root/.waitagent/cache /root/.ssh
+    docker cp "$STAGE/e2e_key" "$NODE:/root/.ssh/e2e_key" >/dev/null
+    docker exec -i "$NODE" sh -c 'cat > /root/.waitagent/remote-hosts.toml' <<'PROFEOF'
+[[hosts]]
+name = "ssh-host-p10"
+host = "ssh-host"
+ssh_user = "root"
+auth_kind = "key"
+key_path = "/root/.ssh/e2e_key"
+preferred_remote_port = 7490
+use_install_proxy = false
+host_kind = "cloud"
+via = "direct"
+install_source = "upload"
+relay_role = true
+PROFEOF
+    prime_local_artifact_cache
+    docker exec "$SSH_HOST" iptables -A INPUT -i eth+ -p tcp --dport 7490 -j DROP
+    docker exec "$SSH_HOST" sh -c 'pkill -f "[r]atatui-node-server" || true; rm -f /usr/local/bin/waitagent'
+    sleep 1
+    node_command "CONNECT_REMOTE_HOST ssh-host-p10" &
+    local connect_pid=$!
+    row=$(wait_for_online_remote_row "ssh-host#7490") \
+        || die "no online remote session row after the cold-start probe registration"
+    log "online remote row: $row"
+    wait "$connect_pid" || true
+    docker exec "$SSH_HOST" sh -c 'ps -eo args=' | grep "waitagent --port 7490" | grep -q -- "--connect" \
+        && die "the remote node must start without --connect when the probe registers it"
+    docker exec "$NODE" sh -c 'sed -n "/name = \"ssh-host-p10\"/,/^$/p" /root/.waitagent/remote-hosts.toml | grep -q "last_via_used = \"relay\""' \
+        || die "the profile must persist last_via_used = relay"
+    log "phase 10 OK: cold-start registration succeeded with no local relay pin"
 }
 
 count_fallback_markers() {

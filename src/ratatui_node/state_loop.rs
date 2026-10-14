@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::authority_host_io_loop::{
@@ -275,6 +275,17 @@ fn run_state_event_loop(
                 );
             }
 
+            StateEvent::RemoteHostRelayJoinRequested { address, token } => {
+                run_relay_join(
+                    shared.clone(),
+                    0,
+                    address,
+                    token,
+                    false,
+                    RelayJoinContext::RelayRoleDeploy,
+                    state_event_tx.clone(),
+                );
+            }
             StateEvent::RemoteSessionCreateResult {
                 client_id,
                 authority_node_id,
@@ -2222,12 +2233,8 @@ fn perform_remote_host_connect(
 
     let auth_rejection_shared = shared.clone();
     let discovery_shared = shared.clone();
-    let presence_shared = shared.clone();
-    // Watches are declared once per fingerprint (the poll runs every 100ms;
-    // re-sending Watch each time would flood the relay link's control
-    // channel and starve the very streams the connect dials).
-    let presence_watches: Arc<Mutex<std::collections::HashSet<String>>> =
-        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let early_join_shared = shared.clone();
+    let link_ready_shared = shared.clone();
     let runtime = RemoteHostConnectRuntime::new(
         history_store.clone(),
         SshRemotePortProbeFactory,
@@ -2241,11 +2248,21 @@ fn perform_remote_host_connect(
     .with_fingerprint_discoverer(Arc::new(move |host| {
         discover_fingerprint_via_relay(&discovery_shared, host)
     }))
-    .with_relay_presence_checker(Arc::new(move |fingerprint| {
-        let mut watches = presence_watches.lock().unwrap_or_else(|e| e.into_inner());
-        let declared = !watches.insert(fingerprint.to_lowercase());
-        drop(watches);
-        relay_presence_state(&presence_shared, fingerprint, declared)
+    .with_relay_probe_join_hook(Arc::new(move |request| {
+        let _ = early_join_shared
+            .state_sender()
+            .send(StateEvent::RemoteHostRelayJoinRequested {
+                address: request.address,
+                token: request.token,
+            });
+    }))
+    .with_relay_link_ready_probe(Arc::new(move || {
+        // m07: brief locked snapshot; no I/O under the lock.
+        link_ready_shared
+            .relay_client
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
     }));
 
     let outcome = runtime
@@ -2368,51 +2385,6 @@ fn perform_remote_host_connect(
 /// missing/unconfigured relay, a lookup failure, or a non-unique match all
 /// answer `Ok(None)`/`Err` so the connect falls back to the SSH bootstrap;
 /// discovery is opportunistic and never fails the connect by itself.
-/// Issue #192 direction 2: probes whether `fingerprint` (the remote node's
-/// enrolled identity, lowercase) is online at the relay both nodes share,
-/// and whether the LOCAL relay link is active at all.
-///
-/// Lock discipline (m07): `relay_client` and `relay_presence` are each taken
-/// as BRIEF sequential snapshots — never nested, never held across I/O; the
-/// handle's `watch` call below runs entirely lock-free. The watch is
-/// idempotent and persists across reconnects; the relay answers a `Watch`
-/// with the target's current presence, so declaring it also primes the map
-/// on the first poll.
-fn relay_presence_state(
-    shared: &Arc<SharedState>,
-    fingerprint: &str,
-    watch_declared: bool,
-) -> crate::host::ssh::remote_host_connect_runtime::RelayPresenceState {
-    use crate::host::ssh::remote_host_connect_runtime::RelayPresenceState;
-    let fingerprint = fingerprint.to_lowercase();
-    let handle = shared
-        .relay_client
-        .lock()
-        .map(|slot| slot.clone())
-        .unwrap_or(None);
-    let online = shared
-        .relay_presence
-        .lock()
-        .ok()
-        .and_then(|presence| presence.get(&fingerprint).copied())
-        .unwrap_or(false);
-    let Some(handle) = handle else {
-        return RelayPresenceState::LinkDown;
-    };
-    if !watch_declared {
-        if let Err(error) = handle.watch(&fingerprint) {
-            ERROR_LOG.log(format!(
-                "[remote-host-connect] relay presence watch for {fingerprint} could not be declared: {error}"
-            ));
-        }
-    }
-    if online {
-        RelayPresenceState::Online
-    } else {
-        RelayPresenceState::Offline
-    }
-}
-
 fn discover_fingerprint_via_relay(
     shared: &Arc<SharedState>,
     label: &str,

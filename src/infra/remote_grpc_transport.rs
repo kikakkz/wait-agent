@@ -504,6 +504,22 @@ impl Drop for GrpcRemoteNodeTransportGuard {
     }
 }
 
+/// Fails the dial with `message` and still reports the failure to the
+/// ingress as [`RemoteNodeTransportEvent::TransportFailed`] so the retry
+/// machinery engages (see the `NO_RELAY_CONFIGURED` call site).
+fn emit_transport_failed_and_err(
+    event_tx: &mpsc::Sender<RemoteNodeTransportEvent>,
+    request: &OutboundNodeSessionRequest,
+    message: &'static str,
+) -> Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError> {
+    let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+        node_id: Some(request.node_id.clone()),
+        session_instance_id: None,
+        message: message.to_string(),
+    });
+    Err(RemoteNodeTransportError::new(message))
+}
+
 impl RemoteNodeTransport for GrpcRemoteNodeTransport {
     fn connect_outbound(
         &self,
@@ -515,9 +531,12 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 Some(handle) => PeerDialer::Relay(handle.clone()),
                 // Guiding error: fail before spawning the dial worker so the
                 // connect UI surfaces the enrollment hint immediately. The
-                // retry worker sees TransportFailed and keeps its cadence.
+                // failure still reaches the ingress as TransportFailed so the
+                // retry worker keeps its cadence — a relay-role connect (issue
+                // #197) can queue its relay dial just before the join's
+                // SetRelayClient lands, and the retry must carry it.
                 None => {
-                    return Err(RemoteNodeTransportError::new(NO_RELAY_CONFIGURED));
+                    return emit_transport_failed_and_err(&event_tx, &request, NO_RELAY_CONFIGURED);
                 }
             },
             Some(RemoteNodeVia::Direct) | None => PeerDialer::Direct,
@@ -526,9 +545,11 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
             // arm means a caller skipped the resolution — fail loudly rather
             // than guess, so the bug surfaces in the connect UI and logs.
             Some(RemoteNodeVia::Auto) => {
-                return Err(RemoteNodeTransportError::new(
+                return emit_transport_failed_and_err(
+                    &event_tx,
+                    &request,
                     "via = \"auto\" must be resolved to \"direct\" or \"relay\" before dialing",
-                ));
+                );
             }
         };
         let endpoint = self.endpoint(&tls_endpoint_uri(
@@ -1763,7 +1784,7 @@ mod tests {
     #[test]
     fn via_relay_without_a_relay_handle_fails_with_the_guiding_error() {
         let transport = GrpcRemoteNodeTransport::new();
-        let (event_tx, _event_rx) = mpsc::channel::<RemoteNodeTransportEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<RemoteNodeTransportEvent>();
         let result = transport.connect_outbound(
             OutboundNodeSessionRequest {
                 node_id: "peer".to_string(),
@@ -1786,6 +1807,18 @@ mod tests {
             message.contains("via = \"direct\""),
             "the error names the escape hatch: {message}"
         );
+        // The failure must still reach the ingress as TransportFailed so the
+        // retry worker engages (issue #197: the relay-role dial can race the
+        // join's SetRelayClient and rely on the retry cadence).
+        match event_rx.try_recv() {
+            Ok(RemoteNodeTransportEvent::TransportFailed {
+                node_id, message, ..
+            }) => {
+                assert_eq!(node_id.as_deref(), Some("peer"));
+                assert!(message.contains("via = \"relay\""));
+            }
+            other => panic!("TransportFailed must be emitted, got {other:?}"),
+        }
     }
 
     #[test]

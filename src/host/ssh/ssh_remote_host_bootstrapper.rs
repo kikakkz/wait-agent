@@ -266,6 +266,20 @@ pub trait RemoteHostBootstrapper {
         &self,
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<(), Self::Error>;
+
+    /// Issue #197 (方案 B): for relay-role connects, registration is
+    /// verified by polling the REMOTE relay admin over the existing SSH
+    /// exec channel — `waitagent relay status --listen 127.0.0.1:7475` on
+    /// the remote — until the remote node's enrolled fingerprint appears
+    /// online. Replaces the authority-side publish-wait for relay-role
+    /// connects; the authority registry / relay-presence / back-dial paths
+    /// do not participate for those connects.
+    fn wait_remote_relay_node_online(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        fingerprint: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), Self::Error>;
 }
 
 /// Result returned by a successful remote host bootstrap.
@@ -292,6 +306,40 @@ pub struct RemoteRelayJoinRequest {
 
 /// Relay listen address deployed on relay-role hosts (issue #180).
 pub(crate) const RELAY_ROLE_LISTEN: &str = "0.0.0.0:7475";
+/// Remote admin probe for issue #197 (方案 B): runs on the remote over the
+/// existing SSH exec channel, so registration needs no authority-side
+/// network path at all.
+/// The listen string must match the serving relay exactly: the admin
+/// socket name derives from it (`waitagent-relay-admin-<sanitized>.sock`),
+/// and the relay serves `0.0.0.0:7475` (issue #180).
+pub(crate) const REMOTE_RELAY_STATUS_COMMAND: &str = "waitagent relay status --listen 0.0.0.0:7475";
+/// Poll cadence of the remote admin probe.
+pub(crate) const REMOTE_RELAY_STATUS_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
+/// Parses `waitagent relay status --listen ...` output (the admin JSON
+/// body): true when the response is ok and lists `fingerprint` among the
+/// online nodes.
+pub(crate) fn relay_status_shows_node_online(stdout: &[u8], fingerprint: &str) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return false;
+    };
+    if value.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        return false;
+    }
+    value
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| {
+            nodes.iter().any(|node| {
+                node.get("node_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|node_id| node_id.eq_ignore_ascii_case(fingerprint))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
 /// Relay data port (the listen port); nodes dial the relay here.
 pub(crate) const RELAY_ROLE_PORT: u16 = 7475;
 
@@ -539,6 +587,42 @@ where
         ));
         Ok(())
     }
+
+    /// Issue #197 (方案 B): poll the remote relay admin over SSH until the
+    /// remote node (matched by its enrolled fingerprint, known from the
+    /// bootstrap credentials) appears online at the relay it serves. Runs
+    /// entirely on the connect worker thread; no authority-side state is
+    /// touched and no new network path beyond the existing SSH channel is
+    /// needed.
+    fn wait_remote_relay_node_online(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        fingerprint: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), Self::Error> {
+        let deadline = std::time::Instant::now() + timeout;
+        let fingerprint = fingerprint.to_lowercase();
+        loop {
+            let output = self.run_ssh_output(plan, REMOTE_RELAY_STATUS_COMMAND, false)?;
+            if output.status == 0 && relay_status_shows_node_online(&output.stdout, &fingerprint) {
+                return Ok(());
+            }
+            let detail = if output.status == 0 {
+                "the relay admin did not list the node as online".to_string()
+            } else {
+                format!("status {}{}", output.status, stderr_summary(&output.stderr))
+            };
+            if std::time::Instant::now() >= deadline {
+                return Err(RemoteHostBootstrapError::new(format!(
+                    "timed out after {}s probing `{}` on `{}` for node `{fingerprint}` to come online at its relay: {detail}",
+                    timeout.as_secs(),
+                    REMOTE_RELAY_STATUS_COMMAND,
+                    plan.host,
+                )));
+            }
+            std::thread::sleep(REMOTE_RELAY_STATUS_POLL_INTERVAL);
+        }
+    }
 }
 
 impl<S, E> SshRemoteHostBootstrapper<S, E>
@@ -595,8 +679,10 @@ where
         })?;
         // Enroll the remote host's own node at its loopback relay so the
         // relay's whitelist (and presence) covers it before the local join.
+        // The `--` guard keeps a base64url token that draws a leading dash
+        // from being parsed as a flag (issue #197).
         let remote_join = format!(
-            "waitagent relay join 127.0.0.1:{RELAY_ROLE_PORT} {}",
+            "waitagent relay join 127.0.0.1:{RELAY_ROLE_PORT} -- {}",
             shell_single_quote(&token)
         );
         self.run_ssh_command(plan, &remote_join, false)?;
@@ -3253,7 +3339,7 @@ mod tests {
         );
         assert!(
             calls.iter().any(|(_, command, _)| {
-                command.contains("relay join 127.0.0.1:7475 'e2e-deploy-token'")
+                command.contains("relay join 127.0.0.1:7475 -- 'e2e-deploy-token'")
             }),
             "the remote's own node must enroll at the loopback relay: {calls:?}"
         );
@@ -3337,6 +3423,125 @@ mod tests {
             }),
             "no relay exec may run on Windows: {calls:?}"
         );
+    }
+
+    #[test]
+    fn remote_relay_status_parsing_matches_online_nodes() {
+        let status = br#"{"ok":true,"nodes":[{"node_id":"8ae8b64a6964d6f94ee086492e1631e702549be18c3659269c86cc980064d080"},{"node_id":"OTHER"}],"registered_nodes":2}"#;
+        assert!(relay_status_shows_node_online(
+            status,
+            "8AE8B64A6964D6F94EE086492E1631E702549BE18C3659269C86CC980064D080"
+        ));
+        assert!(!relay_status_shows_node_online(status, "deadbeef"));
+        assert!(!relay_status_shows_node_online(
+            br#"{"ok":false}"#,
+            "8ae8b64a"
+        ));
+        assert!(!relay_status_shows_node_online(b"not json", "8ae8b64a"));
+        assert!(!relay_status_shows_node_online(
+            br#"{"ok":true,"nodes":[]}"#,
+            "8ae8b64a"
+        ));
+    }
+
+    #[test]
+    fn remote_relay_probe_succeeds_when_the_node_is_online() {
+        let plan = upload_plan();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let status =
+            br#"{"ok":true,"nodes":[{"node_id":"deadbeef"}],"registered_nodes":1}"#.to_vec();
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(vec![(
+                    "relay status".to_string(),
+                    String::from_utf8(status).unwrap(),
+                )])),
+            },
+        );
+
+        bootstrapper
+            .wait_remote_relay_node_online(&plan, "DEADBEEF", std::time::Duration::from_secs(5))
+            .unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, REMOTE_RELAY_STATUS_COMMAND);
+        assert_eq!(calls[0].2, None, "the probe never uses sudo stdin");
+    }
+
+    #[test]
+    fn remote_relay_probe_times_out_with_actionable_text() {
+        let plan = upload_plan();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // The relay admin keeps answering without the node online.
+        let status = br#"{"ok":true,"nodes":[{"node_id":"other"}],"registered_nodes":1}"#.to_vec();
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(vec![
+                    (
+                        "relay status".to_string(),
+                        String::from_utf8(status).unwrap()
+                    );
+                    2
+                ])),
+            },
+        );
+
+        let error = bootstrapper
+            .wait_remote_relay_node_online(&plan, "deadbeef", std::time::Duration::from_secs(0))
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("probing `waitagent relay status --listen 0.0.0.0:7475`"),
+            "the error names the probe command: {message}"
+        );
+        assert!(
+            message.contains("10.1.29.130"),
+            "the error names the remote host: {message}"
+        );
+        assert!(
+            message.contains("deadbeef"),
+            "the error names the fingerprint: {message}"
+        );
+    }
+
+    #[test]
+    fn remote_relay_probe_survives_a_failing_relay_admin_until_timeout() {
+        let plan = upload_plan();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                // Pops from the end: the first probe fails (status 1), the
+                // retry sees the node online.
+                statuses: Rc::new(RefCell::new(vec![0, 1])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
+                stdout_by_substring: Rc::new(RefCell::new(vec![
+                    (
+                        "relay status".to_string(),
+                        r#"{"ok":true,"nodes":[{"node_id":"deadbeef"}],"registered_nodes":1}"#
+                            .to_string()
+                    );
+                    2
+                ])),
+            },
+        );
+
+        bootstrapper
+            .wait_remote_relay_node_online(&plan, "deadbeef", std::time::Duration::from_secs(5))
+            .unwrap();
+
+        assert_eq!(calls.borrow().len(), 2, "a failing admin is retried");
     }
 
     #[test]

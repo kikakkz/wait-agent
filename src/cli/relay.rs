@@ -242,9 +242,29 @@ fn parse_relay_remove(mut args: Vec<String>) -> Result<RelayRemoveCommand, CliEr
 
 fn parse_relay_join(mut args: Vec<String>) -> Result<RelayJoinCommand, CliError> {
     let mut command = RelayJoinCommand::default();
+    // Everything after a literal `--` is positional: relay invite tokens are
+    // base64url and can themselves start with `-` or `--`, which the flag
+    // scan would otherwise reject (issue #197: the remote self-enroll broke
+    // whenever the token drew a leading dash).
+    let mut positional_only = false;
     while let Some(flag) = args.first().cloned() {
+        if positional_only {
+            args.remove(0);
+            if command.address.is_empty() {
+                command.address = flag;
+            } else if command.token.is_empty() {
+                command.token = flag;
+            } else {
+                return Err(CliError::UnexpectedArgument(flag));
+            }
+            continue;
+        }
         match flag.as_str() {
             "--help" | "-h" => return Ok(command),
+            "--" => {
+                args.remove(0);
+                positional_only = true;
+            }
             _ if flag.starts_with("--") => return Err(CliError::UnexpectedArgument(flag)),
             _ if command.address.is_empty() => {
                 args.remove(0);
@@ -425,6 +445,33 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn relay_join_separator_passes_dash_prefixed_tokens() {
+        // Invite tokens are base64url and can draw a leading `-`/`--`;
+        // after a literal `--` everything is positional (issue #197).
+        match parse(&[
+            "waitagent",
+            "relay",
+            "join",
+            "127.0.0.1:7475",
+            "--",
+            "--VlsuBC_QQn20HPRub7YMn7JYuPm2QeNMaBF-8w6Q4",
+        ])
+        .command
+        {
+            Command::RelayJoin(command) => {
+                assert_eq!(command.address, "127.0.0.1:7475");
+                assert_eq!(command.token, "--VlsuBC_QQn20HPRub7YMn7JYuPm2QeNMaBF-8w6Q4");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        // Without the separator a dash-prefixed token stays an error.
+        assert_eq!(
+            parse_error(&["waitagent", "relay", "join", "127.0.0.1:7475", "--oops"]),
+            "unexpected argument --oops"
+        );
     }
 
     #[test]
