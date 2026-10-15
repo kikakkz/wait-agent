@@ -16,6 +16,7 @@ use crate::host::ssh::remote_port_probe::{
 use crate::host::ssh::remote_shell::{
     RemoteShellDetector, RemoteShellKind, SshRemoteShellDetector,
 };
+use crate::host::ssh::ssh_proxy::SshProxy;
 use crate::host::ssh::ssh_remote_host_bootstrapper::{
     install_reachability_preflight_command, windows_install_or_update_command,
     windows_install_reachability_preflight_command, RemoteHostBootstrapPlan,
@@ -47,7 +48,12 @@ use std::time::{Duration, Instant};
 pub trait RemotePortProbeFactory {
     type Probe;
 
-    fn create(&self, profile: &RemoteHostProfile, remote_shell: RemoteShellKind) -> Self::Probe;
+    fn create(
+        &self,
+        profile: &RemoteHostProfile,
+        remote_shell: RemoteShellKind,
+        proxy: Option<SshProxy>,
+    ) -> Self::Probe;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,8 +62,13 @@ pub struct SshRemotePortProbeFactory;
 impl RemotePortProbeFactory for SshRemotePortProbeFactory {
     type Probe = SshRemotePortProbe;
 
-    fn create(&self, profile: &RemoteHostProfile, remote_shell: RemoteShellKind) -> Self::Probe {
-        SshRemotePortProbe::new(profile.clone(), remote_shell)
+    fn create(
+        &self,
+        profile: &RemoteHostProfile,
+        remote_shell: RemoteShellKind,
+        proxy: Option<SshProxy>,
+    ) -> Self::Probe {
+        SshRemotePortProbe::new(profile.clone(), remote_shell, proxy)
     }
 }
 
@@ -70,6 +81,10 @@ pub struct RemoteHostConnectRequest {
     pub local_connect_endpoint: String,
     pub cwd_hint: Option<PathBuf>,
     pub use_install_proxy: bool,
+    /// Issue #201: dial the SSH connect itself (shell detection, port probe,
+    /// install bootstrap) through the active remote-install proxy profile's
+    /// address instead of connecting directly.
+    pub use_ssh_proxy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +366,22 @@ where
             ));
         }
 
+        // Issue #201: SSH connect over proxy. Resolve once at the entry from
+        // the request's toggle, reusing the active remote-install proxy
+        // profile's address (all_proxy preferred, https_proxy fallback).
+        // Checked but the profile has no proxy → None (direct dial, no
+        // error); a configured value with an unsupported scheme fails here
+        // with the field and value named.
+        let ssh_proxy = if request.use_ssh_proxy {
+            self.proxy_store
+                .load_active_config()
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?
+                .ssh_proxy()
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?
+        } else {
+            None
+        };
+
         // Detect the remote shell family once per profile and cache it so
         // later connects skip the extra SSH exec
         // (`docs/windows-ssh-target-design.md` §1). Detection runs before the
@@ -359,7 +390,7 @@ where
         if profile.remote_shell.is_none() {
             let remote_shell = self
                 .shell_detector
-                .detect_remote_shell(&profile)
+                .detect_remote_shell(&profile, ssh_proxy.clone())
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
             profile.remote_shell = Some(remote_shell);
             if request.profile_name.is_some() {
@@ -428,7 +459,9 @@ where
         }
 
         let preference = port_preference(&profile.preferred_remote_port);
-        let port_probe = self.port_probe_factory.create(&profile, remote_shell);
+        let port_probe = self
+            .port_probe_factory
+            .create(&profile, remote_shell, ssh_proxy.clone());
         let port = match port_probe.choose_remote_port(&preference, &request.local_connect_endpoint)
         {
             Ok(port) => port,
@@ -442,7 +475,7 @@ where
                 // original error is returned.
                 let fresh = self
                     .shell_detector
-                    .detect_remote_shell(&profile)
+                    .detect_remote_shell(&profile, ssh_proxy.clone())
                     .map_err(|_| LifecycleError::Protocol(probe_error.to_string()))?;
                 if fresh == remote_shell {
                     return Err(LifecycleError::Protocol(probe_error.to_string()));
@@ -455,7 +488,7 @@ where
                         .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
                 }
                 self.port_probe_factory
-                    .create(&profile, remote_shell)
+                    .create(&profile, remote_shell, ssh_proxy.clone())
                     .choose_remote_port(&preference, &request.local_connect_endpoint)
                     .map_err(|error| LifecycleError::Protocol(error.to_string()))?
             }
@@ -469,6 +502,7 @@ where
             authority_node_id.clone(),
             remote_shell,
         );
+        plan.ssh_proxy = ssh_proxy;
         plan.install_reachability_preflight_command =
             Some(default_install_reachability_preflight_command(remote_shell));
         if request.use_install_proxy {
@@ -528,6 +562,7 @@ where
                 profile.last_remote_port = Some(port.port);
                 profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
                 profile.use_install_proxy = request.use_install_proxy;
+                profile.use_ssh_proxy = request.use_ssh_proxy;
                 profile.tls_pin_sha256 = Some(bootstrap_result.tls_pin_sha256);
                 self.save_connected_profile(&request, profile)?;
             }
@@ -680,6 +715,7 @@ where
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
         profile.use_install_proxy = request.use_install_proxy;
+        profile.use_ssh_proxy = request.use_ssh_proxy;
         profile.tls_pin_sha256 = Some(bootstrap_result.tls_pin_sha256);
         if should_save_profile {
             self.save_connected_profile(&request, profile)?;
@@ -963,6 +999,7 @@ pub fn request_from_command(
         local_connect_endpoint,
         cwd_hint,
         use_install_proxy: command.use_install_proxy.unwrap_or(true),
+        use_ssh_proxy: command.use_ssh_proxy.unwrap_or(false),
     })
 }
 
@@ -1070,6 +1107,7 @@ fn profile_from_direct_args(
         last_endpoint: None,
         last_connected_at: None,
         use_install_proxy: command.use_install_proxy.unwrap_or(true),
+        use_ssh_proxy: command.use_ssh_proxy.unwrap_or(false),
         tls_pin_sha256: None,
         host_kind: host_kind.unwrap_or_default(),
         remote_shell: None,
@@ -1372,6 +1410,7 @@ mod tests {
             &self,
             _profile: &RemoteHostProfile,
             _remote_shell: RemoteShellKind,
+            _proxy: Option<SshProxy>,
         ) -> Self::Probe {
             self.clone()
         }
@@ -1404,6 +1443,7 @@ mod tests {
         fn detect_remote_shell(
             &self,
             _profile: &RemoteHostProfile,
+            _proxy: Option<SshProxy>,
         ) -> Result<RemoteShellKind, String> {
             *self.calls.lock().unwrap() += 1;
             Ok(self.result)
@@ -1573,6 +1613,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_log.lock().unwrap().push(request);
@@ -1657,6 +1698,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_log.lock().unwrap().push(request);
@@ -1718,6 +1760,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -1778,6 +1821,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -1831,6 +1875,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -1890,6 +1935,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -1941,6 +1987,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2011,6 +2058,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_log.lock().unwrap().push(request);
@@ -2090,6 +2138,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_log.lock().unwrap().push(request);
@@ -2150,6 +2199,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2205,6 +2255,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_calls
@@ -2259,6 +2310,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: Some(PathBuf::from("/opt/data/workspace/app-insight")),
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2327,6 +2379,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2418,6 +2471,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |_request| {
                     dial_targets
@@ -2463,6 +2517,7 @@ mod tests {
                 local_connect_endpoint: "10.1.26.84:7474".to_string(),
                 cwd_hint: None,
                 use_install_proxy: true,
+                use_ssh_proxy: false,
             },
             |_request| Ok(()),
         );
@@ -2513,6 +2568,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2557,6 +2613,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2765,6 +2822,7 @@ mod tests {
                     local_connect_endpoint: "192.0.2.1:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_log.lock().unwrap().push(request);
@@ -2810,6 +2868,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2856,6 +2915,7 @@ mod tests {
                     local_connect_endpoint: "192.0.2.1:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -2893,6 +2953,7 @@ mod tests {
                     local_connect_endpoint: "192.0.2.1:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -3017,6 +3078,7 @@ mod tests {
                     local_connect_endpoint: "192.0.2.1:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |request| {
                     dial_log.lock().unwrap().push(request.clone());
@@ -3091,6 +3153,7 @@ mod tests {
                     local_connect_endpoint: "192.0.2.1:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -3131,6 +3194,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 move |_request| {
                     feed.lock()
@@ -3219,6 +3283,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: false,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -3269,6 +3334,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -3297,6 +3363,83 @@ mod tests {
             .start_plan
             .command
             .starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "));
+    }
+
+    #[test]
+    fn remote_host_connect_resolves_ssh_proxy_only_when_requested() {
+        // Issue #201: with use_ssh_proxy on and a usable active
+        // remote-install proxy profile, the bootstrap plan's SSH execs go
+        // through the resolved proxy; with the toggle off the plan stays
+        // direct even though a proxy profile exists.
+        let proxy_path = unique_path("remote-host-connect-ssh-proxy-store.toml");
+        let proxy_store = RemoteInstallProxyStore::new(&proxy_path);
+        proxy_store
+            .save_settings(
+                &crate::host::ssh::remote_install_proxy_store::RemoteInstallProxySettings {
+                    active: Some("office".to_string()),
+                    profiles: vec![
+                        crate::host::ssh::remote_install_proxy_store::RemoteInstallProxyProfile {
+                            name: "office".to_string(),
+                            all_proxy: "socks5://127.0.0.1:7897".to_string(),
+                            https_proxy: String::new(),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            RemoteHostHistoryStore::new(unique_path("remote-host-connect-ssh-proxy.toml")),
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(proxy_store);
+
+        for use_ssh_proxy in [true, true, false] {
+            runtime
+                .connect(
+                    RemoteHostConnectRequest {
+                        profile_name: None,
+                        direct_profile: Some(profile()),
+                        save_profile_name: None,
+                        replace_profile_name: None,
+                        local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                        cwd_hint: None,
+                        use_install_proxy: false,
+                        use_ssh_proxy,
+                    },
+                    |_request| Ok(()),
+                )
+                .unwrap();
+        }
+
+        let plans = bootstrap_plans.lock().unwrap();
+        assert_eq!(plans.len(), 3);
+        assert_eq!(
+            plans[0].ssh_proxy,
+            Some(SshProxy::parse("socks5://127.0.0.1:7897").unwrap())
+        );
+        assert_eq!(
+            plans[1].ssh_proxy,
+            Some(SshProxy::parse("socks5://127.0.0.1:7897").unwrap())
+        );
+        assert_eq!(
+            plans[2].ssh_proxy, None,
+            "toggle off stays direct even though a proxy profile exists"
+        );
+        drop(plans);
+        crate::infra::best_effort::remove_file(proxy_path);
     }
 
     #[test]
@@ -3340,6 +3483,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )
@@ -3398,6 +3542,7 @@ mod tests {
                     local_connect_endpoint: "10.1.26.84:7474".to_string(),
                     cwd_hint: None,
                     use_install_proxy: true,
+                    use_ssh_proxy: false,
                 },
                 |_request| Ok(()),
             )

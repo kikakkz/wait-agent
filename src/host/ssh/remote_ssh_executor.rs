@@ -1,5 +1,6 @@
 use crate::host::ssh::remote_host_history_store::RemoteHostAuthProfile;
 use crate::host::ssh::remote_host_secret_store::RemoteHostSecretValue;
+use crate::host::ssh::ssh_proxy::{open_proxy_stream, SshProxy};
 use hmac::{Hmac, KeyInit, Mac};
 use russh::client;
 use russh::keys::ssh_key::{
@@ -28,6 +29,10 @@ pub struct RemoteSshTarget {
     pub port: u16,
     pub user: String,
     pub auth: RemoteSshAuth,
+    /// Issue #201: dial through this proxy (SOCKS5 / HTTP CONNECT) instead
+    /// of connecting directly; the target host name is resolved by the
+    /// proxy. `None` keeps the historical direct TCP dial.
+    pub proxy: Option<SshProxy>,
 }
 
 impl RemoteSshTarget {
@@ -56,7 +61,16 @@ impl RemoteSshTarget {
             port,
             user: user.into(),
             auth,
+            proxy: None,
         })
+    }
+
+    /// Attach (or clear) the connect proxy. Callers that resolved the proxy
+    /// from the active install-proxy profile pass it here explicitly; the
+    /// constructor itself performs no IO.
+    pub fn with_proxy(mut self, proxy: Option<SshProxy>) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     fn socket_addrs(&self) -> Result<Vec<SocketAddr>, RemoteSshError> {
@@ -182,9 +196,35 @@ async fn exec_async(
         inactivity_timeout: Some(SSH_INACTIVITY_TIMEOUT),
         ..Default::default()
     });
-    let addrs = target.socket_addrs()?;
     let client = Client::from_target(&target)?;
-    let connect = client::connect(config, addrs.as_slice(), client);
+    // Issue #201: with a proxy the target name is resolved remotely, so
+    // local DNS is skipped and the pre-connected stream is handed to russh
+    // via connect_stream. Both paths stay inside SSH_CONNECT_TIMEOUT.
+    type ConnectFuture = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<client::Handle<Client>, russh::Error>>>,
+    >;
+    let connect: ConnectFuture = match &target.proxy {
+        Some(proxy) => {
+            let proxy = proxy.clone();
+            let target_host = target.host.clone();
+            let target_port = target.port;
+            let proxy_label = format!("{}:{}", proxy.host, proxy.port);
+            Box::pin(async move {
+                let stream = open_proxy_stream(&proxy, &target_host, target_port)
+                    .await
+                    .map_err(|error| {
+                        russh::Error::IO(std::io::Error::other(format!(
+                            "SSH connect via proxy {proxy_label} failed: {error}"
+                        )))
+                    })?;
+                client::connect_stream(config, stream, client).await
+            })
+        }
+        None => {
+            let addrs = target.socket_addrs()?;
+            Box::pin(async move { client::connect(config, addrs.as_slice(), client).await })
+        }
+    };
     let mut session = tokio::time::timeout(SSH_CONNECT_TIMEOUT, connect)
         .await
         .map_err(|_| RemoteSshError::new("SSH connect timed out"))?

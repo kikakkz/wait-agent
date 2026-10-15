@@ -11,4 +11,5 @@ pub mod remote_port_probe;
 pub mod remote_shell;
 pub mod remote_sibling_nodes;
 pub mod remote_ssh_executor;
+pub mod ssh_proxy;
 pub mod ssh_remote_host_bootstrapper;

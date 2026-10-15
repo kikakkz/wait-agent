@@ -19,6 +19,7 @@ use crate::host::ssh::remote_host_secret_store::{
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
 };
+use crate::host::ssh::ssh_proxy::SshProxy;
 use std::fmt;
 use std::str::FromStr;
 
@@ -109,7 +110,11 @@ impl std::error::Error for RemoteShellDetectError {}
 /// Object-safe seam used by the connect runtime so tests can substitute a
 /// recording detector.
 pub trait RemoteShellDetector {
-    fn detect_remote_shell(&self, profile: &RemoteHostProfile) -> Result<RemoteShellKind, String>;
+    fn detect_remote_shell(
+        &self,
+        profile: &RemoteHostProfile,
+        proxy: Option<SshProxy>,
+    ) -> Result<RemoteShellKind, String>;
 }
 
 /// Probes a remote SSH target's shell family with a single `uname -s` exec.
@@ -159,10 +164,12 @@ where
     /// (command not found, shell failure) means Windows. Errors from `exec`
     /// itself — SSH connect, authentication, channel setup — describe a
     /// failed SSH session, not a Windows shell, and propagate unchanged
-    /// instead of being misclassified as Windows.
+    /// instead of being misclassified as Windows. When `proxy` is set the
+    /// probe dials through it (issue #201).
     pub fn detect_remote_shell(
         &self,
         profile: &RemoteHostProfile,
+        proxy: Option<SshProxy>,
     ) -> Result<RemoteShellKind, RemoteShellDetectError> {
         let ssh_password = self.ssh_password(profile)?;
         let target = RemoteSshTarget::from_profile(
@@ -172,7 +179,8 @@ where
             &profile.auth,
             ssh_password,
         )
-        .map_err(|error| RemoteShellDetectError::new(error.to_string()))?;
+        .map_err(|error| RemoteShellDetectError::new(error.to_string()))?
+        .with_proxy(proxy);
         let output = self
             .ssh_executor
             .exec(&target, REMOTE_SHELL_PROBE_COMMAND, None)
@@ -200,8 +208,12 @@ where
     E: RemoteSshExecutor,
     E::Error: ToString,
 {
-    fn detect_remote_shell(&self, profile: &RemoteHostProfile) -> Result<RemoteShellKind, String> {
-        SshRemoteShellDetector::detect_remote_shell(self, profile)
+    fn detect_remote_shell(
+        &self,
+        profile: &RemoteHostProfile,
+        proxy: Option<SshProxy>,
+    ) -> Result<RemoteShellKind, String> {
+        SshRemoteShellDetector::detect_remote_shell(self, profile, proxy)
             .map_err(|error| error.to_string())
     }
 }
@@ -313,6 +325,7 @@ mod tests {
             install_source:
                 crate::host::ssh::remote_host_history_store::InstallSource::RemoteDownload,
             relay_role: false,
+            use_ssh_proxy: false,
         }
     }
 
@@ -324,7 +337,9 @@ mod tests {
             stderr: Vec::new(),
         });
 
-        let kind = detector.detect_remote_shell(&key_auth_profile()).unwrap();
+        let kind = detector
+            .detect_remote_shell(&key_auth_profile(), None)
+            .unwrap();
 
         assert_eq!(kind, RemoteShellKind::Posix);
         let calls = calls.borrow();
@@ -333,6 +348,27 @@ mod tests {
         assert_eq!(calls[0].0.user, "kk");
         assert_eq!(calls[0].1, REMOTE_SHELL_PROBE_COMMAND);
         assert_eq!(calls[0].2, None);
+    }
+
+    #[test]
+    fn remote_shell_detection_dials_through_the_configured_proxy() {
+        let proxy = SshProxy::parse("socks5://192.168.31.1:7897").unwrap();
+        let (detector, calls) = detector_with_output(RemoteSshOutput {
+            status: 0,
+            stdout: b"Linux\n".to_vec(),
+            stderr: Vec::new(),
+        });
+
+        let kind = detector
+            .detect_remote_shell(&key_auth_profile(), Some(proxy.clone()))
+            .unwrap();
+
+        assert_eq!(kind, RemoteShellKind::Posix);
+        assert_eq!(
+            calls.borrow()[0].0.proxy,
+            Some(proxy),
+            "the probe exec must carry the SSH connect proxy on its target"
+        );
     }
 
     #[test]
@@ -352,7 +388,9 @@ mod tests {
                 stderr: Vec::new(),
             });
 
-            let kind = detector.detect_remote_shell(&key_auth_profile()).unwrap();
+            let kind = detector
+                .detect_remote_shell(&key_auth_profile(), None)
+                .unwrap();
 
             assert_eq!(kind, RemoteShellKind::Windows);
         }
@@ -366,7 +404,9 @@ mod tests {
             stderr: b"uname : The term 'uname' is not recognized".to_vec(),
         });
 
-        let kind = detector.detect_remote_shell(&key_auth_profile()).unwrap();
+        let kind = detector
+            .detect_remote_shell(&key_auth_profile(), None)
+            .unwrap();
 
         assert_eq!(kind, RemoteShellKind::Windows);
         assert_eq!(calls.borrow().len(), 1);
@@ -380,7 +420,9 @@ mod tests {
             stderr: Vec::new(),
         });
 
-        let kind = detector.detect_remote_shell(&key_auth_profile()).unwrap();
+        let kind = detector
+            .detect_remote_shell(&key_auth_profile(), None)
+            .unwrap();
 
         assert_eq!(kind, RemoteShellKind::Windows);
     }
@@ -397,7 +439,7 @@ mod tests {
         );
 
         let error = detector
-            .detect_remote_shell(&key_auth_profile())
+            .detect_remote_shell(&key_auth_profile(), None)
             .expect_err("SSH session errors must propagate instead of classifying as Windows");
 
         assert!(error.to_string().contains("SSH authentication failed"));
@@ -417,7 +459,7 @@ mod tests {
         };
 
         let error = detector
-            .detect_remote_shell(&profile)
+            .detect_remote_shell(&profile, None)
             .expect_err("password auth without secret id should fail before spawning ssh");
 
         assert!(error.to_string().contains("saved SSH password secret id"));
@@ -448,7 +490,7 @@ mod tests {
             password_secret_id: Some(ssh_id),
         };
 
-        let kind = detector.detect_remote_shell(&profile).unwrap();
+        let kind = detector.detect_remote_shell(&profile, None).unwrap();
 
         assert_eq!(kind, RemoteShellKind::Posix);
         assert_eq!(calls.borrow().len(), 1);

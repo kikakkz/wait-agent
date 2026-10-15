@@ -157,6 +157,11 @@ pub struct RemoteHostBootstrapPlan {
     /// join is driven by the state event loop). Windows remotes are not
     /// supported in this phase.
     pub relay_role: bool,
+    /// Issue #201: dial the SSH connection through this proxy (SOCKS5 /
+    /// HTTP CONNECT). Resolved by the connect runtime from the active
+    /// install-proxy profile when the profile opts in; `None` dials
+    /// directly. Only consulted when the plan is built by the runtime.
+    pub ssh_proxy: Option<crate::host::ssh::ssh_proxy::SshProxy>,
     /// Detected shell family of the remote host. Every remote command
     /// generator (`install_or_update_command`, `start_plan`, version check,
     /// daemon check, ...) emits a POSIX or PowerShell script based on this
@@ -208,6 +213,7 @@ impl RemoteHostBootstrapPlan {
             operator_public_key: None,
             install_source: profile.install_source,
             relay_role: profile.relay_role,
+            ssh_proxy: None,
             remote_shell,
         }
     }
@@ -1139,7 +1145,9 @@ where
             port: plan.ssh_port,
             user: plan.ssh_user.clone(),
             auth,
-        })
+            proxy: None,
+        }
+        .with_proxy(plan.ssh_proxy.clone()))
     }
 
     fn ssh_password(

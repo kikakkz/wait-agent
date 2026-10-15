@@ -15,6 +15,7 @@ use crate::host::ssh::remote_shell::RemoteShellKind;
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
 };
+use crate::host::ssh::ssh_proxy::SshProxy;
 
 /// Remote command listing the marker path of every local ratatui node
 /// server, one path per line (`.../<port>.sock` on POSIX targets,
@@ -36,10 +37,13 @@ fn sibling_marker_list_command(remote_shell: RemoteShellKind) -> &'static str {
 /// `profile`. Returns an empty list when the host has no markers. SSH and
 /// parsing failures are returned as errors so the caller can log and skip:
 /// sibling enumeration is best-effort and must never fail the primary
-/// connect.
-pub fn list_sibling_node_ports(profile: &RemoteHostProfile) -> Result<Vec<u16>, String> {
+/// connect. When `proxy` is set the SSH dial goes through it (issue #201).
+pub fn list_sibling_node_ports(
+    profile: &RemoteHostProfile,
+    proxy: Option<SshProxy>,
+) -> Result<Vec<u16>, String> {
     let remote_shell = profile.remote_shell.unwrap_or_default();
-    let target = ssh_target(profile)?;
+    let target = ssh_target(profile, proxy)?;
     let output = RusshRemoteSshExecutor
         .exec(&target, sibling_marker_list_command(remote_shell), None)
         .map_err(|error| error.to_string())?;
@@ -52,7 +56,10 @@ pub fn list_sibling_node_ports(profile: &RemoteHostProfile) -> Result<Vec<u16>, 
     Ok(parse_sibling_ports(&output.stdout, remote_shell))
 }
 
-fn ssh_target(profile: &RemoteHostProfile) -> Result<RemoteSshTarget, String> {
+fn ssh_target(
+    profile: &RemoteHostProfile,
+    proxy: Option<SshProxy>,
+) -> Result<RemoteSshTarget, String> {
     let ssh_password = match &profile.auth {
         RemoteHostAuthProfile::Password { password_secret_id } => {
             let Some(secret_id) = password_secret_id else {
@@ -67,14 +74,15 @@ fn ssh_target(profile: &RemoteHostProfile) -> Result<RemoteSshTarget, String> {
         }
         RemoteHostAuthProfile::Key { .. } => None,
     };
-    RemoteSshTarget::from_profile(
+    let target = RemoteSshTarget::from_profile(
         profile.host.clone(),
         profile.ssh_port(),
         profile.ssh_user.clone(),
         &profile.auth,
         ssh_password,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(target.with_proxy(proxy))
 }
 
 fn parse_sibling_ports(stdout: &[u8], remote_shell: RemoteShellKind) -> Vec<u16> {

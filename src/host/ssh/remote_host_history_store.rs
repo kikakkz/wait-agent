@@ -158,6 +158,12 @@ pub struct RemoteHostProfile {
     /// by the state event loop (issue #180). Absent in older profiles and
     /// loads as `false`.
     pub relay_role: bool,
+    /// When true, the SSH connect itself (shell detection, port probe,
+    /// install bootstrap, sibling enumeration) dials through the active
+    /// remote-install proxy profile's address (issue #201; `all_proxy`
+    /// preferred, `https_proxy` fallback). Absent in profiles written
+    /// before issue #201 and loads as `false`.
+    pub use_ssh_proxy: bool,
 }
 
 impl RemoteHostProfile {
@@ -366,6 +372,7 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
             push_string(&mut out, "tls_pin_sha256", tls_pin);
         }
         out.push_str(&format!("use_install_proxy = {}\n", host.use_install_proxy));
+        out.push_str(&format!("use_ssh_proxy = {}\n", host.use_ssh_proxy));
         out.push_str(&format!("host_kind = \"{}\"\n", host.host_kind.as_str()));
         if let Some(remote_shell) = &host.remote_shell {
             push_string(&mut out, "remote_shell", remote_shell.as_str());
@@ -458,6 +465,7 @@ struct RawProfile {
     last_via_used: Option<String>,
     install_source: Option<String>,
     relay_role: Option<String>,
+    use_ssh_proxy: Option<String>,
 }
 
 impl RawProfile {
@@ -483,6 +491,7 @@ impl RawProfile {
             "last_via_used" => self.last_via_used = Some(value),
             "install_source" => self.install_source = Some(value),
             "relay_role" => self.relay_role = Some(value),
+            "use_ssh_proxy" => self.use_ssh_proxy = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -529,6 +538,7 @@ impl RawProfile {
             last_via_used: parse_last_via_used(self.last_via_used)?,
             install_source: parse_install_source(self.install_source)?,
             relay_role: parse_relay_role(self.relay_role)?,
+            use_ssh_proxy: parse_use_ssh_proxy(self.use_ssh_proxy)?,
         })
     }
 }
@@ -652,6 +662,10 @@ fn parse_install_source(
 /// `relay_role` key and load as `false` (a plain connectable host).
 fn parse_relay_role(value: Option<String>) -> Result<bool, RemoteHostHistoryStoreError> {
     Ok(optional_bool(value, "relay_role")?.unwrap_or(false))
+}
+
+fn parse_use_ssh_proxy(value: Option<String>) -> Result<bool, RemoteHostHistoryStoreError> {
+    Ok(optional_bool(value, "use_ssh_proxy")?.unwrap_or(false))
 }
 
 /// Validates the `via` dial-path key: `auto` (also the absent default),
@@ -878,6 +892,7 @@ mod tests {
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
                 relay_role: false,
+                use_ssh_proxy: false,
             })
             .unwrap();
         store
@@ -902,6 +917,7 @@ mod tests {
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
                 relay_role: false,
+                use_ssh_proxy: false,
             })
             .unwrap();
 
@@ -945,6 +961,7 @@ mod tests {
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
                 relay_role: false,
+                use_ssh_proxy: false,
             })
             .unwrap();
 
@@ -1315,6 +1332,82 @@ relay_role = maybe
             .load()
             .expect_err("a non-boolean relay_role must fail the load");
         assert!(error.to_string().contains("`relay_role`"));
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_use_ssh_proxy() {
+        let path = unique_path("remote-hosts-use-ssh-proxy.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        let mut proxied = profile("proxied", "10.1.29.160");
+        proxied.use_ssh_proxy = true;
+        store.upsert_profile(proxied).unwrap();
+        store
+            .upsert_profile(profile("direct", "10.1.29.161"))
+            .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("use_ssh_proxy = true"));
+        assert!(content.contains("use_ssh_proxy = false"));
+
+        let loaded = store.load().unwrap();
+        let proxied = loaded.hosts.iter().find(|h| h.name == "proxied").unwrap();
+        let direct = loaded.hosts.iter().find(|h| h.name == "direct").unwrap();
+        assert!(proxied.use_ssh_proxy);
+        assert!(!direct.use_ssh_proxy);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_without_use_ssh_proxy_field_loads_as_false() {
+        let path = unique_path("remote-hosts-legacy-no-use-ssh-proxy.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "legacy"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+"#,
+        )
+        .unwrap();
+
+        let loaded = RemoteHostHistoryStore::new(&path).load().unwrap();
+
+        assert_eq!(loaded.hosts.len(), 1);
+        assert!(!loaded.hosts[0].use_ssh_proxy);
+
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_rejects_a_non_boolean_use_ssh_proxy() {
+        let path = unique_path("remote-hosts-bad-use-ssh-proxy.toml");
+        fs::write(
+            &path,
+            r#"[[hosts]]
+name = "typo"
+host = "10.1.29.130"
+ssh_user = "kk"
+auth_kind = "password"
+preferred_remote_port = "auto"
+use_install_proxy = true
+host_kind = "lan"
+use_ssh_proxy = maybe
+"#,
+        )
+        .unwrap();
+
+        let error = RemoteHostHistoryStore::new(&path)
+            .load()
+            .expect_err("a non-boolean use_ssh_proxy must fail the load");
+        assert!(error.to_string().contains("`use_ssh_proxy`"));
 
         crate::infra::best_effort::remove_file(path);
     }

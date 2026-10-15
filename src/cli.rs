@@ -264,6 +264,7 @@ pub struct ConnectRemoteHostCommand {
     pub save_profile: Option<String>,
     pub replace_profile: Option<String>,
     pub use_install_proxy: Option<bool>,
+    pub use_ssh_proxy: Option<bool>,
 }
 
 impl Cli {

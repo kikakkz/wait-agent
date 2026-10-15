@@ -1,4 +1,5 @@
 use crate::host::ssh::remote_host_home::waitagent_home;
+use crate::host::ssh::ssh_proxy::SshProxy;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -18,6 +19,28 @@ impl RemoteInstallProxyConfig {
     pub fn validate(&self) -> Result<(), RemoteInstallProxyStoreError> {
         validate_proxy_url("all_proxy", &self.all_proxy)?;
         validate_proxy_url("https_proxy", &self.https_proxy)
+    }
+
+    /// SSH connect proxy derived from this config (issue #201): `all_proxy`
+    /// first, then `https_proxy` as the fallback. An empty config yields
+    /// `None`; a configured value that does not parse as a usable proxy URL
+    /// fails with the field name and value so a hand-edited profile points at
+    /// the offending line.
+    pub fn ssh_proxy(&self) -> Result<Option<SshProxy>, RemoteInstallProxyStoreError> {
+        for (field, value) in [
+            ("all_proxy", self.all_proxy.trim()),
+            ("https_proxy", self.https_proxy.trim()),
+        ] {
+            if value.is_empty() {
+                continue;
+            }
+            return SshProxy::parse(value).map(Some).map_err(|error| {
+                RemoteInstallProxyStoreError::new(format!(
+                    "{field} `{value}` cannot be used as an SSH connect proxy: {error}"
+                ))
+            });
+        }
+        Ok(None)
     }
 }
 
@@ -658,6 +681,62 @@ mod tests {
         let error = config.validate().unwrap_err();
 
         assert!(error.to_string().contains("full-width colon"));
+    }
+
+    #[test]
+    fn ssh_proxy_prefers_all_proxy_and_falls_back_to_https_proxy() {
+        let config = RemoteInstallProxyConfig {
+            all_proxy: "socks5://192.168.31.1:7897".to_string(),
+            https_proxy: "http://192.168.31.1:7897".to_string(),
+        };
+
+        assert_eq!(
+            config.ssh_proxy().unwrap(),
+            Some(SshProxy {
+                scheme: crate::host::ssh::ssh_proxy::SshProxyScheme::Socks5,
+                host: "192.168.31.1".to_string(),
+                port: 7897,
+            })
+        );
+
+        let fallback = RemoteInstallProxyConfig {
+            all_proxy: String::new(),
+            https_proxy: "http://192.168.31.1:7897".to_string(),
+        };
+
+        assert_eq!(
+            fallback.ssh_proxy().unwrap(),
+            Some(SshProxy {
+                scheme: crate::host::ssh::ssh_proxy::SshProxyScheme::Http,
+                host: "192.168.31.1".to_string(),
+                port: 7897,
+            })
+        );
+
+        assert_eq!(
+            RemoteInstallProxyConfig::default().ssh_proxy().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn ssh_proxy_error_names_the_field_and_value() {
+        let config = RemoteInstallProxyConfig {
+            all_proxy: "ftp://192.168.31.1:7897".to_string(),
+            https_proxy: String::new(),
+        };
+
+        let error = config.ssh_proxy().unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("all_proxy"),
+            "the field is named: {message}"
+        );
+        assert!(
+            message.contains("ftp://192.168.31.1:7897"),
+            "the value is named: {message}"
+        );
     }
 
     fn unique_path(name: &str) -> PathBuf {

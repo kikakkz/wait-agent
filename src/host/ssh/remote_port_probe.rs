@@ -7,6 +7,7 @@ use crate::host::ssh::remote_shell::RemoteShellKind;
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
 };
+use crate::host::ssh::ssh_proxy::SshProxy;
 use crate::host::ssh::ssh_remote_host_bootstrapper::powershell_command;
 use std::fmt;
 
@@ -85,15 +86,23 @@ pub struct SshRemotePortProbe<S = DefaultRemoteHostSecretStore, E = RusshRemoteS
     // enumeration (`docs/windows-ssh-target-design.md` task T2). Both emit
     // the same `port=N` contract.
     remote_shell: RemoteShellKind,
+    // SSH connect proxy (issue #201): `None` dials the target directly; when
+    // set, the probe exec dials through the proxy.
+    proxy: Option<SshProxy>,
 }
 
 impl SshRemotePortProbe<DefaultRemoteHostSecretStore, RusshRemoteSshExecutor> {
-    pub fn new(profile: RemoteHostProfile, remote_shell: RemoteShellKind) -> Self {
+    pub fn new(
+        profile: RemoteHostProfile,
+        remote_shell: RemoteShellKind,
+        proxy: Option<SshProxy>,
+    ) -> Self {
         Self {
             profile,
             secret_store: KeyringRemoteHostSecretStore,
             ssh_executor: RusshRemoteSshExecutor,
             remote_shell,
+            proxy,
         }
     }
 }
@@ -101,12 +110,17 @@ impl SshRemotePortProbe<DefaultRemoteHostSecretStore, RusshRemoteSshExecutor> {
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
 impl<S> SshRemotePortProbe<S, RusshRemoteSshExecutor> {
-    pub fn with_secret_store(profile: RemoteHostProfile, secret_store: S) -> Self {
+    pub fn with_secret_store(
+        profile: RemoteHostProfile,
+        secret_store: S,
+        proxy: Option<SshProxy>,
+    ) -> Self {
         Self {
             profile,
             secret_store,
             ssh_executor: RusshRemoteSshExecutor,
             remote_shell: RemoteShellKind::Posix,
+            proxy,
         }
     }
 }
@@ -119,12 +133,14 @@ impl<S, E> SshRemotePortProbe<S, E> {
         secret_store: S,
         ssh_executor: E,
         remote_shell: RemoteShellKind,
+        proxy: Option<SshProxy>,
     ) -> Self {
         Self {
             profile,
             secret_store,
             ssh_executor,
             remote_shell,
+            proxy,
         }
     }
 
@@ -158,7 +174,8 @@ where
             &self.profile.auth,
             ssh_password,
         )
-        .map_err(|error| RemotePortProbeError::new(error.to_string()))?;
+        .map_err(|error| RemotePortProbeError::new(error.to_string()))?
+        .with_proxy(self.proxy.clone());
         let output = self
             .ssh_executor
             .exec(&target, &self.probe_command(preference), None)
@@ -344,8 +361,11 @@ mod tests {
             use_install_proxy: true,
             ..RemoteHostProfile::default()
         };
-        let probe =
-            SshRemotePortProbe::with_secret_store(profile, MemoryRemoteHostSecretStore::default());
+        let probe = SshRemotePortProbe::with_secret_store(
+            profile,
+            MemoryRemoteHostSecretStore::default(),
+            None,
+        );
 
         let error = probe
             .ssh_password()
@@ -419,6 +439,7 @@ mod tests {
             store,
             executor,
             RemoteShellKind::Windows,
+            None,
         );
 
         let result = probe
@@ -475,6 +496,7 @@ mod tests {
             store,
             executor,
             RemoteShellKind::Posix,
+            None,
         );
 
         let result = probe
@@ -488,5 +510,61 @@ mod tests {
         assert_eq!(calls[0].0.user, "kk");
         assert!(calls[0].1.contains("seq 7474 7574"));
         assert_eq!(calls[0].2, None);
+    }
+
+    #[test]
+    fn remote_host_port_probe_dials_through_the_configured_proxy() {
+        use crate::host::ssh::remote_host_secret_store::{
+            MemoryRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretValue,
+        };
+        let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
+        let store = MemoryRemoteHostSecretStore::default();
+        store
+            .put_secret(&ssh_id, RemoteHostSecretValue::new("ssh-secret"))
+            .unwrap();
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port:
+                crate::host::ssh::remote_host_history_store::RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            ..RemoteHostProfile::default()
+        };
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let executor = RecordingSshExecutor {
+            calls: calls.clone(),
+            output: RemoteSshOutput {
+                status: 0,
+                stdout: b"port=7475\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        };
+        let proxy = SshProxy::parse("http://192.168.31.1:7897").unwrap();
+        let probe = SshRemotePortProbe::with_secret_store_and_executor(
+            profile,
+            store,
+            executor,
+            RemoteShellKind::Posix,
+            Some(proxy.clone()),
+        );
+
+        let result = probe
+            .choose_remote_port(&RemotePortProbePreference::Auto, "10.1.26.84:7474")
+            .unwrap();
+
+        assert_eq!(result.port, 7475);
+        assert_eq!(
+            calls.borrow()[0].0.proxy,
+            Some(proxy),
+            "the probe exec must carry the SSH connect proxy on its target"
+        );
     }
 }

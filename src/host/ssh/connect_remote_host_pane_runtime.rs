@@ -420,6 +420,10 @@ struct ConnectRemoteHostState {
     show_sudo_password: bool,
     remember: bool,
     use_install_proxy: bool,
+    /// Issue #201: dial the SSH connect itself through the active
+    /// remote-install proxy profile ("Connect via proxy"), independent of
+    /// the install-download toggle below.
+    use_ssh_proxy: bool,
     /// Where the waitagent artifact comes from on install/upgrade: the
     /// remote host downloads it (Remote) or this machine downloads and
     /// uploads it (Upload) (issue #168).
@@ -481,6 +485,7 @@ impl ConnectRemoteHostState {
             show_sudo_password: false,
             remember: true,
             use_install_proxy: true,
+            use_ssh_proxy: false,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
             proxy_settings: load_proxy_settings(),
@@ -529,6 +534,7 @@ impl ConnectRemoteHostState {
             self.show_sudo_password = false;
             self.remember = true;
             self.use_install_proxy = true;
+            self.use_ssh_proxy = false;
             self.install_source = InstallSource::RemoteDownload;
             self.relay_role = false;
             self.status = default_hint_status();
@@ -586,6 +592,7 @@ impl ConnectRemoteHostState {
         self.show_sudo_password = false;
         self.remember = true;
         self.use_install_proxy = profile.use_install_proxy;
+        self.use_ssh_proxy = profile.use_ssh_proxy;
         self.install_source = profile.install_source;
         self.relay_role = profile.relay_role;
         if request.has_work() {
@@ -739,6 +746,8 @@ impl ConnectRemoteHostState {
                     self.remember = !self.remember;
                 } else if self.focus == Focus::InstallProxy {
                     self.use_install_proxy = !self.use_install_proxy;
+                } else if self.focus == Focus::SshProxy {
+                    self.use_ssh_proxy = !self.use_ssh_proxy;
                 } else if self.focus == Focus::Password || self.focus == Focus::Sudo {
                     self.toggle_password_visibility();
                 } else if self.focus == Focus::HostKind
@@ -1189,6 +1198,11 @@ impl ConnectRemoteHostState {
             row if row == details.rows.via && point_in_rect(x, y, details.connection) => {
                 self.set_focus(Focus::Via)
             }
+            row if row == details.rows.ssh_proxy && point_in_rect(x, y, details.connection) => {
+                self.set_focus(Focus::SshProxy);
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.use_ssh_proxy = !self.use_ssh_proxy;
+            }
             row if row == details.rows.auth && point_in_rect(x, y, details.authentication) => {
                 self.set_focus(Focus::Auth)
             }
@@ -1404,6 +1418,11 @@ impl ConnectRemoteHostState {
             Focus::InstallProxy => {
                 self.delete_confirm = DeleteConfirmState::Idle;
                 self.use_install_proxy = !self.use_install_proxy;
+                PaneAction::None
+            }
+            Focus::SshProxy => {
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.use_ssh_proxy = !self.use_ssh_proxy;
                 PaneAction::None
             }
             Focus::InstallSource => {
@@ -2034,6 +2053,7 @@ enum Focus {
     User,
     HostKind,
     Via,
+    SshProxy,
     Auth,
     Password,
     Sudo,
@@ -2124,6 +2144,7 @@ impl Focus {
             Self::User,
             Self::HostKind,
             Self::Via,
+            Self::SshProxy,
             Self::Auth,
             Self::Password,
             Self::Sudo,
@@ -2385,6 +2406,7 @@ struct DetailsRows {
     user: u16,
     host_kind: u16,
     via: u16,
+    ssh_proxy: u16,
     auth: u16,
     password: u16,
     sudo: u16,
@@ -2540,10 +2562,11 @@ impl PopupGeometry {
         // instead of stretching to the full terminal height. The height is
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
-        // terminals to keep a visible margin; 30 rows fit the framed
+        // terminals to keep a visible margin; 31 rows fit the framed
         // sidebar and detail sections including the Via and Install Source
-        // choice rows plus the Relay role checkbox (issues #168, #180).
-        const POPUP_HEIGHT: u16 = 30;
+        // choice rows, the Connect-via-proxy checkbox, and the Relay role
+        // checkbox (issues #168, #180, #201).
+        const POPUP_HEIGHT: u16 = 31;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -2708,9 +2731,9 @@ impl DetailsGeometry {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // framed header bar
-                Constraint::Length(8), // Connection card (Host/Port/Last Port/User/Host Kind/Via)
+                Constraint::Length(9), // Connection card (Host/Port/Last Port/User/Host Kind/Via/Connect via proxy)
                 Constraint::Length(5), // Authentication card
-                Constraint::Length(6), // Options card (Remember/Use proxy/Install From/Install as relay)
+                Constraint::Length(6), // Options card (Remember/Download via proxy/Install From/Install as relay)
                 Constraint::Length(3), // info box card
                 Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
@@ -2723,6 +2746,7 @@ impl DetailsGeometry {
             user: sections[1].y.saturating_add(3).saturating_sub(area.y),
             host_kind: sections[1].y.saturating_add(4).saturating_sub(area.y),
             via: sections[1].y.saturating_add(5).saturating_sub(area.y),
+            ssh_proxy: sections[1].y.saturating_add(6).saturating_sub(area.y),
             auth: sections[2].y.saturating_add(1).saturating_sub(area.y),
             password: sections[2].y.saturating_add(2).saturating_sub(area.y),
             sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
@@ -3792,7 +3816,27 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         state,
         Focus::Via,
     ));
+    let table_rows = rows.len() as u16;
     render_detail_table(frame, table_area, rows);
+    // Issue #201: the Connect-via-proxy checkbox rides directly below the
+    // detail rows, so the conditional "Last Port" row can never push the
+    // table into it. The geometry hit row (`rows.ssh_proxy`) matches this
+    // position for the static layout, mirroring how the Via row already
+    // behaves when "Last Port" is present.
+    let ssh_proxy_area = Rect::new(
+        inner.x.saturating_add(SECTION_CONTENT_INDENT),
+        inner.y.saturating_add(table_rows),
+        inner.width.saturating_sub(SECTION_CONTENT_INDENT),
+        1,
+    );
+    render_checkbox_row(
+        frame,
+        ssh_proxy_area,
+        state.use_ssh_proxy,
+        "Connect via proxy",
+        state,
+        Focus::SshProxy,
+    );
 }
 
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -3887,7 +3931,7 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         frame,
         proxy_area,
         state.use_install_proxy,
-        "Use proxy",
+        "Download via proxy",
         state,
         Focus::InstallProxy,
     );
@@ -5136,6 +5180,7 @@ where
             .and_then(|profile| profile.last_via_used.clone()),
         install_source: state.install_source,
         relay_role: state.relay_role,
+        use_ssh_proxy: state.use_ssh_proxy,
     };
 
     history_store
@@ -5309,6 +5354,8 @@ fn run_connect(
     let mut stdin_payload = None;
     args.push("--use-install-proxy".to_string());
     args.push(state.use_install_proxy.to_string());
+    args.push("--use-ssh-proxy".to_string());
+    args.push(state.use_ssh_proxy.to_string());
     let selected_profile = state.selected_profile();
     if let Some(profile) =
         selected_profile.filter(|profile| saved_profile_can_connect_by_id(state, profile))
@@ -5530,6 +5577,7 @@ fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostS
         && profile.via() == state.via
         && auth_matches_state(&profile.auth, state)
         && profile.use_install_proxy == state.use_install_proxy
+        && profile.use_ssh_proxy == state.use_ssh_proxy
         && profile.install_source == state.install_source
         && profile.relay_role == state.relay_role
 }
@@ -6963,6 +7011,65 @@ mod tests {
     }
 
     #[test]
+    fn ssh_proxy_toggle_is_host_detail_state() {
+        // Issue #201: the Connect-via-proxy checkbox toggles independently of
+        // the Download-via-proxy one, by Space, Enter, and the mouse.
+        let mut state = ConnectRemoteHostState::load();
+        assert!(!state.use_ssh_proxy);
+        state.set_focus(Focus::SshProxy);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
+            PaneAction::None
+        );
+        assert!(state.use_ssh_proxy);
+        assert!(
+            state.use_install_proxy,
+            "the two toggles are independent (install proxy stays at its default)"
+        );
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert!(
+            !state.use_ssh_proxy,
+            "Enter toggles like the other checkboxes"
+        );
+        // Tab follows the cycle position right after Via.
+        state.set_focus(Focus::SshProxy);
+        state.apply_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(state.focus, Focus::Auth);
+    }
+
+    #[test]
+    fn ssh_proxy_syncs_from_profile_and_resets_for_new_host() {
+        let mut state = ConnectRemoteHostState::load();
+        let mut profile = saved_password_profile();
+        profile.use_ssh_proxy = true;
+        state.profiles = vec![profile];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        assert!(state.use_ssh_proxy);
+
+        state.selected = state.profiles.len();
+        let _ = state.sync_selected_profile();
+        assert!(!state.use_ssh_proxy, "New Host resets the toggle to off");
+    }
+
+    #[test]
+    fn profile_matches_state_includes_use_ssh_proxy() {
+        let mut state = ConnectRemoteHostState::load();
+        let mut profile = saved_password_profile();
+        profile.use_ssh_proxy = true;
+        state.profiles = vec![profile.clone()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        assert!(profile_matches_state(&profile, &state));
+
+        state.use_ssh_proxy = false;
+        assert!(!profile_matches_state(&profile, &state));
+    }
+
+    #[test]
     fn install_source_choice_is_host_detail_state() {
         let mut state = ConnectRemoteHostState::load();
         assert_eq!(state.install_source, InstallSource::RemoteDownload);
@@ -7457,10 +7564,16 @@ mod tests {
         let output = rendered_text(100, 26, &state);
         assert!(output.contains("Connect Remote Host"));
         assert!(output.contains("Remember host"));
-        assert!(output.contains("Use proxy"));
+        assert!(output.contains("Download via proxy"));
         assert!(output.contains("Connect"));
         assert!(output.contains("Delete"));
         assert!(output.contains(&bottom_hint_text(&state)));
+        // The Connect-via-proxy checkbox lives in the Connection card, which
+        // the compressed 26-row popup cannot fully show; on a terminal tall
+        // enough for the full 31-row popup every card row is visible.
+        let full = rendered_text(100, 35, &state);
+        assert!(full.contains("Connect via proxy"));
+        assert!(full.contains("Download via proxy"));
     }
 
     #[test]
@@ -8509,6 +8622,7 @@ mod tests {
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
+            use_ssh_proxy: false,
         };
         state.profiles = vec![profile];
         state.selected = 0;
@@ -8629,6 +8743,7 @@ mod tests {
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
+            use_ssh_proxy: false,
         };
         state.profiles = vec![profile.clone()];
         state.selected = 0;
@@ -8813,6 +8928,7 @@ mod tests {
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
+            use_ssh_proxy: false,
         };
 
         let mut state = ConnectRemoteHostState::load();
@@ -8863,6 +8979,7 @@ mod tests {
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
+            use_ssh_proxy: false,
         };
 
         let mut state = ConnectRemoteHostState::load();

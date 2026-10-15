@@ -45,7 +45,9 @@ use crate::host::ssh::remote_host_connect_runtime::{
     RemoteHostConnectRequest, RemoteHostConnectRuntime, SshRemotePortProbeFactory,
 };
 use crate::host::ssh::remote_host_history_store::{RemoteHostHistoryStore, RemoteHostProfile};
+use crate::host::ssh::remote_install_proxy_store::RemoteInstallProxyStore;
 use crate::host::ssh::remote_sibling_nodes::list_sibling_node_ports;
+use crate::host::ssh::ssh_proxy::SshProxy;
 use crate::host::ssh::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
 use crate::infra::remote_grpc_transport::{OutboundNodeSessionRequest, RemoteNodeVia};
 use crate::remote::node::remote_node_ingress_server_runtime::InternalEvent;
@@ -2221,6 +2223,18 @@ fn perform_remote_host_connect(
 
     let history_store = RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path());
 
+    // Issue #201 wart fix: this production path used to hardcode
+    // `use_install_proxy: true`, ignoring the profile's saved choices. Read
+    // the stored profile so both proxy toggles reflect what the user last
+    // saved; a missing profile keeps these values moot (connect fails at
+    // profile resolution anyway).
+    let saved_profile = history_store.load().ok().and_then(|store| {
+        store
+            .hosts
+            .into_iter()
+            .find(|profile| profile.name == profile_name)
+    });
+
     let request = RemoteHostConnectRequest {
         profile_name: Some(profile_name.to_string()),
         direct_profile: None,
@@ -2228,7 +2242,14 @@ fn perform_remote_host_connect(
         replace_profile_name: None,
         local_connect_endpoint: shared.advertised_public_endpoint_label(),
         cwd_hint: None,
-        use_install_proxy: true,
+        use_install_proxy: saved_profile
+            .as_ref()
+            .map(|profile| profile.use_install_proxy)
+            .unwrap_or(true),
+        use_ssh_proxy: saved_profile
+            .as_ref()
+            .map(|profile| profile.use_ssh_proxy)
+            .unwrap_or(false),
     };
 
     let auth_rejection_shared = shared.clone();
@@ -2362,9 +2383,18 @@ fn perform_remote_host_connect(
     if let Some(profile) = profile {
         let authority_node_id = outcome.authority_node_id.clone();
         let tls_pin_sha256 = profile.tls_pin_sha256.clone().unwrap_or_default();
+        // Issue #201: sibling enumeration SSHes into the same host, so it
+        // dials through the same proxy the primary connect used.
+        let ssh_proxy = resolve_profile_ssh_proxy(&profile);
         let shared = shared.clone();
         std::thread::spawn(move || {
-            dial_sibling_nodes(&shared, &profile, &authority_node_id, tls_pin_sha256);
+            dial_sibling_nodes(
+                &shared,
+                &profile,
+                ssh_proxy,
+                &authority_node_id,
+                tls_pin_sha256,
+            );
         });
     }
 
@@ -2438,6 +2468,37 @@ fn discover_fingerprint_via_relay(
     Ok(Some(node_id.to_string()))
 }
 
+/// Resolves the SSH connect proxy for a best-effort sibling dial from the
+/// active remote-install proxy profile (issue #201), mirroring the connect
+/// runtime's entry resolution: checked but nothing configured → direct;
+/// a store/URL failure is logged and the sibling enumeration falls back to
+/// a direct dial instead of failing (sibling dials are best-effort).
+fn resolve_profile_ssh_proxy(profile: &RemoteHostProfile) -> Option<SshProxy> {
+    if !profile.use_ssh_proxy {
+        return None;
+    }
+    let config = match RemoteInstallProxyStore::default().load_active_config() {
+        Ok(config) => config,
+        Err(error) => {
+            ERROR_LOG.log(format!(
+                "[ratatui-state-loop] sibling dial for `{}` falls back to direct: {error}",
+                profile.host
+            ));
+            return None;
+        }
+    };
+    match config.ssh_proxy() {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            ERROR_LOG.log(format!(
+                "[ratatui-state-loop] sibling dial for `{}` falls back to direct: {error}",
+                profile.host
+            ));
+            None
+        }
+    }
+}
+
 /// Dials every sibling ratatui node server on the remote host (same TLS pin,
 /// different port) so all of the host's local sessions appear in the sidebar.
 /// Best effort: enumeration and dial failures are logged and never surface to
@@ -2445,13 +2506,14 @@ fn discover_fingerprint_via_relay(
 fn dial_sibling_nodes(
     shared: &Arc<SharedState>,
     profile: &RemoteHostProfile,
+    proxy: Option<SshProxy>,
     authority_node_id: &str,
     tls_pin_sha256: String,
 ) {
     let primary_port = authority_node_id
         .rsplit_once('#')
         .and_then(|(_, port)| port.parse::<u16>().ok());
-    let ports = match list_sibling_node_ports(profile) {
+    let ports = match list_sibling_node_ports(profile, proxy) {
         Ok(ports) => ports,
         Err(error) => {
             ERROR_LOG.log(format!(
