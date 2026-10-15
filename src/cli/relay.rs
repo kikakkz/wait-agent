@@ -470,7 +470,7 @@ mod tests {
         // Without the separator a dash-prefixed token stays an error.
         assert_eq!(
             parse_error(&["waitagent", "relay", "join", "127.0.0.1:7475", "--oops"]),
-            "unexpected argument --oops"
+            "unexpected argument: --oops"
         );
     }
 
