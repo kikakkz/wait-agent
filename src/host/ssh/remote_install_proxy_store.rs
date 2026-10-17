@@ -1,5 +1,5 @@
 use crate::host::ssh::remote_host_home::waitagent_home;
-use crate::host::ssh::ssh_proxy::SshProxy;
+use crate::infra::proxy_stream::SshProxy;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -214,6 +214,18 @@ impl Default for RemoteInstallProxyStore {
     fn default() -> Self {
         Self::new(Self::default_path())
     }
+}
+
+/// Issue #206: resolves the connect proxy from the ACTIVE remote-install
+/// proxy profile at the default path (`all_proxy` preferred, `https_proxy`
+/// fallback — the same resolution the SSH connect uses). An empty profile
+/// yields `Ok(None)` (direct dial); a configured value that does not parse
+/// fails with the field and value named. Relay legs (join dial, link
+/// worker) share this so every proxied leg agrees on the address.
+pub fn load_active_ssh_proxy() -> Result<Option<SshProxy>, RemoteInstallProxyStoreError> {
+    RemoteInstallProxyStore::default()
+        .load_active_config()?
+        .ssh_proxy()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,7 +705,7 @@ mod tests {
         assert_eq!(
             config.ssh_proxy().unwrap(),
             Some(SshProxy {
-                scheme: crate::host::ssh::ssh_proxy::SshProxyScheme::Socks5,
+                scheme: crate::infra::proxy_stream::SshProxyScheme::Socks5,
                 host: "192.168.31.1".to_string(),
                 port: 7897,
             })
@@ -707,7 +719,7 @@ mod tests {
         assert_eq!(
             fallback.ssh_proxy().unwrap(),
             Some(SshProxy {
-                scheme: crate::host::ssh::ssh_proxy::SshProxyScheme::Http,
+                scheme: crate::infra::proxy_stream::SshProxyScheme::Http,
                 host: "192.168.31.1".to_string(),
                 port: 7897,
             })

@@ -19,7 +19,7 @@ use crate::host::ssh::remote_host_secret_store::{
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
 };
-use crate::host::ssh::ssh_proxy::SshProxy;
+use crate::infra::proxy_stream::SshProxy;
 use std::fmt;
 use std::str::FromStr;
 

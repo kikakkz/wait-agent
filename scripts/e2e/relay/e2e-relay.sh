@@ -299,8 +299,12 @@ bring_up_topology() {
     # -t: the node server initializes a ratatui TUI and needs a pty; there is
     # no headless mode. The pty stays attached to the detached container and
     # the idle TUI blocks on input long before the pty buffer matters.
+    # Node A's join passes --via-proxy (issue #206): no remote-install proxy
+    # profile exists in the container, so the join still dials direct and
+    # the pin records use_proxy = false — the flag exercises the CLI parse
+    # and the proxy-resolution fallback on the join path.
     docker run -dt --name "$NODE_A" --network "$NET_A" "$IMAGE" \
-        sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
+        sh -c "waitagent relay join --via-proxy relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_A" >/dev/null
     docker run -dt --name "$NODE_B" --network "$NET_B" "$IMAGE" \
         sh -c "waitagent relay join relay:$RELAY_PORT '$token' && exec waitagent --port $NODE_PORT_B" >/dev/null
 

@@ -54,6 +54,9 @@ pub struct RelayJoinCommand {
     pub address: String,
     /// Enrollment token minted by `relay invite`.
     pub token: String,
+    /// Issue #206: dial the enrollment through the active remote-install
+    /// proxy profile and record the proxy marker in the written pin.
+    pub via_proxy: bool,
 }
 
 pub(crate) fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
@@ -261,6 +264,10 @@ fn parse_relay_join(mut args: Vec<String>) -> Result<RelayJoinCommand, CliError>
         }
         match flag.as_str() {
             "--help" | "-h" => return Ok(command),
+            "--via-proxy" => {
+                args.remove(0);
+                command.via_proxy = true;
+            }
             "--" => {
                 args.remove(0);
                 positional_only = true;
@@ -484,6 +491,41 @@ mod tests {
             parse_error(&["waitagent", "relay", "join", "relay.example"]),
             "missing value for relay join <address> <token>"
         );
+    }
+
+    #[test]
+    fn relay_join_via_proxy_flag_is_opt_in() {
+        // Issue #206: --via-proxy routes the enrollment dial through the
+        // active proxy profile; it never appears positionally.
+        match parse(&[
+            "waitagent",
+            "relay",
+            "join",
+            "--via-proxy",
+            "relay.example:7475",
+            "invite-token",
+        ])
+        .command
+        {
+            Command::RelayJoin(command) => {
+                assert!(command.via_proxy);
+                assert_eq!(command.address, "relay.example:7475");
+                assert_eq!(command.token, "invite-token");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match parse(&[
+            "waitagent",
+            "relay",
+            "join",
+            "relay.example:7475",
+            "invite-token",
+        ])
+        .command
+        {
+            Command::RelayJoin(command) => assert!(!command.via_proxy),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

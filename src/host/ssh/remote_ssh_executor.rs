@@ -1,6 +1,6 @@
 use crate::host::ssh::remote_host_history_store::RemoteHostAuthProfile;
 use crate::host::ssh::remote_host_secret_store::RemoteHostSecretValue;
-use crate::host::ssh::ssh_proxy::{open_proxy_stream, SshProxy};
+use crate::infra::proxy_stream::{open_proxy_stream, SshProxy};
 use hmac::{Hmac, KeyInit, Mac};
 use russh::client;
 use russh::keys::ssh_key::{

@@ -7,8 +7,8 @@ use crate::host::ssh::remote_shell::RemoteShellKind;
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
 };
-use crate::host::ssh::ssh_proxy::SshProxy;
 use crate::host::ssh::ssh_remote_host_bootstrapper::powershell_command;
+use crate::infra::proxy_stream::SshProxy;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

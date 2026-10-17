@@ -3,6 +3,7 @@ pub mod error_log;
 pub mod node_credentials;
 pub mod operator_auth;
 pub mod peer_connection;
+pub mod proxy_stream;
 pub mod relay_admin;
 pub mod relay_capacity;
 pub mod relay_client;

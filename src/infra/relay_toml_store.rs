@@ -33,6 +33,10 @@ pub struct RelayTomlConfig {
     /// [`DEFAULT_RELAY_HEARTBEAT_INTERVAL_SECS`]. Written by operators/tools;
     /// `relay join` leaves it unset.
     pub heartbeat_interval_secs: Option<u64>,
+    /// Issue #206: dial the join and the persistent link through the active
+    /// remote-install proxy profile instead of connecting directly. Absent
+    /// in pins written before issue #206 and loads as `false`.
+    pub use_proxy: bool,
 }
 
 impl RelayTomlConfig {
@@ -96,6 +100,7 @@ fn serialize_relay_toml(config: &RelayTomlConfig) -> String {
         out.push_str(&secs.to_string());
         out.push('\n');
     }
+    out.push_str(&format!("use_proxy = {}\n", config.use_proxy));
     out
 }
 
@@ -119,6 +124,7 @@ fn parse_relay_toml(text: &str) -> Result<RelayTomlConfig, RelayTomlStoreError> 
     let mut address: Option<String> = None;
     let mut relay_fingerprint: Option<String> = None;
     let mut heartbeat_interval_secs: Option<u64> = None;
+    let mut use_proxy = false;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -131,6 +137,7 @@ fn parse_relay_toml(text: &str) -> Result<RelayTomlConfig, RelayTomlStoreError> 
             "heartbeat_interval_secs" => {
                 heartbeat_interval_secs = Some(parse_heartbeat(&value)?);
             }
+            "use_proxy" => use_proxy = parse_use_proxy(&value)?,
             other => {
                 return Err(RelayTomlStoreError::new(format!(
                     "unknown relay.toml field `{other}`"
@@ -147,6 +154,7 @@ fn parse_relay_toml(text: &str) -> Result<RelayTomlConfig, RelayTomlStoreError> 
         address,
         relay_fingerprint,
         heartbeat_interval_secs,
+        use_proxy,
     })
 }
 
@@ -181,6 +189,16 @@ fn parse_heartbeat(value: &str) -> Result<u64, RelayTomlStoreError> {
         ));
     }
     Ok(secs)
+}
+
+fn parse_use_proxy(value: &str) -> Result<bool, RelayTomlStoreError> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(RelayTomlStoreError::new(
+            "relay.toml `use_proxy` must be true or false".to_string(),
+        )),
+    }
 }
 
 fn parse_key_value(line: &str) -> Result<(String, String), RelayTomlStoreError> {
@@ -242,6 +260,7 @@ mod tests {
             relay_fingerprint: "7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4"
                 .to_string(),
             heartbeat_interval_secs: None,
+            use_proxy: false,
         }
     }
 
@@ -278,6 +297,67 @@ mod tests {
 
         let loaded = RelayTomlConfig::load(&path).expect("load should succeed");
         assert_eq!(loaded, Some(config));
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn round_trips_use_proxy() {
+        for (name, use_proxy) in [("use-proxy-true", true), ("use-proxy-false", false)] {
+            let path = unique_path(name);
+            let config = RelayTomlConfig {
+                use_proxy,
+                ..sample()
+            };
+            config.save(&path).expect("save should succeed");
+            let text = fs::read_to_string(&path).expect("file readable");
+            assert!(
+                text.contains(&format!("use_proxy = {use_proxy}")),
+                "use_proxy key is persisted: {text}"
+            );
+
+            let loaded = RelayTomlConfig::load(&path).expect("load should succeed");
+            assert_eq!(loaded, Some(config));
+            crate::infra::best_effort::remove_file(&path);
+        }
+
+        // Issue #206: the pin comparison (derived PartialEq) must see a
+        // use_proxy flip as a change, or a true→false edit would not
+        // restart the link.
+        let flipped = RelayTomlConfig {
+            use_proxy: !sample().use_proxy,
+            ..sample()
+        };
+        assert_ne!(flipped, sample());
+    }
+
+    #[test]
+    fn load_without_use_proxy_field_defaults_to_false() {
+        let path = unique_path("legacy-no-use-proxy");
+        fs::write(
+            &path,
+            "address = \"x:1\"\nrelay_fingerprint = \"7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4\"\n",
+        )
+        .expect("write should succeed");
+
+        let loaded = RelayTomlConfig::load(&path).expect("load should succeed");
+
+        assert!(!loaded.expect("pin loads").use_proxy);
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_a_non_boolean_use_proxy() {
+        let path = unique_path("bad-use-proxy");
+        fs::write(
+            &path,
+            "address = \"x:1\"\nrelay_fingerprint = \"7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4\"\nuse_proxy = maybe\n",
+        )
+        .expect("write should succeed");
+        let error = RelayTomlConfig::load(&path).expect_err("non-boolean use_proxy should fail");
+        assert!(
+            error.to_string().contains("`use_proxy`"),
+            "the error names the key: {error}"
+        );
         crate::infra::best_effort::remove_file(&path);
     }
 

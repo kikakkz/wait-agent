@@ -207,6 +207,7 @@ impl ConnectRemoteHostPaneRuntime {
                             address,
                             token,
                             force,
+                            use_proxy,
                         } => {
                             if matches!(state.status, Status::Working(_)) {
                                 continue;
@@ -223,6 +224,7 @@ impl ConnectRemoteHostPaneRuntime {
                                 &address,
                                 &token,
                                 force,
+                                use_proxy,
                             ) {
                                 RelayNodeAnswer::Ok(message) => {
                                     persist_successful_relay_join(state, &address);
@@ -445,6 +447,9 @@ struct ConnectRemoteHostState {
     relay_profiles: Vec<RelayProfile>,
     relay_draft_address: String,
     relay_draft_token: String,
+    /// Issue #206: dial the join through the active proxy profile (the
+    /// Relay page's half of the Connect-via-proxy toggle).
+    relay_draft_via_proxy: bool,
     relay_mismatch: RelayMismatchState,
     editing: Option<EditField>,
     edit_cursor: usize,
@@ -500,6 +505,7 @@ impl ConnectRemoteHostState {
             relay_profiles: load_relay_profiles(),
             relay_draft_address: String::new(),
             relay_draft_token: String::new(),
+            relay_draft_via_proxy: false,
             relay_mismatch: RelayMismatchState::Idle,
             editing: None,
             edit_cursor: 0,
@@ -748,6 +754,8 @@ impl ConnectRemoteHostState {
                     self.use_install_proxy = !self.use_install_proxy;
                 } else if self.focus == Focus::SshProxy {
                     self.use_ssh_proxy = !self.use_ssh_proxy;
+                } else if self.focus == Focus::RelayJoinProxy {
+                    self.relay_draft_via_proxy = !self.relay_draft_via_proxy;
                 } else if self.focus == Focus::Password || self.focus == Focus::Sudo {
                     self.toggle_password_visibility();
                 } else if self.focus == Focus::HostKind
@@ -1166,6 +1174,11 @@ impl ConnectRemoteHostState {
             match row {
                 row if row == details.rows.address => self.set_focus(Focus::RelayAddress),
                 row if row == details.rows.token => self.set_focus(Focus::RelayToken),
+                row if row == details.rows.via_proxy => {
+                    self.set_focus(Focus::RelayJoinProxy);
+                    self.delete_confirm = DeleteConfirmState::Idle;
+                    self.relay_draft_via_proxy = !self.relay_draft_via_proxy;
+                }
                 row if row == details.rows.action => {
                     if let Some(focus) = relay_action_from_x(x, details.buttons, self) {
                         self.set_focus(focus);
@@ -1425,6 +1438,11 @@ impl ConnectRemoteHostState {
                 self.use_ssh_proxy = !self.use_ssh_proxy;
                 PaneAction::None
             }
+            Focus::RelayJoinProxy => {
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.relay_draft_via_proxy = !self.relay_draft_via_proxy;
+                PaneAction::None
+            }
             Focus::InstallSource => {
                 self.adjust_choice(1);
                 PaneAction::None
@@ -1466,6 +1484,7 @@ impl ConnectRemoteHostState {
             address,
             token,
             force,
+            use_proxy: self.relay_draft_via_proxy,
         }
     }
 
@@ -1853,7 +1872,8 @@ impl ConnectRemoteHostState {
 
     /// Selecting a saved profile fills the draft with its address (invite
     /// tokens are one-time secrets and are never persisted); selecting
-    /// "+ New Relay" blanks the draft, like New Host/New Proxy.
+    /// "+ New Relay" blanks the draft, like New Host/New Proxy. The proxy
+    /// toggle resets with the draft (issue #206).
     fn sync_selected_relay(&mut self) {
         if let Some(profile) = self
             .selected_relay_profile_index()
@@ -1865,6 +1885,7 @@ impl ConnectRemoteHostState {
             self.relay_draft_address.clear();
             self.relay_draft_token.clear();
         }
+        self.relay_draft_via_proxy = false;
     }
 
     fn selected_proxy_profile_index(&self) -> Option<usize> {
@@ -2071,6 +2092,7 @@ enum Focus {
     ProxyDelete,
     RelayAddress,
     RelayToken,
+    RelayJoinProxy,
     RelayJoin,
     RelayRemove,
     RelayDelete,
@@ -2127,6 +2149,7 @@ impl Focus {
                 Self::Hosts,
                 Self::RelayAddress,
                 Self::RelayToken,
+                Self::RelayJoinProxy,
                 Self::RelayJoin,
             ];
             if relay_remove {
@@ -2305,11 +2328,13 @@ enum PaneAction {
     DeleteProxyConfig,
     /// Enroll at / switch to the relay `address` with the invite `token`;
     /// `force` confirms a pin mismatch after the explicit operator warning
-    /// (issue #156 slice 1).
+    /// (issue #156 slice 1). `use_proxy` (issue #206) dials the enrollment
+    /// through the active proxy profile.
     RelayJoin {
         address: String,
         token: String,
         force: bool,
+        use_proxy: bool,
     },
     /// Remove the pinned relay: clear relay.toml and stop the link.
     RelayRemove,
@@ -3383,6 +3408,7 @@ struct RelayDetailsRows {
     address: u16,
     token: u16,
     fingerprint: u16,
+    via_proxy: u16,
     action: u16,
 }
 
@@ -3395,7 +3421,7 @@ impl RelayDetailsGeometry {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // framed header bar
-                Constraint::Length(5), // Relay card (Address / Invite Token / Fingerprint)
+                Constraint::Length(6), // Relay card (Address / Invite Token / Fingerprint / Join via proxy)
                 Constraint::Length(3), // info box card
                 Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
@@ -3407,6 +3433,7 @@ impl RelayDetailsGeometry {
             address: sections[1].y.saturating_add(1).saturating_sub(area.y),
             token: sections[1].y.saturating_add(2).saturating_sub(area.y),
             fingerprint: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            via_proxy: sections[1].y.saturating_add(4).saturating_sub(area.y),
             action: sections[4].y.saturating_sub(area.y),
         };
         Self {
@@ -3512,6 +3539,23 @@ fn render_relay_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
         readonly_icon_detail_row("◇", "Fingerprint", &state.relay_draft_fingerprint()),
     ];
     render_detail_table(frame, relay_inner, rows);
+    // Issue #206: the Join-via-proxy checkbox rides below the detail rows
+    // (same dynamic placement as the Connection card's Connect-via-proxy
+    // row), so the hit row matches the static layout.
+    let via_proxy_area = Rect::new(
+        relay_inner.x,
+        relay_inner.y.saturating_add(3),
+        relay_inner.width,
+        1,
+    );
+    render_checkbox_row(
+        frame,
+        via_proxy_area,
+        state.relay_draft_via_proxy,
+        "Join via proxy",
+        state,
+        Focus::RelayJoinProxy,
+    );
 
     render_relay_info_box(frame, geometry.info);
     render_relay_actions(frame, geometry.buttons, state);
@@ -5251,11 +5295,13 @@ enum RelayNodeAnswer {
 /// Sends `RELAY_JOIN` over the node control channel and interprets the
 /// answer. Enrollment can block on TLS + enrollment IO, so the timeout is
 /// generous; the popup shows a modal "Joining relay..." while blocked here.
+/// `use_proxy` (issue #206) appends the VIA_PROXY wire flag.
 fn run_relay_join_command(
     port: Option<u16>,
     address: &str,
     token: &str,
     force: bool,
+    use_proxy: bool,
 ) -> RelayNodeAnswer {
     let Some(port) = port else {
         return RelayNodeAnswer::Err(
@@ -5264,11 +5310,13 @@ fn run_relay_join_command(
     };
     const JOIN_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let force_arg = if force { " FORCE" } else { "" };
+    let proxy_arg = if use_proxy { " VIA_PROXY" } else { "" };
     let command = format!(
-        "RELAY_JOIN {} {}{}",
+        "RELAY_JOIN {} {}{}{}",
         general_purpose::STANDARD.encode(address.as_bytes()),
         general_purpose::STANDARD.encode(token.as_bytes()),
-        force_arg
+        force_arg,
+        proxy_arg
     );
     let line = match crate::platform::local_ipc::send_node_command_with_timeout(
         port,
@@ -9024,6 +9072,7 @@ mod tests {
             address: "relay.example:7475".to_string(),
             relay_fingerprint: "ab".repeat(32),
             heartbeat_interval_secs: None,
+            use_proxy: false,
         }
     }
 
@@ -9101,6 +9150,10 @@ mod tests {
         state.set_focus(Focus::RelayAddress);
         assert_eq!(state.next_focus(), Focus::RelayToken);
         state.set_focus(Focus::RelayToken);
+        // Issue #206: the Join-via-proxy checkbox sits between the token
+        // field and Join.
+        assert_eq!(state.next_focus(), Focus::RelayJoinProxy);
+        state.set_focus(Focus::RelayJoinProxy);
         assert_eq!(state.next_focus(), Focus::RelayJoin);
         state.set_focus(Focus::RelayJoin);
         assert_eq!(state.next_focus(), Focus::RelayRemove);
@@ -9108,6 +9161,8 @@ mod tests {
         assert_eq!(state.next_focus(), Focus::RelayDelete);
         state.set_focus(Focus::RelayDelete);
         assert_eq!(state.next_focus(), Focus::Hosts);
+        state.set_focus(Focus::RelayJoinProxy);
+        assert_eq!(state.prev_focus(), Focus::RelayToken);
         state.set_focus(Focus::RelayToken);
         assert_eq!(state.prev_focus(), Focus::RelayAddress);
     }
@@ -9186,8 +9241,51 @@ mod tests {
                 address: "relay.example:7475".to_string(),
                 token: "invite-token".to_string(),
                 force: false,
+                use_proxy: false,
             }
         );
+
+        // Issue #206: the Join-via-proxy checkbox rides on the action.
+        state.relay_draft_via_proxy = true;
+        let action = state.activate_focus();
+        assert_eq!(
+            action,
+            PaneAction::RelayJoin {
+                address: "relay.example:7475".to_string(),
+                token: "invite-token".to_string(),
+                force: false,
+                use_proxy: true,
+            }
+        );
+    }
+
+    #[test]
+    fn relay_join_proxy_toggle_is_relay_detail_state() {
+        let mut state = ConnectRemoteHostState::load();
+        state.selected = state.relay_selection_index();
+        assert!(!state.relay_draft_via_proxy);
+        state.set_focus(Focus::RelayJoinProxy);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
+            PaneAction::None
+        );
+        assert!(state.relay_draft_via_proxy);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert!(
+            !state.relay_draft_via_proxy,
+            "Enter toggles like the other checkboxes"
+        );
+        // The cycle reaches the checkbox between the token field and Join.
+        state.set_focus(Focus::RelayToken);
+        state.apply_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(state.focus, Focus::RelayJoinProxy);
+        // Syncing a saved relay (or New Relay) resets the toggle.
+        state.relay_draft_via_proxy = true;
+        state.sync_selected_relay();
+        assert!(!state.relay_draft_via_proxy);
     }
 
     #[test]
@@ -9235,7 +9333,7 @@ mod tests {
 
     #[test]
     fn relay_join_command_requires_the_embedded_runtime() {
-        let answer = run_relay_join_command(None, "relay.example:7475", "token", false);
+        let answer = run_relay_join_command(None, "relay.example:7475", "token", false, false);
         assert!(
             matches!(answer, RelayNodeAnswer::Err(ref message) if message.contains("embedded console")),
             "unexpected answer: {answer:?}"
@@ -9399,7 +9497,9 @@ mod tests {
         let details = RelayDetailsGeometry::from_area(popup.details);
 
         assert_eq!(details.header.height, 3);
-        assert_eq!(details.relay.height, 5);
+        // Issue #206: the Relay card grew one row for the Join-via-proxy
+        // checkbox (Address / Invite Token / Fingerprint / checkbox).
+        assert_eq!(details.relay.height, 6);
         assert_eq!(details.info.height, 3);
         assert_eq!(details.buttons.height, 1);
         assert_eq!(details.hint.height, 1);

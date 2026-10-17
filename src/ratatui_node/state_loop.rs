@@ -47,8 +47,8 @@ use crate::host::ssh::remote_host_connect_runtime::{
 use crate::host::ssh::remote_host_history_store::{RemoteHostHistoryStore, RemoteHostProfile};
 use crate::host::ssh::remote_install_proxy_store::RemoteInstallProxyStore;
 use crate::host::ssh::remote_sibling_nodes::list_sibling_node_ports;
-use crate::host::ssh::ssh_proxy::SshProxy;
 use crate::host::ssh::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
+use crate::infra::proxy_stream::SshProxy;
 use crate::infra::remote_grpc_transport::{OutboundNodeSessionRequest, RemoteNodeVia};
 use crate::remote::node::remote_node_ingress_server_runtime::InternalEvent;
 use crate::remote::node::remote_node_session_sync_runtime::{
@@ -277,13 +277,18 @@ fn run_state_event_loop(
                 );
             }
 
-            StateEvent::RemoteHostRelayJoinRequested { address, token } => {
+            StateEvent::RemoteHostRelayJoinRequested {
+                address,
+                token,
+                use_proxy,
+            } => {
                 run_relay_join(
                     shared.clone(),
                     0,
                     address,
                     token,
                     false,
+                    use_proxy,
                     RelayJoinContext::RelayRoleDeploy,
                     state_event_tx.clone(),
                 );
@@ -621,6 +626,7 @@ fn run_state_event_loop(
                                 request.address,
                                 request.token,
                                 false,
+                                request.use_proxy,
                                 RelayJoinContext::RelayRoleDeploy,
                                 state_event_tx.clone(),
                             );
@@ -859,6 +865,7 @@ fn handle_client_command_event(
         address,
         token,
         force,
+        use_proxy,
     } = &command
     {
         // The enrollment session blocks on TLS + enrollment IO for seconds;
@@ -871,6 +878,7 @@ fn handle_client_command_event(
             address.clone(),
             token.clone(),
             *force,
+            *use_proxy,
             RelayJoinContext::Operator,
             state_event_tx,
         );
@@ -2275,6 +2283,9 @@ fn perform_remote_host_connect(
             .send(StateEvent::RemoteHostRelayJoinRequested {
                 address: request.address,
                 token: request.token,
+                // Issue #206: the connect runtime stamped the host request's
+                // proxy toggle onto the pending join.
+                use_proxy: request.use_proxy,
             });
     }))
     .with_relay_link_ready_probe(Arc::new(move || {
@@ -2697,6 +2708,7 @@ fn handle_remote_host_connect_result(
                     request.address,
                     request.token,
                     false,
+                    request.use_proxy,
                     RelayJoinContext::RelayRoleDeploy,
                     state_event_tx.clone(),
                 );
@@ -2939,17 +2951,19 @@ fn handle_e2e_relay_probe_result(
 /// the join blocks on TCP + TLS + enrollment IO for seconds and must not
 /// stall the single writer. All `SharedState` mutations happen when the
 /// result comes back as a `RelayJoinResult` event.
+#[allow(clippy::too_many_arguments)]
 fn run_relay_join(
     shared: Arc<SharedState>,
     client_id: u64,
     address: String,
     token: String,
     force: bool,
+    use_proxy: bool,
     context: RelayJoinContext,
     state_event_tx: mpsc::Sender<StateEvent>,
 ) {
     std::thread::spawn(move || {
-        let result = perform_relay_join(&shared, &address, &token, force, context);
+        let result = perform_relay_join(&shared, &address, &token, force, context, use_proxy);
         let _ = state_event_tx.send(StateEvent::RelayJoinResult {
             client_id,
             address,
@@ -2980,6 +2994,19 @@ impl RelayJoinContext {
     }
 }
 
+/// Issue #206: resolves the active remote-install proxy profile for a relay
+/// leg when the caller opted in. Checked but nothing configured means a
+/// direct dial; a store read or parse failure refuses the join — the
+/// message lands in the existing `[relay-join]` error log — matching the
+/// SSH connect's fail-fast on a broken proxy profile (issue #201).
+fn resolve_relay_leg_proxy(use_proxy: bool) -> Result<Option<SshProxy>, String> {
+    if !use_proxy {
+        return Ok(None);
+    }
+    crate::host::ssh::remote_install_proxy_store::load_active_ssh_proxy()
+        .map_err(|error| format!("active proxy profile cannot be used: {error}"))
+}
+
 /// Enrolls at the relay through the same engine `relay join` uses, then
 /// reconciles the fresh pin with the one it replaced. A fingerprint change
 /// refuses by default: the previous pin is restored and the caller surfaces
@@ -2992,10 +3019,12 @@ fn perform_relay_join(
     token: &str,
     force: bool,
     context: RelayJoinContext,
+    use_proxy: bool,
 ) -> Result<RelayJoinApplied, String> {
     let previous = current_relay_pin();
-    let outcome =
-        join_and_pin_relay(address, token, &shared.network).map_err(|error| error.to_string())?;
+    let proxy = resolve_relay_leg_proxy(use_proxy)?;
+    let outcome = join_and_pin_relay(address, token, &shared.network, proxy)
+        .map_err(|error| error.to_string())?;
     match decide_relay_join_pin(previous.as_ref(), &outcome.relay_fingerprint, force) {
         RelayJoinPinDecision::PinMismatch { previous } => {
             previous
@@ -3047,14 +3076,22 @@ fn handle_relay_join_result(
                 *slot = None;
             }
             broadcast_snapshot(shared, client_writer, connected_clients);
+            // Issue #206: name the proxy in the success message so the
+            // operator can tell a proxied join from a direct one at a
+            // glance.
+            let via_suffix = if applied.pinned.use_proxy {
+                " (via proxy)"
+            } else {
+                ""
+            };
             if applied.link_restarted {
                 CommandOutcome::Message(format!(
-                    "relay joined: {address} (fingerprint {}); link starting",
+                    "relay joined: {address} (fingerprint {}){via_suffix}; link starting",
                     applied.pinned.relay_fingerprint
                 ))
             } else {
                 CommandOutcome::Message(format!(
-                    "relay already pinned: {address} (fingerprint {})",
+                    "relay already pinned: {address} (fingerprint {}){via_suffix}",
                     applied.pinned.relay_fingerprint
                 ))
             }
@@ -4428,6 +4465,10 @@ mod state_loop_tests {
             address: "127.0.0.1:1".to_string(),
             relay_fingerprint: "ab".repeat(32),
             heartbeat_interval_secs: None,
+            // Issue #206: a proxied pin is named in the success answer. The
+            // link still starts: proxy resolution falls back to a direct
+            // dial when no active proxy profile is configured.
+            use_proxy: true,
         };
         let _ = tx.send(StateEvent::RelayJoinResult {
             client_id: 1,
@@ -4456,6 +4497,10 @@ mod state_loop_tests {
         assert!(
             response.contains(&pinned.relay_fingerprint),
             "the answer names the pinned fingerprint: {response}"
+        );
+        assert!(
+            response.contains("(via proxy)"),
+            "a proxied join says so in the answer (issue #206): {response}"
         );
 
         assert!(
@@ -4500,6 +4545,7 @@ mod state_loop_tests {
             address: "127.0.0.1:1".to_string(),
             relay_fingerprint: "ab".repeat(32),
             heartbeat_interval_secs: None,
+            use_proxy: false,
         };
         let _ = tx.send(StateEvent::RelayJoinResult {
             client_id: 1,

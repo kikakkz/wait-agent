@@ -180,6 +180,7 @@ async fn start_web_stack(name: &str, admin_email: &str) -> WebStack {
         address: relay_address,
         relay_fingerprint: fingerprint.clone(),
         heartbeat_interval_secs: None,
+        use_proxy: false,
     }
     .save(&config.relay_toml_path)
     .expect("pre-existing relay.toml should save");
@@ -524,6 +525,7 @@ async fn remove_revokes_a_registered_node_after_prefix_confirmation() {
         address: relay_address,
         relay_fingerprint,
         heartbeat_interval_secs: None,
+        use_proxy: false,
     }
     .save(&config.relay_toml_path)
     .expect("relay.toml saves");
@@ -730,6 +732,7 @@ async fn web_node_enrolls_through_standard_flow_and_appears_in_relay_status() {
         address: relay_address.clone(),
         relay_fingerprint: fingerprint.clone(),
         heartbeat_interval_secs: None,
+        use_proxy: false,
     }
     .save(&config.relay_toml_path)
     .expect("pre-existing relay.toml should save");
@@ -799,6 +802,7 @@ async fn web_enroll_preserves_operator_heartbeat_override() {
         address: relay_address,
         relay_fingerprint: fingerprint,
         heartbeat_interval_secs: Some(42),
+        use_proxy: false,
     }
     .save(&config.relay_toml_path)
     .expect("pre-existing relay.toml should save");

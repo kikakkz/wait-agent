@@ -164,7 +164,7 @@ async fn invite_over_the_channel_mints_a_token_that_join_redeems() {
     let (credentials, toml_path) = join_paths(&dir);
     joining_node.write_pem_files(&credentials);
     let address = format!("127.0.0.1:{}", server.server.local_addr().port());
-    join_relay(&address, token, &credentials, &toml_path)
+    join_relay(&address, token, &credentials, &toml_path, None)
         .await
         .expect("the node-channel token must redeem via join");
     assert!(

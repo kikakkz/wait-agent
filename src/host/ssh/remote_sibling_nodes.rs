@@ -15,7 +15,7 @@ use crate::host::ssh::remote_shell::RemoteShellKind;
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
 };
-use crate::host::ssh::ssh_proxy::SshProxy;
+use crate::infra::proxy_stream::SshProxy;
 
 /// Remote command listing the marker path of every local ratatui node
 /// server, one path per line (`.../<port>.sock` on POSIX targets,

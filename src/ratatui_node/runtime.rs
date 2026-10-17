@@ -1500,10 +1500,22 @@ pub(crate) fn start_relay_link(shared: &Arc<SharedState>, relay: RelayTomlConfig
         return;
     }
     let (relay_event_tx, relay_event_rx) = tokio::sync::mpsc::channel::<RelayClientEvent>(16);
-    let handle = RelayClient::spawn(
-        RelayClientConfig::from_relay_toml(relay, credentials),
-        relay_event_tx,
-    );
+    let mut client_config = RelayClientConfig::from_relay_toml(relay.clone(), credentials);
+    // Issue #206: the pin's marker decides whether every link dial (this
+    // start and each reconnect) goes through the active proxy profile,
+    // resolved once here. A broken proxy profile logs and falls back to a
+    // direct dial for this link rather than leaving the node without a
+    // relay; the next re-pin re-resolves.
+    if relay.use_proxy {
+        match crate::host::ssh::remote_install_proxy_store::load_active_ssh_proxy() {
+            Ok(proxy) => client_config.proxy = proxy,
+            Err(error) => ERROR_LOG.log_error(format!(
+                "[ratatui-node] relay link for `{}` falls back to direct: {error}",
+                relay.address
+            )),
+        }
+    }
+    let handle = RelayClient::spawn(client_config, relay_event_tx);
     install_relay_client_handle(shared, Some(Arc::new(handle)));
     let state_tx = shared.state_sender();
     std::thread::spawn(move || forward_relay_link_events(relay_event_rx, state_tx));

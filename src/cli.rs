@@ -608,7 +608,7 @@ fn help_text() -> String {
         "  waitagent stop [<index>]",
         "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>] [--web] [--web-listen <addr>]",
         "  waitagent relay invite [--ttl <secs>] [--deploy] [--listen <addr>]",
-        "  waitagent relay join <address> <token>",
+        "  waitagent relay join <address> <token> [--via-proxy]",
         "  waitagent relay remove <fingerprint> [--listen <addr>]",
         "  waitagent relay status [--listen <addr>]",
         "  waitagent relay shutdown [--listen <addr>]",

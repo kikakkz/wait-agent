@@ -137,6 +137,7 @@ pub async fn enroll_and_link(config: &WebServeConfig) -> Result<WebRelayLink, We
     let pinned = RelayTomlConfig::load(&config.relay_toml_path)?
         .ok_or_else(|| WebServeError::RelayTomlMissing(config.relay_toml_path.clone()))?;
     let previous_heartbeat = pinned.heartbeat_interval_secs;
+    let previous_use_proxy = pinned.use_proxy;
 
     let token = admin_invite_token(&pinned.address).await?;
     join_relay(
@@ -144,20 +145,41 @@ pub async fn enroll_and_link(config: &WebServeConfig) -> Result<WebRelayLink, We
         &token,
         &config.credentials,
         &config.relay_toml_path,
+        None,
     )
     .await?;
 
     // `join_relay` rewrites the pin with its enrollment defaults; an
-    // operator's heartbeat override survives a service restart.
+    // operator's heartbeat override survives a service restart, and so does
+    // the issue #206 proxy marker (the web re-enroll dials directly, but
+    // the persistent link below must keep honoring the pin).
     let mut relay = RelayTomlConfig::load(&config.relay_toml_path)?
         .ok_or_else(|| WebServeError::RelayTomlMissing(config.relay_toml_path.clone()))?;
+    let mut restored = false;
     if previous_heartbeat.is_some() && relay.heartbeat_interval_secs.is_none() {
         relay.heartbeat_interval_secs = previous_heartbeat;
+        restored = true;
+    }
+    if relay.use_proxy != previous_use_proxy {
+        relay.use_proxy = previous_use_proxy;
+        restored = true;
+    }
+    if restored {
         relay.save(&config.relay_toml_path)?;
     }
 
-    let client_config =
+    let mut client_config =
         RelayClientConfig::from_relay_toml(relay.clone(), config.credentials.clone());
+    if relay.use_proxy {
+        // Issue #206: the link honors the pin's proxy marker; a broken
+        // proxy profile logs and falls back to a direct dial for this
+        // process lifetime rather than failing the web service.
+        match crate::host::ssh::remote_install_proxy_store::load_active_ssh_proxy() {
+            Ok(proxy) => client_config.proxy = proxy,
+            Err(error) => crate::infra::error_log::ERROR_LOG
+                .log_error(format!("[web] relay link falls back to direct: {error}")),
+        }
+    }
     let (event_tx, events) = mpsc::channel(EVENT_QUEUE);
     let client = RelayClient::spawn(client_config, event_tx);
     Ok(WebRelayLink {

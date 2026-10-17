@@ -161,7 +161,7 @@ pub struct RemoteHostBootstrapPlan {
     /// HTTP CONNECT). Resolved by the connect runtime from the active
     /// install-proxy profile when the profile opts in; `None` dials
     /// directly. Only consulted when the plan is built by the runtime.
-    pub ssh_proxy: Option<crate::host::ssh::ssh_proxy::SshProxy>,
+    pub ssh_proxy: Option<crate::infra::proxy_stream::SshProxy>,
     /// Detected shell family of the remote host. Every remote command
     /// generator (`install_or_update_command`, `start_plan`, version check,
     /// daemon check, ...) emits a POSIX or PowerShell script based on this
@@ -302,12 +302,17 @@ pub struct RemoteHostBootstrapResult {
 
 /// Issue #180: a pending local `relay join` produced by a relay-role
 /// bootstrap. Carried through the connect outcome to the state event loop.
+/// Issue #206: `use_proxy` marks the local join (and the link it starts) to
+/// dial through the active proxy profile; the connect runtime sets it from
+/// the host request's `use_ssh_proxy` toggle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRelayJoinRequest {
     /// Relay dial address for the local node (`<profile.host>:7475`).
     pub address: String,
     /// Fresh `--deploy` invite token.
     pub token: String,
+    /// Dial the local enrollment through the active proxy profile.
+    pub use_proxy: bool,
 }
 
 /// Relay listen address deployed on relay-role hosts (issue #180).
@@ -695,6 +700,10 @@ where
         Ok(RemoteRelayJoinRequest {
             address: format!("{}:{RELAY_ROLE_PORT}", plan.host),
             token,
+            // The remote self-enroll runs over the SSH exec channel; whether
+            // the LOCAL join dials through the proxy is assigned by the
+            // connect runtime from the host request (issue #206).
+            use_proxy: false,
         })
     }
 

@@ -222,19 +222,23 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                     .and_then(|encoded| general_purpose::STANDARD.decode(encoded).ok())
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .filter(|token| !token.trim().is_empty());
-                let force = match parts.next() {
-                    None => false,
-                    Some("FORCE") => true,
-                    Some(_) => return None,
-                };
-                if parts.next().is_some() {
-                    return None;
+                // Trailing flags, each at most once (issue #206 adds
+                // VIA_PROXY next to FORCE).
+                let mut force = false;
+                let mut use_proxy = false;
+                for flag in parts.by_ref() {
+                    match flag {
+                        "FORCE" if !force => force = true,
+                        "VIA_PROXY" if !use_proxy => use_proxy = true,
+                        _ => return None,
+                    }
                 }
                 match (address, token) {
                     (Some(address), Some(token)) => Some(ClientCommand::RelayJoin {
                         address,
                         token,
                         force,
+                        use_proxy,
                     }),
                     _ => None,
                 }
@@ -365,6 +369,7 @@ mod tests {
                     ref address,
                     ref token,
                     force: false,
+                    use_proxy: false,
                 }) if address == "relay.example:7475" && token == "invite token/with+chars="
             ),
             "unexpected command: {command:?}"
@@ -375,6 +380,32 @@ mod tests {
             parse_command(&forced),
             Some(ClientCommand::RelayJoin { force: true, .. })
         ));
+
+        // Issue #206: VIA_PROXY rides as a second optional flag, alone or
+        // combined with FORCE, never duplicated or misspelled.
+        let proxied = format!("RELAY_JOIN {address} {token} VIA_PROXY");
+        assert!(matches!(
+            parse_command(&proxied),
+            Some(ClientCommand::RelayJoin {
+                use_proxy: true,
+                force: false,
+                ..
+            })
+        ));
+        let forced_proxied = format!("RELAY_JOIN {address} {token} FORCE VIA_PROXY");
+        assert!(matches!(
+            parse_command(&forced_proxied),
+            Some(ClientCommand::RelayJoin {
+                force: true,
+                use_proxy: true,
+                ..
+            })
+        ));
+        assert!(parse_command(&format!("RELAY_JOIN {address} {token} VIA_PROXY FORCE")).is_some());
+        assert!(
+            parse_command(&format!("RELAY_JOIN {address} {token} VIA_PROXY VIA_PROXY")).is_none()
+        );
+        assert!(parse_command(&format!("RELAY_JOIN {address} {token} FORCE FORCE")).is_none());
 
         // Missing, empty, or trailing-garbage arguments reject the command.
         assert!(parse_command("RELAY_JOIN").is_none());

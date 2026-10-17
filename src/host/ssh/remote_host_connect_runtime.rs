@@ -16,7 +16,6 @@ use crate::host::ssh::remote_port_probe::{
 use crate::host::ssh::remote_shell::{
     RemoteShellDetector, RemoteShellKind, SshRemoteShellDetector,
 };
-use crate::host::ssh::ssh_proxy::SshProxy;
 use crate::host::ssh::ssh_remote_host_bootstrapper::{
     install_reachability_preflight_command, windows_install_or_update_command,
     windows_install_reachability_preflight_command, RemoteHostBootstrapPlan,
@@ -24,6 +23,7 @@ use crate::host::ssh::ssh_remote_host_bootstrapper::{
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::operator_auth::{self, OperatorKeyStore};
+use crate::infra::proxy_stream::SshProxy;
 use crate::infra::remote_grpc_transport::{
     auto_direct_probe_timeout, resolve_via_for_dial, OutboundNodeSessionRequest, RemoteNodeVia,
 };
@@ -552,10 +552,17 @@ where
             };
         }
         plan.operator_public_key = operator_public_key_for_profile(&self.operator_key_store)?;
-        let bootstrap_result = self
+        let mut bootstrap_result = self
             .bootstrapper
             .ensure_waitagent_and_start(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        // Issue #206: the relay-role bootstrap's pending LOCAL join (and the
+        // link it starts) honors this connect's proxy toggle. The
+        // bootstrapper produced the request over SSH; the proxy decision is
+        // the host request's, so it is assigned here.
+        if let Some(join) = bootstrap_result.relay_join.as_mut() {
+            join.use_proxy = request.use_ssh_proxy;
+        }
 
         if let Some(endpoint) = existing_endpoint {
             if should_save_profile {
@@ -2442,6 +2449,7 @@ mod tests {
                 crate::host::ssh::ssh_remote_host_bootstrapper::RemoteRelayJoinRequest {
                     address: "10.1.29.130:7475".to_string(),
                     token: "deploy-token".to_string(),
+                    use_proxy: false,
                 },
             ),
         };
@@ -2488,6 +2496,70 @@ mod tests {
             .expect("the relay join request must survive to the outcome");
         assert_eq!(request.address, "10.1.29.130:7475");
         assert_eq!(request.token, "deploy-token");
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_stamps_the_proxy_toggle_onto_the_relay_join() {
+        // Issue #206: the relay-role join the state loop will drive (and the
+        // link it starts) honors this connect's proxy toggle.
+        let path = unique_path("remote-host-connect-relay-join-proxy.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        history.upsert_profile(profile()).unwrap();
+        let bootstrapper = RelayRoleBootstrapper {
+            request: Some(
+                crate::host::ssh::ssh_remote_host_bootstrapper::RemoteRelayJoinRequest {
+                    address: "10.1.29.130:7475".to_string(),
+                    token: "deploy-token".to_string(),
+                    use_proxy: false,
+                },
+            ),
+        };
+        let catalog_targets = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            bootstrapper,
+            registry,
+            unused_session_creation(),
+            test_operator_key_store(),
+        )
+        .with_proxy_store(test_proxy_store());
+        let dial_targets = catalog_targets.clone();
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                    use_ssh_proxy: true,
+                },
+                move |_request| {
+                    dial_targets
+                        .lock()
+                        .unwrap()
+                        .push(remote_target("10.1.29.130#7476", "seed"));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let request = outcome
+            .relay_join
+            .expect("the relay join request must survive to the outcome");
+        assert!(
+            request.use_proxy,
+            "the host request's proxy toggle must stamp the pending local join"
+        );
         crate::infra::best_effort::remove_file(path);
     }
 

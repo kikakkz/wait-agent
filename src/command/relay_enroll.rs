@@ -87,11 +87,29 @@ pub fn run_remove(command: RelayRemoveCommand) -> Result<(), AppError> {
 }
 
 pub fn run_join(command: RelayJoinCommand, network: &RemoteNetworkConfig) -> Result<(), AppError> {
-    let outcome = join_and_pin_relay(&command.address, &command.token, network)?;
+    let proxy = resolve_join_proxy(command.via_proxy)?;
+    let outcome = join_and_pin_relay(&command.address, &command.token, network, proxy)?;
     println!("relay fingerprint: {}", outcome.relay_fingerprint);
     println!("pinned to: {}", outcome.toml_path.display());
     println!("join complete: this node is enrolled and whitelisted by the relay");
     Ok(())
+}
+
+/// Issue #206: resolves the active remote-install proxy profile when the
+/// operator asked for a proxied join. A resolution failure refuses the join
+/// with the same actionable message the SSH connect uses (issue #201), so a
+/// hand-edited proxy profile surfaces instead of being silently ignored.
+fn resolve_join_proxy(
+    via_proxy: bool,
+) -> Result<Option<crate::infra::proxy_stream::SshProxy>, AppError> {
+    if !via_proxy {
+        return Ok(None);
+    }
+    crate::host::ssh::remote_install_proxy_store::load_active_ssh_proxy().map_err(|error| {
+        protocol_error(format!(
+            "via proxy requested but the active proxy profile cannot be used: {error}"
+        ))
+    })
 }
 
 /// Runs the token-authenticated enrollment session and pins the relay
@@ -101,11 +119,14 @@ pub fn run_join(command: RelayJoinCommand, network: &RemoteNetworkConfig) -> Res
 /// identity fingerprint are both derived from the resolved credential
 /// paths (issue #141): an explicit `--node-key-path`/`--node-cert-path`
 /// pair wins over the defaults, exactly like `relay serve` and
-/// `__generate-node-credentials`.
+/// `__generate-node-credentials`. `proxy` (issue #206) routes the
+/// enrollment dial through the active proxy profile and is recorded in
+/// the written pin for the persistent link.
 pub fn join_and_pin_relay(
     address: &str,
     token: &str,
     network: &RemoteNetworkConfig,
+    proxy: Option<crate::infra::proxy_stream::SshProxy>,
 ) -> Result<crate::infra::relay_join::JoinOutcome, AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -126,6 +147,7 @@ pub fn join_and_pin_relay(
             token,
             &credentials,
             &RelayTomlConfig::default_path(),
+            proxy,
         )
         .await
         .map_err(|error| protocol_error(format!("relay join failed: {error}")))
@@ -193,6 +215,7 @@ mod tests {
             address: "relay.example:7475".to_string(),
             relay_fingerprint: fingerprint.to_string(),
             heartbeat_interval_secs: None,
+            use_proxy: false,
         }
     }
 
@@ -268,7 +291,7 @@ mod tests {
             ),
             ..RemoteNetworkConfig::default()
         };
-        let error = join_and_pin_relay("127.0.0.1:1", "token", &network)
+        let error = join_and_pin_relay("127.0.0.1:1", "token", &network, None)
             .expect_err("dialing a closed port must fail");
         assert!(
             error.to_string().contains("relay join failed"),

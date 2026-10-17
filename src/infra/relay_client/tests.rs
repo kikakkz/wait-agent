@@ -15,6 +15,7 @@ fn from_relay_toml_defaults_heartbeat_and_retry() {
             address: "relay.example:7475".to_string(),
             relay_fingerprint: "ab".to_string(),
             heartbeat_interval_secs: None,
+            use_proxy: false,
         },
         NodeCredentialPaths {
             key_path: std::path::PathBuf::from("node.key"),
@@ -32,6 +33,7 @@ fn from_relay_toml_applies_the_configured_heartbeat() {
             address: "relay.example:7475".to_string(),
             relay_fingerprint: "ab".to_string(),
             heartbeat_interval_secs: Some(30),
+            use_proxy: false,
         },
         NodeCredentialPaths {
             key_path: std::path::PathBuf::from("node.key"),

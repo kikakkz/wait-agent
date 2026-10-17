@@ -21,7 +21,8 @@ use thiserror::Error;
 use tokio_rustls::TlsConnector;
 
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
-use crate::infra::peer_connection::dial_tcp_peer_connection;
+use crate::infra::peer_connection::dial_peer_connection;
+use crate::infra::proxy_stream::SshProxy;
 use crate::infra::relay_mux::frame::{read_frame, write_frame, Frame};
 use crate::infra::relay_routing::error_code::RelayErrorCode;
 use crate::infra::relay_server::{DEFAULT_RELAY_LISTEN_PORT, RELAY_ENROLL_PORT_OFFSET};
@@ -33,6 +34,15 @@ const JOIN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Upper bound on the enrollment response after the `Enroll` frame went out.
 const ENROLL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Issue #206: how many times a transiently-failing join is attempted
+/// before the error surfaces. The first failure is attempt 1 of 3, so the
+/// backoffs below sit between attempts.
+const JOIN_MAX_ATTEMPTS: usize = 3;
+
+/// Backoff after the first and second failed join attempts (1s, 2s).
+const JOIN_RETRY_BACKOFF: [Duration; JOIN_MAX_ATTEMPTS - 1] =
+    [Duration::from_secs(1), Duration::from_secs(2)];
 
 /// What `relay join` established: the pinned relay identity and where it
 /// was written.
@@ -69,14 +79,52 @@ pub enum RelayJoinError {
     Toml(#[from] RelayTomlStoreError),
 }
 
+impl RelayJoinError {
+    /// Issue #206: whether the join is worth another attempt. Dial/TLS/
+    /// enrollment IO and timeout failures are transient (a proxy flap, a
+    /// relay restart); token, address, protocol, credential, and store
+    /// errors fail fast — retrying cannot change their outcome.
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::Timeout(_) | Self::Tls(_))
+    }
+}
+
 /// Enrolls this node at `address` (default port
 /// [`DEFAULT_RELAY_LISTEN_PORT`], enrollment at `+ 1`) using `token`, then
-/// writes the pinned relay identity to `toml_path`.
+/// writes the pinned relay identity to `toml_path`. When `proxy` is given,
+/// the enrollment dial goes through it (issue #206) and the written pin
+/// records `use_proxy: true` so the persistent link reuses the proxy on
+/// every reconnect.
+///
+/// A single transient dial/TLS/enrollment failure is retried (up to
+/// [`JOIN_MAX_ATTEMPTS`] attempts, [`JOIN_RETRY_BACKOFF`] between them);
+/// refusal-class errors surface immediately.
 pub async fn join_relay(
     address: &str,
     token: &str,
     credentials: &NodeCredentialPaths,
     toml_path: &Path,
+    proxy: Option<SshProxy>,
+) -> Result<JoinOutcome, RelayJoinError> {
+    for attempt in 1..=JOIN_MAX_ATTEMPTS {
+        match join_relay_once(address, token, credentials, toml_path, proxy.clone()).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if attempt < JOIN_MAX_ATTEMPTS && error.is_retryable() => {
+                tokio::time::sleep(JOIN_RETRY_BACKOFF[attempt - 1]).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the loop always returns on the final attempt");
+}
+
+/// One enrollment attempt; the retry policy lives in [`join_relay`].
+async fn join_relay_once(
+    address: &str,
+    token: &str,
+    credentials: &NodeCredentialPaths,
+    toml_path: &Path,
+    proxy: Option<SshProxy>,
 ) -> Result<JoinOutcome, RelayJoinError> {
     let (host, port) = parse_relay_address(address)?;
     let enroll_port = port + RELAY_ENROLL_PORT_OFFSET;
@@ -109,7 +157,7 @@ pub async fn join_relay(
     let server_name = rustls::pki_types::ServerName::try_from("waitagent")
         .map_err(|error| RelayJoinError::Tls(error.to_string()))?;
 
-    let tcp = dial_tcp_peer_connection(&host, enroll_port).await?;
+    let tcp = dial_peer_connection(proxy.as_ref(), &host, enroll_port).await?;
     let mut tls =
         match tokio::time::timeout(JOIN_HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp))
             .await
@@ -141,6 +189,10 @@ pub async fn join_relay(
                 // `relay join` writes only the enrollment result; the
                 // heartbeat cadence stays at the default until an operator
                 // adds it to relay.toml by hand.
+                // Issue #206: remember that this enrollment dialed through
+                // the active proxy profile, so the persistent link reuses
+                // the proxy on every reconnect instead of re-resolving it.
+                use_proxy: proxy.is_some(),
                 ..RelayTomlConfig::default()
             };
             config.save(toml_path)?;
@@ -282,5 +334,63 @@ mod tests {
             parse_relay_address("host:notaport"),
             Err(RelayJoinError::Address(..))
         ));
+    }
+
+    #[test]
+    fn retryable_classifier_only_covers_transient_failures() {
+        let io_error = RelayJoinError::Io(io::Error::from(io::ErrorKind::ConnectionRefused));
+        assert!(io_error.is_retryable());
+        assert!(RelayJoinError::Timeout("enrollment response").is_retryable());
+        assert!(RelayJoinError::Tls("handshake reset".to_string()).is_retryable());
+
+        let credentials_error = RelayJoinError::Credentials(
+            node_credentials::NodeCredentialsError::MissingEndEntityCertificate,
+        );
+        assert!(!credentials_error.is_retryable());
+        assert!(!RelayJoinError::Address("x".to_string(), "bad".to_string()).is_retryable());
+        assert!(!RelayJoinError::TokenInvalid.is_retryable());
+        assert!(!RelayJoinError::TokenExpired.is_retryable());
+        assert!(!RelayJoinError::Protocol("code".to_string()).is_retryable());
+
+        let path =
+            std::env::temp_dir().join(format!("waitagent-join-toml-err-{}", std::process::id()));
+        std::fs::write(&path, "surprise = 1\n").expect("write should succeed");
+        let store_error = RelayTomlConfig::load(&path).expect_err("unknown key should fail");
+        std::fs::remove_file(&path).ok();
+        assert!(!RelayJoinError::Toml(store_error).is_retryable());
+    }
+
+    #[tokio::test]
+    async fn join_retries_a_refused_dial_then_surfaces_the_io_error() {
+        // A closed loopback port fails the dial with a retryable
+        // ConnectionRefused; the loop must burn both backoffs (1s + 2s)
+        // across three attempts before surfacing the error.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir =
+            std::env::temp_dir().join(format!("waitagent-join-retry-creds-{}", std::process::id()));
+        let credentials = NodeCredentialPaths {
+            key_path: dir.join("node.key"),
+            cert_path: dir.join("node.crt"),
+        };
+        let started = std::time::Instant::now();
+        let error = join_relay(
+            "127.0.0.1:1",
+            "token",
+            &credentials,
+            &dir.join("relay.toml"),
+            None,
+        )
+        .await
+        .expect_err("dialing a closed port must fail");
+        assert!(
+            matches!(error, RelayJoinError::Io(_)),
+            "the surfaced error is the dial failure: {error:?}"
+        );
+        assert!(
+            started.elapsed() >= JOIN_RETRY_BACKOFF[0] + JOIN_RETRY_BACKOFF[1],
+            "both retry backoffs must elapse, got {:?}",
+            started.elapsed()
+        );
+        crate::infra::best_effort::remove_dir_all(&dir);
     }
 }

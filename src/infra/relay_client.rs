@@ -28,7 +28,8 @@ use tokio_rustls::TlsConnector;
 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
-use crate::infra::peer_connection::{dial_tcp_peer_connection, PeerConnection};
+use crate::infra::peer_connection::{dial_peer_connection, PeerConnection};
+use crate::infra::proxy_stream::SshProxy;
 use crate::infra::relay_mux::connection::{MuxConnection, MuxOpener};
 use crate::infra::relay_mux::frame::Frame;
 use crate::infra::relay_mux::stream::MuxStream;
@@ -96,6 +97,12 @@ pub struct RelayClientConfig {
     pub heartbeat_interval: Duration,
     /// Backoff between reconnect attempts.
     pub retry: RelayRetryPolicy,
+    /// Issue #206: dial every link connection (initial and reconnects)
+    /// through this proxy instead of connecting directly. Resolved once by
+    /// the caller from the pin's `use_proxy` marker and the active
+    /// remote-install proxy profile; the worker thread reuses the value as
+    /// given, so a link restarted from a re-pin re-resolves it.
+    pub proxy: Option<SshProxy>,
 }
 
 impl RelayClientConfig {
@@ -104,7 +111,9 @@ impl RelayClientConfig {
     /// [`RelayRetryPolicy::default`].
     /// Builds a config from a parsed `relay.toml`, applying the file's
     /// `heartbeat_interval_secs` when present and
-    /// [`DEFAULT_RELAY_HEARTBEAT_INTERVAL`] when absent.
+    /// [`DEFAULT_RELAY_HEARTBEAT_INTERVAL`] when absent. The proxy defaults
+    /// to `None`; callers honoring the pin's `use_proxy` marker set it
+    /// explicitly (issue #206).
     pub fn from_relay_toml(relay: RelayTomlConfig, credentials: NodeCredentialPaths) -> Self {
         let heartbeat_interval = relay
             .heartbeat_interval_secs
@@ -115,6 +124,7 @@ impl RelayClientConfig {
             credentials,
             heartbeat_interval,
             retry: RelayRetryPolicy::default(),
+            proxy: None,
         }
     }
 }
@@ -562,7 +572,7 @@ async fn run_once(
     };
     let tcp = tokio::select! {
         _ = stop_rx.changed() => return RunOutcome::Cancelled,
-        dialed = dial_tcp_peer_connection(&host, port) => match dialed {
+        dialed = dial_peer_connection(config.proxy.as_ref(), &host, port) => match dialed {
             Ok(tcp) => tcp,
             Err(error) => {
                 return RunOutcome::Disconnected {

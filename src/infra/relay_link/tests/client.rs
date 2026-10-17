@@ -29,10 +29,12 @@ pub(super) fn relay_client_config(
             address: addr.to_string(),
             relay_fingerprint,
             heartbeat_interval_secs: None,
+            use_proxy: false,
         },
         credentials,
         heartbeat_interval,
         retry: fast_retry(),
+        proxy: None,
     }
 }
 

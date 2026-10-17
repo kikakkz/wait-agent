@@ -207,7 +207,13 @@ pub(crate) enum StateEvent {
     /// node has no pin and no link yet). The state loop drives the same
     /// off-loop join engine; the post-success join remains as an
     /// idempotent quiet re-pin.
-    RemoteHostRelayJoinRequested { address: String, token: String },
+    RemoteHostRelayJoinRequested {
+        address: String,
+        token: String,
+        /// Issue #206: dial the join through the active proxy profile
+        /// (the host connect's `use_ssh_proxy` toggle at send time).
+        use_proxy: bool,
+    },
     /// The asynchronous remote session creation operation finished. The state
     /// loop applies catalog/active-target mutations and reports success or error
     /// to the originating client.
@@ -310,11 +316,13 @@ pub(crate) enum ClientCommand {
     /// with the invite/deploy `token`, pin the learned fingerprint into
     /// `relay.toml`, and (re)start the persistent relay link. `force`
     /// confirms a pin mismatch after the TUI's explicit operator warning
-    /// (issue #156 slice 1).
+    /// (issue #156 slice 1). `use_proxy` routes the enrollment dial through
+    /// the active proxy profile and is recorded in the pin (issue #206).
     RelayJoin {
         address: String,
         token: String,
         force: bool,
+        use_proxy: bool,
     },
     /// Remove the pinned relay: delete `relay.toml`, stop the persistent
     /// relay link, and reset relay state (issue #156 slice 1).
