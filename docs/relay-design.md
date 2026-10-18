@@ -166,6 +166,12 @@ TLS 握手前分流（`LazyConfigAcceptor` peek ClientHello → 选 ServerConfig
   dogfood；故障域与部署拓扑保持解耦，压测有实测依据后再评估内存捷径）。
 - **CLI 收敛为 bootstrap 最小集**：`relay serve`、`relay join`，以及
   供批量装机的一行安装命令（WebUI 生成 token → node 上 paste 执行）。
+- relay-role bootstrap（Install as relay）的幂等探针在 admin socket 之外
+  加**版本闸**（issue #215）：探针通过后以 `relay status` 读运行中 relay
+  的版本，缺失（旧 relay 的 status 无 version 字段）或与当前二进制不符时
+  先 `relay shutdown` 等 socket 消失、再用当前二进制 `relay serve` 重启；
+  版本相符才原样保留。旧进程没有单端口 ALPN 分流，link handler 会把
+  Enroll 帧掐断（"truncated frame header or payload"），不能误留。
 - 本机 admin socket（照 `remote_node_ingress_owner_socket_path` 的
   owner-control socket 模式；Windows 用等价命名管道 / `.port` marker）
   保留为 bootstrap 与应急通道，日常管理不经过它。CLI 连不上运行中的

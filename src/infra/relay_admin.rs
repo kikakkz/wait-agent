@@ -109,6 +109,10 @@ pub(crate) struct RelayAdminStatus {
     pub(crate) nodes: Vec<AdminNodeEntry>,
     pub(crate) capacity: RelayCapacityConfig,
     pub(crate) usage: RelayUsage,
+    /// Issue #215: the running relay's version (`env!("CARGO_PKG_VERSION")`),
+    /// read by the relay-role bootstrap's version gate. Old relays answer
+    /// without this field, which the gate treats as stale.
+    pub(crate) version: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -124,6 +128,10 @@ pub(crate) struct RelayAdminResponse {
     pub(crate) capacity: Option<RelayCapacityConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) usage: Option<RelayUsage>,
+    /// Issue #215: only status answers carry the version (see
+    /// [`RelayAdminStatus::version`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +147,7 @@ impl RelayAdminResponse {
             nodes: Some(snapshot.nodes),
             capacity: Some(snapshot.capacity),
             usage: Some(snapshot.usage),
+            version: Some(snapshot.version),
             message: None,
             error: None,
         }
@@ -152,6 +161,7 @@ impl RelayAdminResponse {
             nodes: None,
             capacity: None,
             usage: None,
+            version: None,
             message: Some("shutting down".to_string()),
             error: None,
         }
@@ -167,6 +177,7 @@ impl RelayAdminResponse {
             nodes: None,
             capacity: None,
             usage: None,
+            version: None,
             message: Some(message.into()),
             error: None,
         }
@@ -180,6 +191,7 @@ impl RelayAdminResponse {
             nodes: None,
             capacity: None,
             usage: None,
+            version: None,
             message: None,
             error: Some(message.into()),
         }
@@ -360,6 +372,7 @@ pub(crate) async fn run_admin_listener(
                                     active_streams: routing.stream_count(),
                                     forwarded_bytes_per_sec: meter.bytes_this_window(),
                                 },
+                                version: env!("CARGO_PKG_VERSION").to_string(),
                             };
                             handle_relay_admin_command(RelayAdminCommand::Status, snapshot)
                         }
@@ -376,6 +389,7 @@ pub(crate) async fn run_admin_listener(
                                         active_streams: 0,
                                         forwarded_bytes_per_sec: 0,
                                     },
+                                    version: env!("CARGO_PKG_VERSION").to_string(),
                                 },
                             );
                             // Answer first, then stop the relay.
@@ -445,6 +459,7 @@ mod tests {
                 active_streams: 2,
                 forwarded_bytes_per_sec: 512,
             },
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
@@ -666,6 +681,28 @@ mod tests {
         let response = handle_relay_admin_command(RelayAdminCommand::Status, snapshot.clone());
         assert_eq!(response.capacity, Some(snapshot.capacity));
         assert_eq!(response.usage, Some(snapshot.usage));
+    }
+
+    #[test]
+    fn status_response_carries_the_relay_version() {
+        // Issue #215: the bootstrap's version gate reads this field; old
+        // relays answer without it, which the gate treats as stale.
+        let response = handle_relay_admin_command(RelayAdminCommand::Status, snapshot());
+        assert_eq!(response.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        let json = serde_json::to_value(&response).expect("status serializes");
+        assert_eq!(
+            json["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "the wire JSON carries the version for the remote gate"
+        );
+        // Non-status answers stay version-free.
+        let shutdown = handle_relay_admin_command(RelayAdminCommand::Shutdown, snapshot());
+        assert!(shutdown.version.is_none());
+        let json = serde_json::to_value(&shutdown).expect("shutdown serializes");
+        assert!(
+            json.get("version").is_none(),
+            "non-status answers stay version-free"
+        );
     }
 
     #[test]
