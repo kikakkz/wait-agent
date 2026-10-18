@@ -372,6 +372,33 @@ fn wait_for_relay_admin_socket_shell() -> String {
     )
 }
 
+/// Shell snippet that waits up to ~10 seconds for the relay admin socket to
+/// DISAPPEAR after `relay shutdown` (issue #215 version gate), so the
+/// re-serve cannot race the dying old process.
+fn wait_for_relay_admin_socket_gone_shell() -> String {
+    format!(
+        "i=0; while [ $i -lt 50 ]; do if ! {}; then exit 0; fi; sleep 0.2; i=$((i+1)); done; exit 1",
+        relay_admin_socket_probe_command()
+    )
+}
+
+/// Parses the `version` field out of a `waitagent relay status` JSON body.
+/// Old relays answer without one — `None`, which the version gate treats as
+/// stale (issue #215). Pure; unit-tested.
+fn parse_relay_status_version(stdout: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()?
+        .get("version")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Issue #215: the version-gate decision — only the exact current binary
+/// version counts; anything else (older, newer, empty) or unknown is stale.
+fn remote_relay_version_is_current(version: Option<&str>) -> bool {
+    version == Some(env!("CARGO_PKG_VERSION"))
+}
+
 /// Parses the `token: <tok>` line printed by `waitagent relay invite`.
 fn parse_relay_invite_token(stdout: &[u8]) -> Option<String> {
     String::from_utf8_lossy(stdout)
@@ -644,10 +671,13 @@ where
     E::Error: ToString,
 {
     /// Issue #180: deploy the remote host as the active relay. Idempotent:
-    /// a running relay (admin socket present) is left alone; the invite is
-    /// always fresh (one-shot tokens), and the remote's own node re-enrolls
-    /// every connect (the relay treats re-registration of a known identity
-    /// as an upsert). Runs before the remote node server starts so the node
+    /// a running relay whose version matches the freshly installed binary
+    /// (admin socket present AND `relay status` reports the same version)
+    /// is left alone — an old or version-unknown process is shut down and
+    /// re-served first (issue #215 version gate). The invite is always
+    /// fresh (one-shot tokens), and the remote's own node re-enrolls every
+    /// connect (the relay treats re-registration of a known identity as an
+    /// upsert). Runs before the remote node server starts so the node
     /// links to the relay at startup. Windows remotes are not supported in
     /// this phase.
     fn ensure_remote_relay_and_build_join_request(
@@ -672,6 +702,15 @@ where
                     "remote relay serve did not open its admin socket within 10s (see /tmp/waitagent-relay-7475.log on the remote host)",
                 ));
             }
+        } else {
+            // Issue #215: the socket probe alone cannot tell a stale-version
+            // relay from a current one. An old process (e.g. restarted host,
+            // manual start) predates the single-port ALPN demux and its link
+            // handler cuts the Enroll frame, so the join fails with
+            // "truncated frame header or payload". Gate on the running
+            // relay's version and restart it with the current binary when
+            // the version is missing or different.
+            self.ensure_remote_relay_is_current_version(plan, listen)?;
         }
         let invite = format!("waitagent relay invite --listen {listen} --deploy");
         let output = self.run_ssh_output(plan, &invite, false)?;
@@ -705,6 +744,66 @@ where
             // connect runtime from the host request (issue #206).
             use_proxy: false,
         })
+    }
+
+    /// Issue #215: the version gate behind the relay-role bootstrap's
+    /// idempotence probe. Reads the running relay's version via
+    /// `waitagent relay status`; a version matching the freshly installed
+    /// binary means true idempotence (return untouched), while a missing
+    /// (old relay) or different version is shut down (`relay shutdown`,
+    /// understood by old relays too), awaited gone, and re-served with the
+    /// current binary. Every failure path names the remote log or the
+    /// manual `pkill -f "relay serve"` workaround.
+    fn ensure_remote_relay_is_current_version(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        listen: &str,
+    ) -> Result<(), RemoteHostBootstrapError> {
+        let status = format!("waitagent relay status --listen {listen}");
+        let output = self.run_ssh_output(plan, &status, false)?;
+        if output.status != 0 {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "could not read the running remote relay's version (`{status}` failed with status {}){}; check the relay on the remote host (see /tmp/waitagent-relay-7475.log)",
+                output.status,
+                stderr_summary(&output.stderr)
+            )));
+        }
+        if remote_relay_version_is_current(parse_relay_status_version(&output.stdout).as_deref()) {
+            return Ok(());
+        }
+        let shutdown = format!("waitagent relay shutdown --listen {listen}");
+        let output = self.run_ssh_output(plan, &shutdown, false)?;
+        if output.status != 0 {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "the running remote relay reports a different version but `{shutdown}` failed with status {}{}; stop the old process on the remote host (`pkill -f \"relay serve\"`) and reconnect",
+                output.status,
+                stderr_summary(&output.stderr)
+            )));
+        }
+        if self
+            .run_ssh_output(plan, &wait_for_relay_admin_socket_gone_shell(), false)?
+            .status
+            != 0
+        {
+            return Err(RemoteHostBootstrapError::new(
+                "the stale remote relay did not stop within 10s of `relay shutdown`; stop the old process on the remote host (`pkill -f \"relay serve\"`) and reconnect",
+            ));
+        }
+        let start = format!(
+            "nohup waitagent relay serve --listen {listen} >/tmp/waitagent-relay-7475.log 2>&1 < /dev/null & {}",
+            wait_for_relay_admin_socket_shell()
+        );
+        self.run_ssh_command(plan, &start, false)?;
+        if self
+            .run_ssh_output(plan, &relay_admin_socket_probe_command(), false)?
+            .status
+            != 0
+        {
+            return Err(RemoteHostBootstrapError::new(
+                "the restarted remote relay did not open its admin socket within 10s (see /tmp/waitagent-relay-7475.log on the remote host)",
+            ));
+        }
+        Ok(())
     }
 
     fn remote_waitagent_is_current(
@@ -3299,6 +3398,105 @@ mod tests {
     }
 
     #[test]
+    fn relay_status_version_parsing_treats_old_output_as_unknown() {
+        // Issue #215: only the exact current version counts; a missing
+        // field (old relay) or unparseable answer means stale.
+        let current = format!(
+            "{{\"ok\":true,\"registered_nodes\":0,\"version\":\"{}\"}}",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            parse_relay_status_version(current.as_bytes()).as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            parse_relay_status_version(br#"{"ok":true,"registered_nodes":0}"#.as_slice()),
+            None,
+            "an old relay's status has no version field"
+        );
+        assert_eq!(parse_relay_status_version(b"not json"), None);
+        assert_eq!(
+            parse_relay_status_version(br#"{"ok":true,"version":42}"#),
+            None
+        );
+        for (version, expected) in [
+            (Some(env!("CARGO_PKG_VERSION")), true),
+            (Some("0.1.96"), false),
+            (Some(""), false),
+            (Some("999.0.0"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                remote_relay_version_is_current(version),
+                expected,
+                "version {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_role_restarts_a_stale_version_relay() {
+        let cache = prime_artifact_cache();
+        let mut plan = upload_plan();
+        plan.relay_role = true;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        // Fast path (remote binary already current): mkdir, uname probe,
+        // version check, socket probe (already serving), then the issue
+        // #215 gate — relay status (stale 0.1.96), relay shutdown,
+        // socket-gone wait, re-serve (with its socket wait), socket probe —
+        // then invite, remote self-join, credentials, daemon check. Every
+        // step succeeds.
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            MemoryRemoteHostSecretStore::default(),
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0; 13])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
+                stdout_by_substring: Rc::new(RefCell::new(vec![
+                    ("uname -s".to_string(), "Linux\nx86_64\n0\n".to_string()),
+                    (
+                        "relay status".to_string(),
+                        "{\"ok\":true,\"registered_nodes\":0,\"version\":\"0.1.96\"}".to_string(),
+                    ),
+                    (
+                        "relay invite".to_string(),
+                        "token: stale-restart-token\n".to_string(),
+                    ),
+                ])),
+            },
+        )
+        .with_artifact_cache(cache);
+
+        let result = bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+
+        assert_eq!(
+            result.relay_join.expect("join request").token,
+            "stale-restart-token"
+        );
+        let calls = calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|(_, command, _)| command.contains("relay shutdown --listen")),
+            "a stale relay must be shut down: {calls:?}"
+        );
+        let serve_starts = calls
+            .iter()
+            .filter(|(_, command, _)| command.contains("relay serve --listen 0.0.0.0:7475"))
+            .count();
+        assert_eq!(serve_starts, 1, "exactly one re-serve: {calls:?}");
+        assert!(
+            calls.iter().any(|(_, command, _)| {
+                command.contains("! test -S")
+                    && command.contains("waitagent-relay-admin-0_0_0_0_7475.sock")
+            }),
+            "the socket must be awaited gone before the re-serve: {calls:?}"
+        );
+    }
+
+    #[test]
     fn relay_role_deploys_serve_invite_and_remote_enroll() {
         let cache = prime_artifact_cache();
         let mut plan = upload_plan();
@@ -3368,17 +3566,28 @@ mod tests {
         let mut plan = upload_plan();
         plan.relay_role = true;
         let calls = Rc::new(RefCell::new(Vec::new()));
-        // The socket probe answers 0 (already serving): no serve start.
+        // Fast path with a running current-version relay: mkdir, uname
+        // probe, version check, socket probe (already serving), version
+        // gate (`relay status` answers with the CURRENT version — no
+        // shutdown, no serve), invite, remote self-join, credentials,
+        // daemon check.
         let bootstrapper = SshRemoteHostBootstrapper::with_executor(
             MemoryRemoteHostSecretStore::default(),
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0])),
+                statuses: Rc::new(RefCell::new(vec![0; 9])),
                 credentials_stdout: Rc::new(RefCell::new(Some(
                     "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
                 ))),
                 stdout_by_substring: Rc::new(RefCell::new(vec![
                     ("uname -s".to_string(), "Linux\nx86_64\n0\n".to_string()),
+                    (
+                        "relay status".to_string(),
+                        format!(
+                            "{{\"ok\":true,\"registered_nodes\":0,\"version\":\"{}\"}}",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                    ),
                     (
                         "relay invite".to_string(),
                         "token: reconnect-token\n".to_string(),
@@ -3399,7 +3608,13 @@ mod tests {
             !calls
                 .iter()
                 .any(|(_, command, _)| command.contains("relay serve --listen")),
-            "a running relay must not be started twice: {calls:?}"
+            "a running current-version relay must not be restarted: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, command, _)| command.contains("relay shutdown")),
+            "a running current-version relay must not be shut down: {calls:?}"
         );
     }
 
