@@ -12,11 +12,12 @@
 //! layer — the same layer where revoked nodes fail on their next handshake
 //! after their whitelist entry is removed.
 //!
-//! A second listener on `port + 1` runs the enrollment session
-//! (docs/relay-design.md 身份认证与入网): any client certificate (no
-//! whitelist check) authenticates the transport, the first frame must be
-//! `Enroll` carrying an invite/deploy token, and a valid token gets the peer
-//! whitelisted and the relay fingerprint delivered over the same session.
+//! Issue #209 demuxes one public port by ALPN (docs/relay-design.md
+//! 身份认证与入网 单端口 ALPN 分流): no ALPN keeps this link handler,
+//! `waitagent-enroll` runs the token-authenticated enrollment session, and
+//! `h2`/`http/1.1` serves the dashboard when `--web` published one. The
+//! legacy enrollment listener on `port + 1` stays for a deprecation
+//! window (`legacy_enroll_listener` / `--no-legacy-enroll`).
 //!
 //! The connection table is memory-only (数据策略): the relay persists no
 //! session or traffic data. Stream routing between registered nodes lives
@@ -31,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -61,11 +62,55 @@ pub const DEFAULT_RELAY_LISTEN_PORT: u16 = 7475;
 
 /// The enrollment listener binds at `listen port + 1` (docs/relay-design.md
 /// 身份认证与入网): the joining node derives the same address in
-/// `relay_join`.
+/// `relay_join`. Issue #209 demuxes enrollment onto the main port via ALPN;
+/// the `+1` listener stays as an opt-out legacy window.
 pub const RELAY_ENROLL_PORT_OFFSET: u16 = 1;
+
+/// Issue #209: ALPN protocol id advertising the enrollment session on the
+/// single relay port. The joining node offers it on the main port; relays
+/// without the demux reject the handshake at the whitelist layer (the
+/// joining cert is not registered yet) and the join falls back to the
+/// legacy `port + 1` enroll listener. Single source for the server route
+/// table and the client's join attempts.
+pub const ALPN_PROTOCOL_ENROLL: &str = "waitagent-enroll";
+
+/// ALPN ids routing to the dashboard on the single relay port (issue #209).
+/// Browsers and curl offer these on every HTTPS request; anything else (or
+/// nothing) keeps the historical link handler.
+const ALPN_PROTOCOLS_WEB: [&[u8]; 2] = [b"h2", b"http/1.1"];
 
 /// Upper bound on a single mTLS handshake before the connection is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Issue #209: which handler a freshly accepted connection belongs to,
+/// decided from the ALPN protocols in its ClientHello before the TLS
+/// handshake is pinned to a `ServerConfig`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlpnRoute {
+    /// No/unknown ALPN: the node link protocol (back-compat; link clients
+    /// never sent ALPN and still don't).
+    Link,
+    /// `waitagent-enroll`: the token-authenticated enrollment session.
+    Enroll,
+    /// `h2`/`http/1.1`: the dashboard web app (only when `--web` published
+    /// one).
+    Web,
+}
+
+/// Routes one connection by the ALPN protocols it offers. The first
+/// recognized protocol wins; an empty or unrecognized offer is the link
+/// handler so pre-#209 link clients keep connecting untouched.
+fn route_alpn<'a>(protocols: impl IntoIterator<Item = &'a [u8]>) -> AlpnRoute {
+    for protocol in protocols {
+        if protocol == ALPN_PROTOCOL_ENROLL.as_bytes() {
+            return AlpnRoute::Enroll;
+        }
+        if ALPN_PROTOCOLS_WEB.contains(&protocol) {
+            return AlpnRoute::Web;
+        }
+    }
+    AlpnRoute::Link
+}
 
 /// Errors that can occur while starting the relay transport gate.
 #[derive(Debug, Error)]
@@ -104,6 +149,13 @@ impl Default for TokenTtlConfig {
     }
 }
 
+/// Request-extension marker set by the single-port TLS adapter (issue #209):
+/// the connection arrived on the relay port's ALPN-demuxed web handler, so
+/// the auth layer may mark session cookies `Secure`. The standalone HTTP
+/// listener never sets it, keeping plain-`http` cookies unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServedOverTls;
+
 /// Configuration for [`start`].
 #[derive(Debug, Clone)]
 pub struct RelayServeConfig {
@@ -127,6 +179,17 @@ pub struct RelayServeConfig {
     pub admin_socket: Option<PathBuf>,
     /// Enrollment token TTLs answered by `relay invite`.
     pub token_ttls: TokenTtlConfig,
+    /// Issue #209: bind the legacy enrollment listener at `port + 1`.
+    /// Default `true` (deprecation window); `false` serves enrollment
+    /// exclusively through the main port's ALPN demux.
+    pub legacy_enroll_listener: bool,
+    /// Issue #209: the dashboard app for the main port's web ALPN route,
+    /// published by the `--web` half once its enrollment finished. Empty
+    /// until then: web-ALPN connections arriving earlier are dropped with a
+    /// debug log (the web enrollment needs this relay's admin socket, so
+    /// the relay starts first). `OnceLock` — set once, read per connection,
+    /// no lock on the accept path.
+    pub web_app: Arc<std::sync::OnceLock<axum::Router>>,
 }
 
 impl RelayServeConfig {
@@ -144,6 +207,8 @@ impl RelayServeConfig {
             tokens_path: crate::infra::relay_enrollment::default_token_store_path(),
             admin_socket: None,
             token_ttls: TokenTtlConfig::default(),
+            legacy_enroll_listener: true,
+            web_app: Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -363,7 +428,7 @@ impl rustls::server::danger::ClientCertVerifier for AnyClientCertVerifier {
 /// Handle to a running relay transport gate.
 pub struct RelayServerHandle {
     local_addr: SocketAddr,
-    enroll_local_addr: SocketAddr,
+    enroll_local_addr: Option<SocketAddr>,
     admin_addr: RemoteControlAddr,
     table: Arc<RelayConnectionTable>,
     shutdown_tx: watch::Sender<bool>,
@@ -376,8 +441,11 @@ impl RelayServerHandle {
         self.local_addr
     }
 
-    /// Returns the enrollment listener address (`local_addr` port + 1).
-    pub fn enroll_local_addr(&self) -> SocketAddr {
+    /// Returns the legacy enrollment listener address (`local_addr` port + 1),
+    /// or `None` when the relay started with `legacy_enroll_listener = false`
+    /// (issue #209: enrollment is served through the main port's ALPN demux
+    /// only).
+    pub fn enroll_local_addr(&self) -> Option<SocketAddr> {
         self.enroll_local_addr
     }
 
@@ -449,31 +517,41 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     }
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
         .ok_or_else(|| RelayServerError::MissingPrivateKey(config.credentials.key_path.clone()))?;
-    let server_config = rustls::ServerConfig::builder()
+    // Issue #209: one public port, three handlers demuxed by ALPN. The link
+    // config pins no ALPN list so pre-#209 clients (which never sent ALPN)
+    // keep connecting untouched; enroll and web configs pin their ALPN ids
+    // so a connection can only negotiate the protocol it was routed to.
+    let link_server_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(Arc::new(WhitelistedClientCertVerifier::new(
             config.authorized_nodes_dir.clone(),
         )))
-        .with_single_cert(certs, key)?;
-    let enroll_server_config = rustls::ServerConfig::builder()
+        .with_single_cert(certs.clone(), key.clone_key())?;
+    let mut enroll_server_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(Arc::new(AnyClientCertVerifier))
-        .with_single_cert(
-            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?,
-            rustls_pemfile::private_key(&mut key_pem.as_bytes())?.ok_or_else(|| {
-                RelayServerError::MissingPrivateKey(config.credentials.key_path.clone())
-            })?,
-        )?;
+        .with_single_cert(certs.clone(), key.clone_key())?;
+    enroll_server_config.alpn_protocols = vec![ALPN_PROTOCOL_ENROLL.as_bytes().to_vec()];
+    let mut web_server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    web_server_config.alpn_protocols = ALPN_PROTOCOLS_WEB.iter().map(|id| id.to_vec()).collect();
 
-    let (listener, enroll_listener) = bind_gate_pair(config.listen).await?;
+    let (listener, enroll_listener) =
+        bind_gate_pair(config.listen, config.legacy_enroll_listener).await?;
     let local_addr = listener.local_addr()?;
-    let enroll_local_addr = enroll_listener.local_addr()?;
+    let enroll_local_addr = enroll_listener
+        .as_ref()
+        .map(|listener| listener.local_addr())
+        .transpose()?;
     // The admin socket is the bootstrap/emergency channel: a relay that
     // cannot bind it must not start half-managed.
     let admin_addr = admin_addr_for(&config.admin_socket, local_addr)?;
     let admin_listener = RemoteControlAsyncListener::bind(&admin_addr)
         .await
         .map_err(|error| RelayServerError::AdminIo(admin_addr.to_arg_string(), error))?;
-    let acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let enroll_acceptor = TlsAcceptor::from(Arc::new(enroll_server_config));
+    let link_config = Arc::new(link_server_config);
+    let enroll_config = Arc::new(enroll_server_config);
+    let web_config = Arc::new(web_server_config);
+    let web_app = config.web_app.clone();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let table = Arc::new(RelayConnectionTable::default());
     let routing = Arc::new(RoutingTable::default());
@@ -549,6 +627,16 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     let task_relay_fingerprint = relay_fingerprint.clone();
     let task_presence = presence.clone();
 
+    // The main accept loop and the legacy enrollment loop each own clones;
+    // neither outlives a `shutdown` signal.
+    let main_link_config = link_config.clone();
+    let main_enroll_config = enroll_config.clone();
+    let main_web_config = web_config.clone();
+    let main_web_app = web_app.clone();
+    let legacy_tokens = task_tokens.clone();
+    let legacy_whitelist_dir = task_whitelist_dir.clone();
+    let legacy_relay_fingerprint = task_relay_fingerprint.clone();
+    let legacy_register_timeout = lifecycle.register_timeout;
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -558,7 +646,10 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                         ERROR_LOG.log_error("[relay] listener accept failed; stopping".to_string());
                         break;
                     };
-                    let acceptor = acceptor.clone();
+                    let link_config = main_link_config.clone();
+                    let enroll_config = main_enroll_config.clone();
+                    let web_config = main_web_config.clone();
+                    let web_app = main_web_app.clone();
                     let table = task_table.clone();
                     let routing = task_routing.clone();
                     let events = task_events.clone();
@@ -570,76 +661,153 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
                     let tokens_path = task_tokens_path.clone();
                     let token_ttls = task_token_ttls;
                     let whitelist_dir = task_whitelist_dir.clone();
-                    tokio::spawn(async move {
-                        let handshake =
-                            tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
-                        let tls = match handshake {
-                            Err(_) => {
-                                ERROR_LOG.log_error(format!(
-                                    "[relay] {peer_addr}: handshake timed out"
-                                ));
-                                return;
-                            }
-                            Ok(Err(error)) => {
-                                ERROR_LOG.log_error(format!(
-                                    "[relay] {peer_addr}: handshake rejected: {error}"
-                                ));
-                                return;
-                            }
-                            Ok(Ok(tls)) => tls,
-                        };
-                        crate::infra::relay_link::run_link(
-                            tls, peer_addr, table, routing, events, lifecycle, capacity, meter,
-                            presence, local_addr, started_at, tokens, tokens_path, token_ttls,
-                            whitelist_dir,
-                        )
-                        .await;
-                    });
-                }
-                accepted = enroll_listener.accept() => {
-                    let Ok((tcp, peer_addr)) = accepted else {
-                        ERROR_LOG.log_error(
-                            "[relay] enrollment listener accept failed; stopping".to_string(),
-                        );
-                        break;
-                    };
-                    let acceptor = enroll_acceptor.clone();
-                    let tokens = task_tokens.clone();
-                    let whitelist_dir = task_whitelist_dir.clone();
                     let relay_fingerprint = task_relay_fingerprint.clone();
-                    let register_timeout = lifecycle.register_timeout;
                     tokio::spawn(async move {
-                        let handshake =
-                            tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
-                        let tls = match handshake {
-                            Err(_) => {
-                                ERROR_LOG.log_error(format!(
-                                    "[relay-enroll] {peer_addr}: handshake timed out"
-                                ));
-                                return;
-                            }
-                            Ok(Err(error)) => {
-                                ERROR_LOG.log_error(format!(
-                                    "[relay-enroll] {peer_addr}: handshake rejected: {error}"
-                                ));
-                                return;
-                            }
-                            Ok(Ok(tls)) => tls,
+                        // Peek the ClientHello, then pin the handshake to the
+                        // matching ServerConfig (issue #209 single-port
+                        // demux). Link clients send no ALPN and land on the
+                        // link handler exactly as before.
+                        let lazy = tokio_rustls::LazyConfigAcceptor::new(
+                            rustls::server::Acceptor::default(),
+                            tcp,
+                        );
+                        let accepted =
+                            match tokio::time::timeout(HANDSHAKE_TIMEOUT, lazy).await {
+                                Err(_) => {
+                                    ERROR_LOG.log_error(format!(
+                                        "[relay] {peer_addr}: handshake timed out"
+                                    ));
+                                    return;
+                                }
+                                Ok(Err(error)) => {
+                                    ERROR_LOG.log_error(format!(
+                                        "[relay] {peer_addr}: handshake rejected: {error}"
+                                    ));
+                                    return;
+                                }
+                                Ok(Ok(accepted)) => accepted,
+                            };
+                        let route = match accepted.client_hello().alpn() {
+                            Some(protocols) => route_alpn(protocols),
+                            None => AlpnRoute::Link,
                         };
-                        run_enrollment_connection(
-                            tls,
-                            peer_addr,
-                            tokens,
-                            whitelist_dir,
-                            relay_fingerprint,
-                            register_timeout,
-                        )
-                        .await;
+                        match route {
+                            AlpnRoute::Link => {
+                                let Some(tls) =
+                                    finish_handshake(accepted, link_config, peer_addr, "relay")
+                                        .await
+                                else {
+                                    return;
+                                };
+                                crate::infra::relay_link::run_link(
+                                    tls, peer_addr, table, routing, events, lifecycle, capacity,
+                                    meter, presence, local_addr, started_at, tokens, tokens_path,
+                                    token_ttls, whitelist_dir,
+                                )
+                                .await;
+                            }
+                            AlpnRoute::Enroll => {
+                                let Some(tls) = finish_handshake(
+                                    accepted,
+                                    enroll_config,
+                                    peer_addr,
+                                    "relay-enroll",
+                                )
+                                .await
+                                else {
+                                    return;
+                                };
+                                run_enrollment_connection(
+                                    tls,
+                                    peer_addr,
+                                    tokens,
+                                    whitelist_dir,
+                                    relay_fingerprint,
+                                    lifecycle.register_timeout,
+                                )
+                                .await;
+                            }
+                            AlpnRoute::Web => match web_app.get() {
+                                Some(router) => {
+                                    let Some(tls) = finish_handshake(
+                                        accepted,
+                                        web_config,
+                                        peer_addr,
+                                        "relay-web",
+                                    )
+                                    .await
+                                    else {
+                                        return;
+                                    };
+                                    serve_web_connection(tls, peer_addr, router.clone()).await;
+                                }
+                                None => {
+                                    ERROR_LOG.log_debug(format!(
+                                        "[relay-web] {peer_addr}: web ALPN but no web app is publishing yet; dropping"
+                                    ));
+                                }
+                            },
+                        }
                     });
                 }
             }
         }
     });
+
+    // Issue #209: the legacy enrollment listener (port + 1) runs as its own
+    // loop, only when the deprecation window is open. Old relays' joins use
+    // it; the main port's ALPN demux above serves enrollment regardless.
+    if let Some(enroll_listener) = enroll_listener {
+        let legacy_acceptor = TlsAcceptor::from(enroll_config);
+        let mut legacy_shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = legacy_shutdown.changed() => return,
+                    accepted = enroll_listener.accept() => {
+                        let Ok((tcp, peer_addr)) = accepted else {
+                            ERROR_LOG.log_error(
+                                "[relay] enrollment listener accept failed; stopping".to_string(),
+                            );
+                            return;
+                        };
+                        let acceptor = legacy_acceptor.clone();
+                        let tokens = legacy_tokens.clone();
+                        let whitelist_dir = legacy_whitelist_dir.clone();
+                        let relay_fingerprint = legacy_relay_fingerprint.clone();
+                        tokio::spawn(async move {
+                            let handshake =
+                                tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
+                            let tls = match handshake {
+                                Err(_) => {
+                                    ERROR_LOG.log_error(format!(
+                                        "[relay-enroll] {peer_addr}: handshake timed out"
+                                    ));
+                                    return;
+                                }
+                                Ok(Err(error)) => {
+                                    ERROR_LOG.log_error(format!(
+                                        "[relay-enroll] {peer_addr}: handshake rejected: {error}"
+                                    ));
+                                    return;
+                                }
+                                Ok(Ok(tls)) => tls,
+                            };
+                            run_enrollment_connection(
+                                tls,
+                                peer_addr,
+                                tokens,
+                                whitelist_dir,
+                                relay_fingerprint,
+                                legacy_register_timeout,
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+        });
+    }
 
     Ok(StartedRelay {
         server: RelayServerHandle {
@@ -654,6 +822,67 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
     })
 }
 
+/// Completes a peeked ClientHello against the route's `ServerConfig`,
+/// logging refusals with the route's prefix. Returns the established TLS
+/// stream or `None` when the handshake failed.
+async fn finish_handshake(
+    accepted: tokio_rustls::server::StartHandshake<TcpStream>,
+    config: Arc<rustls::ServerConfig>,
+    peer_addr: SocketAddr,
+    log_prefix: &str,
+) -> Option<tokio_rustls::server::TlsStream<TcpStream>> {
+    let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, accepted.into_stream(config)).await;
+    match handshake {
+        Err(_) => {
+            ERROR_LOG.log_error(format!("[{log_prefix}] {peer_addr}: handshake timed out"));
+            None
+        }
+        Ok(Err(error)) => {
+            ERROR_LOG.log_error(format!(
+                "[{log_prefix}] {peer_addr}: handshake rejected: {error}"
+            ));
+            None
+        }
+        Ok(Ok(tls)) => Some(tls),
+    }
+}
+
+/// Serves one dashboard connection on the single-port TLS stream (issue
+/// #209): bridges to the axum Router through hyper's auto HTTP/1+HTTP/2
+/// builder, injecting the peer address (`ConnectInfo`) and the
+/// [`ServedOverTls`] marker the auth layer reads to flag session cookies
+/// `Secure`.
+async fn serve_web_connection(
+    tls: tokio_rustls::server::TlsStream<TcpStream>,
+    peer_addr: SocketAddr,
+    router: axum::Router,
+) {
+    use axum::extract::ConnectInfo;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use tower::Service;
+
+    let service = hyper_util::service::TowerToHyperService::new(tower::service_fn(
+        move |mut request: axum::http::Request<hyper::body::Incoming>| {
+            request.extensions_mut().insert(ConnectInfo(peer_addr));
+            request.extensions_mut().insert(ServedOverTls);
+            // The hyper boundary speaks the raw `Incoming` body; the axum
+            // Router expects `axum::body::Body`. Extensions set above
+            // survive `map`.
+            let request = request.map(axum::body::Body::new);
+            let mut router = router.clone();
+            async move { router.call(request).await }
+        },
+    ));
+    let result = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+        .serve_connection_with_upgrades(TokioIo::new(tls), service)
+        .await;
+    if let Err(error) = result {
+        ERROR_LOG.log_debug(format!(
+            "[relay-web] {peer_addr}: connection ended: {error}"
+        ));
+    }
+}
+
 /// Binds the main TLS listener and the enrollment listener (`port + 1`).
 ///
 /// With an explicit `listen` port a failed enrollment bind aborts the start
@@ -661,10 +890,24 @@ pub async fn start(config: RelayServeConfig) -> Result<StartedRelay, RelayServer
 /// exist). With port 0 (tests) the main bind resolves to an ephemeral port
 /// whose `+1` may race a concurrent test, so the pair is re-rolled a few
 /// times before giving up.
+/// Binds the main TLS listener and, when `legacy_enroll` is set, the
+/// enrollment listener at `port + 1` (issue #209's deprecation window;
+/// `None` serves enrollment exclusively through the main port's ALPN
+/// demux).
+///
+/// With an explicit `listen` port a failed enrollment bind aborts the start
+/// (the join side derives the legacy address from the main port, so the
+/// pair must exist while the window is open). With port 0 (tests) the main
+/// bind resolves to an ephemeral port whose `+1` may race a concurrent
+/// test, so the pair is re-rolled a few times before giving up.
 async fn bind_gate_pair(
     listen: SocketAddr,
-) -> Result<(TcpListener, TcpListener), RelayServerError> {
+    legacy_enroll: bool,
+) -> Result<(TcpListener, Option<TcpListener>), RelayServerError> {
     const EPHEMERAL_BIND_ATTEMPTS: usize = 8;
+    if !legacy_enroll {
+        return Ok((TcpListener::bind(listen).await?, None));
+    }
     let mut attempts = 0usize;
     loop {
         let listener = TcpListener::bind(listen).await?;
@@ -674,7 +917,7 @@ async fn bind_gate_pair(
             local_addr.port() + RELAY_ENROLL_PORT_OFFSET,
         );
         match TcpListener::bind(enroll_addr).await {
-            Ok(enroll_listener) => return Ok((listener, enroll_listener)),
+            Ok(enroll_listener) => return Ok((listener, Some(enroll_listener))),
             Err(error) => {
                 drop(listener);
                 attempts += 1;
@@ -763,6 +1006,31 @@ async fn run_enrollment_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpn_routes_enroll_web_and_link() {
+        // Issue #209 single-port route table.
+        assert_eq!(
+            route_alpn([ALPN_PROTOCOL_ENROLL.as_bytes()]),
+            AlpnRoute::Enroll
+        );
+        assert_eq!(route_alpn([b"h2".as_slice()]), AlpnRoute::Web);
+        assert_eq!(route_alpn([b"http/1.1".as_slice()]), AlpnRoute::Web);
+        // Browsers offer h2 first; the web route wins over nothing else.
+        assert_eq!(
+            route_alpn([b"h2".as_slice(), b"http/1.1".as_slice()]),
+            AlpnRoute::Web
+        );
+        // No ALPN (every pre-#209 link client) and unknown ids keep the link
+        // handler — the compatibility anchor of the demux.
+        assert_eq!(route_alpn(None::<&[u8]>), AlpnRoute::Link);
+        assert_eq!(route_alpn([] as [&[u8]; 0]), AlpnRoute::Link);
+        assert_eq!(route_alpn([b"mqtt".as_slice()]), AlpnRoute::Link);
+        assert_eq!(
+            route_alpn([b"unknown".as_slice(), ALPN_PROTOCOL_ENROLL.as_bytes()]),
+            AlpnRoute::Enroll
+        );
+    }
 
     #[test]
     fn authorized_nodes_scan_lists_fingerprint_files() {

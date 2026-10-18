@@ -240,6 +240,8 @@ pub(super) async fn start_test_server_with_capacity(
         tokens_path: dir.join("relay-enroll-tokens.json"),
         admin_socket: None,
         token_ttls: crate::infra::relay_server::TokenTtlConfig::default(),
+        legacy_enroll_listener: true,
+        web_app: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let started = start(config.clone()).await.expect("server should start");
     RunningServer {
@@ -251,6 +253,39 @@ pub(super) async fn start_test_server_with_capacity(
 
 async fn start_test_server(whitelist: &[String]) -> RunningServer {
     start_test_server_with(whitelist, RelayLifecycleConfig::default()).await
+}
+
+/// Issue #209: a relay serving enrollment exclusively through the main
+/// port's ALPN demux (no legacy `port + 1` listener).
+pub(super) async fn start_test_server_single_port(whitelist: &[String]) -> RunningServer {
+    install_provider();
+    let dir = temp_dir("server-single-port");
+    let whitelist_dir = dir.join("authorized_nodes");
+    fs::create_dir_all(&whitelist_dir).expect("whitelist dir should create");
+    for fingerprint in whitelist {
+        fs::write(whitelist_dir.join(fingerprint), b"").expect("entry should write");
+    }
+    let config = RelayServeConfig {
+        listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+        authorized_nodes_dir: whitelist_dir,
+        credentials: NodeCredentialPaths {
+            key_path: dir.join("relay.key"),
+            cert_path: dir.join("relay.crt"),
+        },
+        lifecycle: RelayLifecycleConfig::default(),
+        capacity: RelayCapacityConfig::default(),
+        tokens_path: dir.join("relay-enroll-tokens.json"),
+        admin_socket: None,
+        token_ttls: crate::infra::relay_server::TokenTtlConfig::default(),
+        legacy_enroll_listener: false,
+        web_app: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let started = start(config.clone()).await.expect("server should start");
+    RunningServer {
+        server: started.server,
+        events: started.events,
+        config,
+    }
 }
 
 pub(super) async fn active_connections_reaches(handle: &RelayServerHandle, expected: usize) {

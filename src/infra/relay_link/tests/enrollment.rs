@@ -27,9 +27,16 @@ async fn enroll_once(
     server_der: &[u8],
     token: &str,
 ) -> Frame {
-    let mut link = open_node_link(server.server.enroll_local_addr(), client, server_der)
-        .await
-        .expect("enrollment handshake should succeed (any client cert)");
+    let mut link = open_node_link(
+        server
+            .server
+            .enroll_local_addr()
+            .expect("legacy enrollment listener"),
+        client,
+        server_der,
+    )
+    .await
+    .expect("enrollment handshake should succeed (any client cert)");
     write_frame(
         &mut link,
         &Frame::Enroll {
@@ -193,9 +200,16 @@ async fn first_frame_must_be_enroll() {
     let server = start_test_server(&[]).await;
     let server_der = server_cert_der(&server.config);
 
-    let mut link = open_node_link(server.server.enroll_local_addr(), &node, &server_der)
-        .await
-        .expect("enrollment handshake should succeed");
+    let mut link = open_node_link(
+        server
+            .server
+            .enroll_local_addr()
+            .expect("legacy enrollment listener"),
+        &node,
+        &server_der,
+    )
+    .await
+    .expect("enrollment handshake should succeed");
     write_frame(&mut link, &Frame::Heartbeat)
         .await
         .expect("frame should write");

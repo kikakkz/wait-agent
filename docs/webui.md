@@ -13,6 +13,12 @@ remove)全部经它的已认证长连接送达 relay——同机也不开进程�
   web 启动失败/崩溃 relay 也随之退出(web 缺部署配置时启动即失败,不会
   跑无头 relay)。web 半仍经 loopback 标准 node↔relay 协议入网,不开
   进程内特例。
+- 单端口 dashboard(issue #209):`relay serve --web` 的 dashboard 同时
+  挂在 relay 自己的对外端口上(TLS + ALPN `h2`/`http/1.1`),即
+  `https://<relay>:7475/`。relay 是自签证书,浏览器有证书告警(预期,
+  #131 已接受);经该端口登录颁发的会话 cookie 带 `Secure` 属性。
+  独立的 `--web-listen` HTTP 监听仍保留(deprecated 提示),供 magic
+  link 里的 `public_base_url` 与既有反代继续工作。
 - 独立启动:`waitagent web serve [--listen <addr>]`(默认
   `0.0.0.0:8788`,公网部署形态;启动时会打印暴露告警)。
 - 纯本机使用:`--listen 127.0.0.1:8788` 回环绑定,无告警。

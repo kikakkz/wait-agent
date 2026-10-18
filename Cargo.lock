@@ -3613,6 +3613,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.2",
  "hmac",
+ "hyper",
  "hyper-util",
  "image",
  "keyring",

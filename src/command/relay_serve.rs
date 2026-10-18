@@ -8,6 +8,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -89,6 +90,16 @@ fn build_serve_config(
         config.capacity.max_throughput_bytes_per_sec = value;
     }
 
+    // Issue #209: the legacy `port + 1` enrollment listener stays open by
+    // default (deprecation window). The relay.toml key closes it; the CLI
+    // flag always wins.
+    config.legacy_enroll_listener = file
+        .and_then(|config| config.legacy_enroll_listener)
+        .unwrap_or(true);
+    if command.no_legacy_enroll {
+        config.legacy_enroll_listener = false;
+    }
+
     if let Some(path) = file.and_then(|config| config.admin_socket.clone()) {
         #[cfg(windows)]
         {
@@ -150,6 +161,7 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
                 )))
             })?;
         let whitelist_dir = config.authorized_nodes_dir.clone();
+        let web_app = config.web_app.clone();
         let authorized =
             relay_server::authorized_node_fingerprints(&whitelist_dir).map_err(|error| {
                 AppError::Lifecycle(LifecycleError::Io(
@@ -163,7 +175,15 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
         let handle = started.server;
         drop(started.events);
         println!("relay listening on {}", handle.local_addr());
-        println!("enrollment listener on {}", handle.enroll_local_addr());
+        println!(
+            "single-port ALPN demux: link (no ALPN) + enrollment ({}) + dashboard (h2, http/1.1) on {}",
+            crate::infra::relay_server::ALPN_PROTOCOL_ENROLL,
+            handle.local_addr(),
+        );
+        match handle.enroll_local_addr() {
+            Some(addr) => println!("legacy enrollment listener on {addr} (deprecated, issue #209)"),
+            None => println!("legacy enrollment listener disabled (issue #209)"),
+        }
         println!("relay identity fingerprint: {fingerprint}");
         println!(
             "authorized nodes: {} ({})",
@@ -173,7 +193,7 @@ pub fn run(command: RelayServeCommand, network: &RemoteNetworkConfig) -> Result<
         println!("admin socket: {}", handle.admin_addr());
         println!("active connections: {}", handle.active_connections());
         match web_config {
-            Some(web_config) => run_web_supervised(handle, web_config).await,
+            Some(web_config) => run_web_supervised(handle, web_config, web_app).await,
             None => {
                 handle.wait_until_stopped().await;
                 println!("relay stopped");
@@ -214,14 +234,54 @@ fn build_web_config(command: &RelayServeCommand) -> Result<WebServeConfig, AppEr
 /// No mutable state crosses the halves: the web service talks to the relay
 /// over the loopback-standard node<->relay protocol, and the only coupling
 /// is the shutdown channel.
+///
+/// Issue #209: the dashboard also serves on the relay port itself (ALPN
+/// `h2`/`http/1.1`). The relay starts with an empty web slot (enrollment
+/// needs the relay's admin socket, so the web cannot enroll before the
+/// relay is up); this half publishes the router once enrollment finished.
+/// The standalone HTTP listener keeps running for the deprecation window,
+/// with a warning.
 async fn run_web_supervised(
     handle: RelayServerHandle,
     web_config: WebServeConfig,
+    web_app: Arc<std::sync::OnceLock<axum::Router>>,
 ) -> Result<(), AppError> {
     let relay_shutdown = handle.shutdown_sender();
+    let relay_local_addr = handle.local_addr();
     let relay_wait = handle.wait_until_stopped();
     tokio::pin!(relay_wait);
-    let mut web_task = tokio::spawn(async move { crate::web::serve::run(&web_config).await });
+
+    let prepared = crate::web::serve::prepare(&web_config)
+        .await
+        .map_err(|error| {
+            AppError::Lifecycle(LifecycleError::Protocol(format!("web service: {error}")))
+        })?;
+    println!("web node fingerprint: {}", prepared.node_fingerprint);
+    println!("relay: {}", prepared.relay.address);
+    let router = crate::web::serve::build_router(prepared.state);
+    // A fresh OnceLock per relay start: a double set cannot happen, and the
+    // demux starts dropping web-ALPN connections only until this point.
+    let _ = web_app.set(router.clone());
+    println!(
+        "dashboard on https://{relay_local_addr} (single-port TLS; self-signed certificate, browsers warn — expected)"
+    );
+    if !web_config.listen.ip().is_loopback() {
+        println!(
+            "WARNING: the standalone web listener on {} is reachable from the network.",
+            web_config.listen
+        );
+        println!("WARNING: it is deprecated (issue #209); the dashboard lives on the relay port.");
+    }
+
+    let mut web_task = tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(web_config.listen).await?;
+        println!("web listening on {}", listener.local_addr()?);
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+    });
     tokio::select! {
         _ = &mut relay_wait => {
             // Relay first: the web half exits with the process.
@@ -348,6 +408,39 @@ mod tests {
             crate::infra::relay_capacity::RelayCapacityConfig::default()
         );
         assert_eq!(config.admin_socket, None);
+    }
+
+    #[test]
+    fn legacy_enroll_listener_precedence_cli_wins_over_file_and_default() {
+        // Issue #209: default keeps the window open; the relay.toml key can
+        // close it; --no-legacy-enroll always wins.
+        let default_config = build_serve_config(&RelayServeCommand::default(), None)
+            .expect("assembly should succeed");
+        assert!(default_config.legacy_enroll_listener);
+
+        let file_closed = RelayServeTomlConfig {
+            legacy_enroll_listener: Some(false),
+            ..RelayServeTomlConfig::default()
+        };
+        let from_file = build_serve_config(&RelayServeCommand::default(), Some(&file_closed))
+            .expect("assembly should succeed");
+        assert!(!from_file.legacy_enroll_listener);
+
+        let cli_wins = build_serve_config(
+            &RelayServeCommand {
+                no_legacy_enroll: true,
+                ..RelayServeCommand::default()
+            },
+            Some(&RelayServeTomlConfig {
+                legacy_enroll_listener: Some(true),
+                ..RelayServeTomlConfig::default()
+            }),
+        )
+        .expect("assembly should succeed");
+        assert!(
+            !cli_wins.legacy_enroll_listener,
+            "the CLI flag closes the window even when the file keeps it open"
+        );
     }
 
     #[test]

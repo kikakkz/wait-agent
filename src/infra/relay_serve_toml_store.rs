@@ -25,6 +25,10 @@
 //! capacity_max_streams                  routed-stream cap (> 0)
 //! capacity_max_throughput_bytes_per_sec forwarded-bytes admission rate
 //!                                       (> 0)
+//! legacy_enroll_listener                bind the enrollment listener at
+//!                                       listen port + 1 (bool; absent
+//!                                       means true — the deprecation
+//!                                       window is open by default)
 //! ```
 
 use std::fmt;
@@ -59,6 +63,11 @@ pub struct RelayServeTomlConfig {
     pub capacity_max_streams: Option<usize>,
     /// Forwarded-bytes admission rate per second.
     pub capacity_max_throughput_bytes_per_sec: Option<u64>,
+    /// Issue #209: bind the legacy enrollment listener at `listen port + 1`.
+    /// Absent means `true` (the deprecation window is open by default);
+    /// `false` serves enrollment exclusively through the main port's ALPN
+    /// demux.
+    pub legacy_enroll_listener: Option<bool>,
 }
 
 /// The default path: `waitagent_home()/relay.toml` — the same file the node
@@ -155,6 +164,11 @@ fn serialize_serve_toml(config: &RelayServeTomlConfig) -> String {
     if let Some(value) = config.capacity_max_throughput_bytes_per_sec {
         push_secs(&mut out, "capacity_max_throughput_bytes_per_sec", value);
     }
+    if let Some(value) = config.legacy_enroll_listener {
+        out.push_str("legacy_enroll_listener = ");
+        out.push_str(if value { "true" } else { "false" });
+        out.push('\n');
+    }
     out
 }
 
@@ -229,13 +243,17 @@ fn parse_serve_toml(text: &str) -> Result<RelayServeTomlConfig, RelayServeTomlSt
                 config.capacity_max_throughput_bytes_per_sec =
                     Some(parse_positive_secs(&key, &value)?);
             }
+            "legacy_enroll_listener" => {
+                config.legacy_enroll_listener = Some(parse_bool(&key, &value)?);
+            }
             // The node-side pin schema shares this file by design
             // (relay_serve_toml_store::default_path): a host running
             // `relay serve --web` holds BOTH the relay config keys and the
             // web node's pin (`relay join` output). Relay serve consumes
             // only its own keys; the pin keys are ignored here and stay
-            // meaningful to the node side (issue #142).
-            "address" | "relay_fingerprint" | "heartbeat_interval_secs" => {}
+            // meaningful to the node side (issue #142; `use_proxy` joins
+            // the ignore list with issue #206).
+            "address" | "relay_fingerprint" | "heartbeat_interval_secs" | "use_proxy" => {}
             other => {
                 return Err(RelayServeTomlStoreError::new(format!(
                     "unknown relay.toml field `{other}`"
@@ -272,6 +290,16 @@ fn parse_positive_usize(key: &str, value: &str) -> Result<usize, RelayServeTomlS
         )));
     }
     Ok(parsed)
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, RelayServeTomlStoreError> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(RelayServeTomlStoreError::new(format!(
+            "relay.toml `{key}` must be true or false, got {value:?}"
+        ))),
+    }
 }
 
 fn parse_key_value(line: &str) -> Result<(String, String), RelayServeTomlStoreError> {
@@ -344,6 +372,7 @@ mod tests {
             capacity_max_nodes: Some(8),
             capacity_max_streams: Some(16),
             capacity_max_throughput_bytes_per_sec: Some(1024 * 1024),
+            legacy_enroll_listener: Some(true),
         }
     }
 
@@ -392,11 +421,13 @@ mod tests {
     fn ignores_the_node_pin_schema_sharing_the_file() {
         // `relay join` writes the node-side pin to the same default path; a
         // host running `relay serve --web` holds both schemas in one file,
-        // and relay serve must start from it (issue #142).
+        // and relay serve must start from it (issue #142). `use_proxy`
+        // (#206) is a pin key too: a proxied join must not break the next
+        // `relay serve --web` startup.
         let path = unique_path("node-pin");
         fs::write(
             &path,
-            "address = \"127.0.0.1:7475\"\nrelay_fingerprint = \"ab12\"\nheartbeat_interval_secs = 10\n",
+            "address = \"127.0.0.1:7475\"\nrelay_fingerprint = \"ab12\"\nheartbeat_interval_secs = 10\nuse_proxy = true\n",
         )
         .expect("write should succeed");
         let loaded = RelayServeTomlConfig::load(&path).expect("load should succeed");
@@ -479,6 +510,44 @@ mod tests {
             );
             crate::infra::best_effort::remove_file(&path);
         }
+    }
+
+    #[test]
+    fn legacy_enroll_listener_parses_and_defaults_open() {
+        // Issue #209: absent means "window open"; the default is applied by
+        // `build_serve_config` (CLI > file > default), not the store.
+        let path = unique_path("legacy-default");
+        fs::write(&path, "listen = \"127.0.0.1:7475\"\n").expect("write should succeed");
+        let loaded = RelayServeTomlConfig::load(&path).expect("load should succeed");
+        assert_eq!(
+            loaded.and_then(|config| config.legacy_enroll_listener),
+            None,
+            "absence leaves the default to the serve assembly"
+        );
+        crate::infra::best_effort::remove_file(&path);
+
+        for (name, value) in [("legacy-true", "true"), ("legacy-false", "false")] {
+            let path = unique_path(name);
+            fs::write(&path, format!("legacy_enroll_listener = {value}\n"))
+                .expect("write should succeed");
+            let loaded = RelayServeTomlConfig::load(&path).expect("load should succeed");
+            assert_eq!(
+                loaded.and_then(|config| config.legacy_enroll_listener),
+                Some(value == "true"),
+                "legacy_enroll_listener = {value} round-trips"
+            );
+            crate::infra::best_effort::remove_file(&path);
+        }
+
+        let path = unique_path("legacy-garbage");
+        fs::write(&path, "legacy_enroll_listener = maybe\n").expect("write should succeed");
+        let error = RelayServeTomlConfig::load(&path).expect_err("a non-bool must fail");
+        assert!(
+            error.to_string().contains("`legacy_enroll_listener`"),
+            "the error names the key: {error}"
+        );
+        crate::infra::best_effort::remove_file(&path);
+        crate::infra::best_effort::remove_file(unique_path("legacy-default"));
     }
 
     #[test]

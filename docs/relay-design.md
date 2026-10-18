@@ -91,6 +91,31 @@ relay 只解外层 TLS 和 mux 帧头用于路由；node 间内容仍是内层 E
    - relay 同时把该 node 的证书指纹自动加入白名单。
    - 双向绑定一次完成，全程无需手工抄写指纹。
 
+### 单端口 ALPN 分流（issue #209）
+
+relay 只用一个对外端口同时承载三类流量，按 ClientHello 的 ALPN 在
+TLS 握手前分流（`LazyConfigAcceptor` peek ClientHello → 选 ServerConfig
+与处理器）：
+
+| ALPN | 流量 | 客户端认证 | 处理器 |
+|---|---|---|---|
+| 无 / 其他 | node link（向后兼容） | 白名单 mTLS | 现有 register/heartbeat 生命周期 |
+| `waitagent-enroll` | 入网 enroll | 任意 client 证书（token 才是授权） | 现有 Enroll 帧协议 |
+| `h2` / `http/1.1` | dashboard Web | 无 client 证书 | axum app（`relay serve --web` 发布） |
+
+- link 客户端不发 ALPN，"无 ALPN → link" 保证了旧 node 零改动兼容。
+- join 双路协商：新 relay 上第一跳直接成功；旧 relay（主端口白名单
+  拒绝未注册证书）第一跳 TLS 失败，自动回退 `port + 1` 遗留 enroll
+  监听。仅 TLS 层失败回退；握手成功后的协议层错误（token 拒绝等）
+  原样上报。错误信息写明两条路径都已尝试。
+- dashboard 走自签证书，浏览器访问 `https://relay:7475/` 有证书告警
+  （#131 已接受）；经 TLS 服务的会话 cookie 带 `Secure` 属性，遗留
+  HTTP 监听不加。
+- **废弃窗口**：`port + 1` enroll 监听默认仍开，relay.toml 的
+  `legacy_enroll_listener = false` 或 CLI `--no-legacy-enroll` 关闭；
+  独立 HTTP web 监听（8788）维持现状，启动日志带 deprecated 提示。
+  窗口期后两者下线。
+
 ## node 生命周期
 
 - 入网：join 后指纹写入 `authorized_nodes/` 白名单；node register 建立

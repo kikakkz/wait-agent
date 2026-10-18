@@ -214,13 +214,46 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
+/// The enrolled web app, ready to serve: the shared state behind both the
+/// standalone HTTP listener (`web serve`) and the relay port's ALPN-demuxed
+/// TLS path (`relay serve --web`, issue #209). Enrollment runs here — for
+/// the integrated path the relay is already up, so its admin socket can
+/// mint the invite.
+pub struct PreparedWeb {
+    /// Shared router state (auth keys/stores, the relay link handle).
+    pub state: Arc<WebState>,
+    /// The pinned relay config the link registered with.
+    pub relay: RelayTomlConfig,
+    /// This web node's certificate fingerprint (its node id on the relay).
+    pub node_fingerprint: String,
+    /// Lifecycle events of the persistent link. Keep the receiver alive so
+    /// the relay client's event queue never fills up (same contract as
+    /// [`WebRelayLink::events`]).
+    #[allow(dead_code)]
+    pub events: mpsc::Receiver<RelayClientEvent>,
+}
+
+/// Enrollment + state assembly without any listener: the shared front half
+/// of `web serve` and `relay serve --web` (issue #209).
+pub async fn prepare(config: &WebServeConfig) -> Result<PreparedWeb, WebServeError> {
+    let webui_config = WebuiConfig::load(&WebuiConfig::default_path())?;
+    let keys = WebAuthKeys::generate()?;
+    let link = enroll_and_link(config).await?;
+    let auth = AuthState::new(keys, webui_config);
+    let state = Arc::new(WebState::new(link.client, auth));
+    Ok(PreparedWeb {
+        state,
+        relay: link.relay,
+        node_fingerprint: link.node_fingerprint,
+        events: link.events,
+    })
+}
+
 /// Enroll-then-serve, driven by the CLI: loads the WebUI deployment config,
 /// generates the ephemeral token keys (issue #143), links the relay, binds
 /// the HTTP listener, and serves until Ctrl-C.
 pub async fn run(config: &WebServeConfig) -> Result<(), WebServeError> {
-    let webui_config = WebuiConfig::load(&WebuiConfig::default_path())?;
-    let keys = WebAuthKeys::generate()?;
-    let link = enroll_and_link(config).await?;
+    let prepared = prepare(config).await?;
     let listener = TcpListener::bind(config.listen).await?;
     if !config.listen.ip().is_loopback() {
         println!(
@@ -233,14 +266,12 @@ pub async fn run(config: &WebServeConfig) -> Result<(), WebServeError> {
         );
     }
     println!("web listening on {}", listener.local_addr()?);
-    println!("web node fingerprint: {}", link.node_fingerprint);
-    println!("relay: {}", link.relay.address);
+    println!("web node fingerprint: {}", prepared.node_fingerprint);
+    println!("relay: {}", prepared.relay.address);
 
-    let auth = AuthState::new(keys, webui_config);
-    let state = Arc::new(WebState::new(link.client, auth));
     axum::serve(
         listener,
-        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        build_router(prepared.state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

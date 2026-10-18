@@ -138,6 +138,25 @@ fn parse_relay_toml(text: &str) -> Result<RelayTomlConfig, RelayTomlStoreError> 
                 heartbeat_interval_secs = Some(parse_heartbeat(&value)?);
             }
             "use_proxy" => use_proxy = parse_use_proxy(&value)?,
+            // The relay-serve schema shares this file by design
+            // (relay_serve_toml_store::default_path): a host running
+            // `relay serve --web` holds BOTH the node pin and the serve
+            // config in one relay.toml. The pin consumes only its own
+            // keys; the serve keys are ignored here, symmetric with the
+            // serve parser ignoring the pin keys (issue #142, extended in
+            // #209 with `legacy_enroll_listener`). Rejecting them would
+            // break the pin load the moment an operator sets a serve key.
+            "listen"
+            | "admin_socket"
+            | "whitelist_dir"
+            | "token_invite_ttl_secs"
+            | "token_deploy_ttl_secs"
+            | "heartbeat_offline_after_secs"
+            | "register_timeout_secs"
+            | "capacity_max_nodes"
+            | "capacity_max_streams"
+            | "capacity_max_throughput_bytes_per_sec"
+            | "legacy_enroll_listener" => {}
             other => {
                 return Err(RelayTomlStoreError::new(format!(
                     "unknown relay.toml field `{other}`"
@@ -342,6 +361,24 @@ mod tests {
         let loaded = RelayTomlConfig::load(&path).expect("load should succeed");
 
         assert!(!loaded.expect("pin loads").use_proxy);
+        crate::infra::best_effort::remove_file(&path);
+    }
+
+    #[test]
+    fn ignores_the_serve_schema_sharing_the_file() {
+        // Issue #209: `relay serve` reads its config from the same default
+        // path; a serve key next to the pin must not break the pin load
+        // (the serve parser ignores pin keys symmetrically).
+        let path = unique_path("serve-keys");
+        fs::write(
+            &path,
+            "address = \"x:1\"\nrelay_fingerprint = \"7c857a105486f46defdfc06ffc2dbc54531a4cdb25515488565aae15264543e4\"\nlegacy_enroll_listener = false\nlisten = \"0.0.0.0:7475\"\ntoken_invite_ttl_secs = 900\n",
+        )
+        .expect("write should succeed");
+        let loaded = RelayTomlConfig::load(&path).expect("load should succeed");
+        let pin = loaded.expect("pin loads next to serve keys");
+        assert_eq!(pin.address, "x:1");
+        assert!(!pin.use_proxy);
         crate::infra::best_effort::remove_file(&path);
     }
 

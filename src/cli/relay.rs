@@ -15,6 +15,10 @@ pub struct RelayServeCommand {
     pub web: bool,
     /// WebUI listen address override for `--web` (default `0.0.0.0:8788`).
     pub web_listen: Option<String>,
+    /// Issue #209: do not bind the legacy enrollment listener at
+    /// `listen port + 1`; enrollment is served through the main port's
+    /// ALPN demux only (CLI wins over the relay.toml key).
+    pub no_legacy_enroll: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -157,6 +161,10 @@ fn parse_relay_serve(mut args: Vec<String>) -> Result<RelayServeCommand, CliErro
             "--web" => {
                 args.remove(0);
                 command.web = true;
+            }
+            "--no-legacy-enroll" => {
+                args.remove(0);
+                command.no_legacy_enroll = true;
             }
             "--web-listen" => {
                 args.remove(0);
@@ -371,6 +379,20 @@ mod tests {
                     Some("/tmp/authorized_nodes")
                 );
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_serve_no_legacy_enroll_is_opt_out() {
+        // Issue #209: --no-legacy-enroll closes the port+1 deprecation
+        // window; the default keeps it open.
+        match parse(&["waitagent", "relay", "serve", "--no-legacy-enroll"]).command {
+            Command::RelayServe(command) => assert!(command.no_legacy_enroll),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match parse(&["waitagent", "relay", "serve"]).command {
+            Command::RelayServe(command) => assert!(!command.no_legacy_enroll),
             other => panic!("unexpected command: {other:?}"),
         }
     }

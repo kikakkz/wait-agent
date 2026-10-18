@@ -77,28 +77,77 @@ pub enum RelayJoinError {
     Timeout(&'static str),
     #[error("relay.toml store error: {0}")]
     Toml(#[from] RelayTomlStoreError),
+    /// Issue #209: the main port (ALPN `waitagent-enroll`, per
+    /// [`ALPN_PROTOCOL_ENROLL`]) failed its TLS handshake and the legacy
+    /// enroll port (`+ 1`) attempt failed as well. The message names both
+    /// paths so an operator of an old relay sees the whole negotiation.
+    #[error(
+        "enrollment failed on every path: main port (ALPN waitagent-enroll): {main}; legacy enrollment port (+1): {legacy}"
+    )]
+    BothPathsFailed {
+        main: Box<RelayJoinError>,
+        legacy: Box<RelayJoinError>,
+    },
 }
 
 impl RelayJoinError {
     /// Issue #206: whether the join is worth another attempt. Dial/TLS/
     /// enrollment IO and timeout failures are transient (a proxy flap, a
     /// relay restart); token, address, protocol, credential, and store
-    /// errors fail fast — retrying cannot change their outcome.
+    /// errors fail fast — retrying cannot change their outcome. A
+    /// both-paths failure (issue #209) is worth another round exactly when
+    /// the legacy attempt was transient — the main-port failure always is
+    /// (protocol errors never reach the fallback).
     fn is_retryable(&self) -> bool {
-        matches!(self, Self::Io(_) | Self::Timeout(_) | Self::Tls(_))
+        match self {
+            Self::BothPathsFailed { legacy, .. } => legacy.is_retryable(),
+            _ => matches!(self, Self::Io(_) | Self::Timeout(_) | Self::Tls(_)),
+        }
+    }
+}
+
+/// Issue #209: how one enrollment attempt ended, so the dual-path
+/// negotiation knows whether the legacy `port + 1` attempt is worth making.
+enum EnrollAttemptError {
+    /// TCP/proxy dial failed before TLS began. Retryable (issue #206) but
+    /// NOT a legacy fallback trigger: the relay is unreachable, and `+ 1`
+    /// cannot be up when the main port refused the connection.
+    Dial(RelayJoinError),
+    /// The TLS handshake itself failed (refused, reset, timed out) — the
+    /// signature of a pre-#209 relay, whose main port only accepts
+    /// whitelisted link clients. The caller falls back to `port + 1`.
+    Handshake(RelayJoinError),
+    /// TLS succeeded and the Enroll protocol answered (or the connection
+    /// died mid-session). The relay speaks the new protocol; the error is
+    /// reported verbatim and never falls back.
+    Protocol(RelayJoinError),
+}
+
+impl EnrollAttemptError {
+    fn into_error(self) -> RelayJoinError {
+        match self {
+            Self::Dial(error) | Self::Handshake(error) | Self::Protocol(error) => error,
+        }
     }
 }
 
 /// Enrolls this node at `address` (default port
-/// [`DEFAULT_RELAY_LISTEN_PORT`], enrollment at `+ 1`) using `token`, then
-/// writes the pinned relay identity to `toml_path`. When `proxy` is given,
-/// the enrollment dial goes through it (issue #206) and the written pin
-/// records `use_proxy: true` so the persistent link reuses the proxy on
-/// every reconnect.
+/// [`DEFAULT_RELAY_LISTEN_PORT`]) using `token`, then writes the pinned
+/// relay identity to `toml_path`. When `proxy` is given, every enrollment
+/// dial goes through it (issue #206) and the written pin records
+/// `use_proxy: true` so the persistent link reuses the proxy on every
+/// reconnect.
+///
+/// Issue #209 negotiation: the first attempt offers the
+/// `waitagent-enroll` ALPN on the main port (single-port relays demux it
+/// to the enrollment session); only a TLS-handshake-class failure falls
+/// back to the legacy `port + 1` enroll listener (old relays). Protocol
+/// errors after a successful handshake are reported without a fallback.
 ///
 /// A single transient dial/TLS/enrollment failure is retried (up to
 /// [`JOIN_MAX_ATTEMPTS`] attempts, [`JOIN_RETRY_BACKOFF`] between them);
-/// refusal-class errors surface immediately.
+/// refusal-class errors surface immediately. Each retry re-walks the whole
+/// negotiation.
 pub async fn join_relay(
     address: &str,
     token: &str,
@@ -118,7 +167,9 @@ pub async fn join_relay(
     unreachable!("the loop always returns on the final attempt");
 }
 
-/// One enrollment attempt; the retry policy lives in [`join_relay`].
+/// One enrollment round: main port with the enroll ALPN, then — on a
+/// TLS-class failure only — the legacy `port + 1` listener. The retry
+/// policy lives in [`join_relay`].
 async fn join_relay_once(
     address: &str,
     token: &str,
@@ -127,8 +178,66 @@ async fn join_relay_once(
     proxy: Option<SshProxy>,
 ) -> Result<JoinOutcome, RelayJoinError> {
     let (host, port) = parse_relay_address(address)?;
-    let enroll_port = port + RELAY_ENROLL_PORT_OFFSET;
+    let (config, server_name) = build_enroll_connector(credentials)?;
 
+    let main = EnrollAttempt {
+        config: config.clone(),
+        server_name: server_name.clone(),
+        host: &host,
+        port,
+        proxy: proxy.as_ref(),
+        enroll_alpn: true,
+        token,
+        toml_path,
+    };
+    match enroll_single_attempt(&main).await {
+        Ok(outcome) => Ok(outcome),
+        Err(EnrollAttemptError::Protocol(error)) | Err(EnrollAttemptError::Dial(error)) => {
+            Err(error)
+        }
+        Err(EnrollAttemptError::Handshake(main_error)) => {
+            crate::infra::error_log::ERROR_LOG.log_debug(format!(
+                "[relay-join] main port (ALPN {}) TLS failed ({main_error}); trying the legacy enrollment port",
+                crate::infra::relay_server::ALPN_PROTOCOL_ENROLL,
+            ));
+            let legacy = EnrollAttempt {
+                config,
+                server_name,
+                host: &host,
+                port: port + RELAY_ENROLL_PORT_OFFSET,
+                proxy: proxy.as_ref(),
+                enroll_alpn: false,
+                token,
+                toml_path,
+            };
+            match enroll_single_attempt(&legacy).await {
+                Ok(outcome) => Ok(outcome),
+                Err(fallback) => Err(RelayJoinError::BothPathsFailed {
+                    main: Box::new(main_error),
+                    legacy: Box::new(fallback.into_error()),
+                }),
+            }
+        }
+    }
+}
+
+/// One enrollment attempt's inputs (issue #209 dual-path negotiation).
+struct EnrollAttempt<'a> {
+    config: rustls::ClientConfig,
+    server_name: rustls::pki_types::ServerName<'static>,
+    host: &'a str,
+    port: u16,
+    proxy: Option<&'a SshProxy>,
+    enroll_alpn: bool,
+    token: &'a str,
+    toml_path: &'a Path,
+}
+
+/// Loads the enrollment identity and builds the (ALPN-free) TLS client
+/// config both attempts share; the enroll ALPN is pinned per attempt.
+fn build_enroll_connector(
+    credentials: &NodeCredentialPaths,
+) -> Result<(rustls::ClientConfig, rustls::pki_types::ServerName<'static>), RelayJoinError> {
     node_credentials::ensure_credentials(credentials)?;
     let cert_pem = fs::read_to_string(&credentials.cert_path)?;
     let key_pem = fs::read_to_string(&credentials.key_path)?;
@@ -153,29 +262,80 @@ async fn join_relay_once(
         .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(certs, key)
         .map_err(|error| RelayJoinError::Tls(error.to_string()))?;
-    let connector = TlsConnector::from(Arc::new(config));
     let server_name = rustls::pki_types::ServerName::try_from("waitagent")
         .map_err(|error| RelayJoinError::Tls(error.to_string()))?;
+    Ok((config, server_name))
+}
 
-    let tcp = dial_peer_connection(proxy.as_ref(), &host, enroll_port).await?;
-    let mut tls =
-        match tokio::time::timeout(JOIN_HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp))
-            .await
-        {
-            Err(_) => return Err(RelayJoinError::Timeout("relay enrollment handshake")),
-            Ok(Err(error)) => return Err(RelayJoinError::Tls(error.to_string())),
-            Ok(Ok(tls)) => tls,
-        };
-
-    write_frame(
+/// One dial → TLS → Enroll → response sequence against `attempt.host:
+/// attempt.port`. `attempt.enroll_alpn` selects the single-port attempt
+/// (ALPN `waitagent-enroll`) vs. the legacy one (no ALPN, as every
+/// pre-#209 join).
+async fn enroll_single_attempt(
+    attempt: &EnrollAttempt<'_>,
+) -> Result<JoinOutcome, EnrollAttemptError> {
+    let tcp = dial_peer_connection(attempt.proxy, attempt.host, attempt.port)
+        .await
+        .map_err(|error| EnrollAttemptError::Dial(error.into()))?;
+    let mut config = attempt.config.clone();
+    if attempt.enroll_alpn {
+        config.alpn_protocols = vec![crate::infra::relay_server::ALPN_PROTOCOL_ENROLL
+            .as_bytes()
+            .to_vec()];
+    }
+    let connector = TlsConnector::from(Arc::new(config));
+    let mut tls = match tokio::time::timeout(
+        JOIN_HANDSHAKE_TIMEOUT,
+        connector.connect(attempt.server_name.clone(), tcp),
+    )
+    .await
+    {
+        Err(_) => {
+            return Err(EnrollAttemptError::Handshake(RelayJoinError::Timeout(
+                "relay enrollment handshake",
+            )));
+        }
+        Ok(Err(error)) => {
+            return Err(EnrollAttemptError::Handshake(RelayJoinError::Tls(
+                error.to_string(),
+            )));
+        }
+        Ok(Ok(tls)) => tls,
+    };
+    run_enroll_session(
         &mut tls,
+        attempt.token,
+        attempt.toml_path,
+        &format!("{}:{}", attempt.host, attempt.port),
+        attempt.proxy.is_some(),
+    )
+    .await
+    .map_err(EnrollAttemptError::Protocol)
+}
+
+/// The Enroll frame exchange and pin write, shared by both negotiation
+/// attempts. `pin_address` is the operator-facing `host:port` the link
+/// dials afterwards (the base port, no enrollment offset); `via_proxy`
+/// lands in the written pin (issue #206).
+async fn run_enroll_session<S>(
+    tls: &mut S,
+    token: &str,
+    toml_path: &Path,
+    pin_address: &str,
+    via_proxy: bool,
+) -> Result<JoinOutcome, RelayJoinError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    write_frame(
+        tls,
         &Frame::Enroll {
             token: token.to_string(),
         },
     )
     .await
     .map_err(io::Error::from)?;
-    let response = match tokio::time::timeout(ENROLL_RESPONSE_TIMEOUT, read_frame(&mut tls)).await {
+    let response = match tokio::time::timeout(ENROLL_RESPONSE_TIMEOUT, read_frame(tls)).await {
         Err(_) => return Err(RelayJoinError::Timeout("enrollment response")),
         Ok(Err(error)) => return Err(io::Error::from(error).into()),
         Ok(Ok(frame)) => frame,
@@ -184,7 +344,7 @@ async fn join_relay_once(
         Frame::EnrollResponse { fingerprint } => {
             let relay_fingerprint = fingerprint.to_lowercase();
             let config = RelayTomlConfig {
-                address: format!("{host}:{port}"),
+                address: pin_address.to_string(),
                 relay_fingerprint: relay_fingerprint.clone(),
                 // `relay join` writes only the enrollment result; the
                 // heartbeat cadence stays at the default until an operator
@@ -192,7 +352,7 @@ async fn join_relay_once(
                 // Issue #206: remember that this enrollment dialed through
                 // the active proxy profile, so the persistent link reuses
                 // the proxy on every reconnect instead of re-resolving it.
-                use_proxy: proxy.is_some(),
+                use_proxy: via_proxy,
                 ..RelayTomlConfig::default()
             };
             config.save(toml_path)?;
@@ -358,6 +518,22 @@ mod tests {
         let store_error = RelayTomlConfig::load(&path).expect_err("unknown key should fail");
         std::fs::remove_file(&path).ok();
         assert!(!RelayJoinError::Toml(store_error).is_retryable());
+
+        // Issue #209: a both-paths failure retries exactly when the legacy
+        // attempt was transient (the main-port half always is — protocol
+        // errors never reach the fallback).
+        let transient = RelayJoinError::BothPathsFailed {
+            main: Box::new(RelayJoinError::Tls("whitelist rejected".to_string())),
+            legacy: Box::new(RelayJoinError::Io(io::Error::from(
+                io::ErrorKind::ConnectionRefused,
+            ))),
+        };
+        assert!(transient.is_retryable());
+        let refused_token = RelayJoinError::BothPathsFailed {
+            main: Box::new(RelayJoinError::Tls("whitelist rejected".to_string())),
+            legacy: Box::new(RelayJoinError::TokenInvalid),
+        };
+        assert!(!refused_token.is_retryable());
     }
 
     #[tokio::test]

@@ -176,6 +176,7 @@ pub(crate) async fn magic_link(
     connect: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
+    request: Request,
 ) -> Response {
     let Some(token) = query.get("token") else {
         return (StatusCode::BAD_REQUEST, "missing token\n").into_response();
@@ -233,7 +234,19 @@ pub(crate) async fn magic_link(
         .stores
         .mint_session(&jti, fp, probe, Duration::from_secs(SESSION_TTL_SECS));
 
-    let cookie = format!("session={signed}; HttpOnly; SameSite=Strict; Path=/");
+    // Issue #209: connections served over the relay port's TLS demux carry
+    // the ServedOverTls marker; their session cookies must be Secure. The
+    // standalone HTTP listener never sets the marker.
+    let secure = if request
+        .extensions()
+        .get::<crate::infra::relay_server::ServedOverTls>()
+        .is_some()
+    {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!("session={signed}; HttpOnly; SameSite=Strict; Path=/{secure}");
     let mut response = Redirect::to("/").into_response();
     if let Ok(value) = cookie.parse() {
         response.headers_mut().append(SET_COOKIE, value);

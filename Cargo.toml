@@ -58,7 +58,8 @@ tokio = { version = "1.43", features = ["io-util", "macros", "net", "rt-multi-th
 tokio-stream = { version = "0.1.18", features = ["net"] }
 tonic = { version = "0.12", features = ["transport", "tls"] }
 tower = "0.4"
-hyper-util = "0.1"
+hyper-util = { version = "0.1", features = ["server", "service"] }
+hyper = "1"
 unicode-width = "0.1.14"
 alacritty_terminal = "0.25"
 # MSYS2 runtime provisioning on Windows (download + sha256 + tar.xz unpack).

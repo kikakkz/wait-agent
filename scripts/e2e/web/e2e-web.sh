@@ -99,7 +99,11 @@ wait_for_file() {
 }
 
 log "starting relay on 127.0.0.1:$RELAY_PORT"
-"$BIN" relay serve --listen "127.0.0.1:$RELAY_PORT" >"$WAITAGENT_HOME/relay.log" 2>&1 &
+# Issue #209: --no-legacy-enroll closes the port+1 enrollment window; the
+# joins below negotiate enrollment on the main port via the
+# waitagent-enroll ALPN.
+"$BIN" relay serve --listen "127.0.0.1:$RELAY_PORT" --no-legacy-enroll \
+    >"$WAITAGENT_HOME/relay.log" 2>&1 &
 RELAY_PID=$!
 wait_for_file "relay listening" "$WAITAGENT_HOME/relay.log" "the relay listener"
 
@@ -414,6 +418,14 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/healthz")
 [ "$code" = "200" ] || die "integrated web /healthz must answer 200 (got $code)"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")
 [ "$code" = "303" ] || die "integrated web / must redirect when unauthenticated (got $code)"
+
+# Issue #209: the same dashboard serves on the relay port itself — TLS with
+# the web ALPN on the single listener, self-signed certificate (curl -k,
+# browsers warn as designed).
+code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$RELAY_PORT/healthz")
+[ "$code" = "200" ] || die "single-port TLS /healthz on the relay port must answer 200 (got $code)"
+code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$RELAY_PORT/")
+[ "$code" = "303" ] || die "single-port TLS / must redirect when unauthenticated (got $code)"
 
 # The special node enrolled over the standard loopback protocol: the
 # connection table holds exactly the web node's link.

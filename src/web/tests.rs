@@ -86,6 +86,8 @@ async fn start_test_relay() -> RunningRelay {
         tokens_path: dir.join("relay-enroll-tokens.json"),
         admin_socket: None,
         token_ttls: TokenTtlConfig::default(),
+        legacy_enroll_listener: true,
+        web_app: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let started = start(config.clone()).await.expect("relay should start");
     RunningRelay {
@@ -209,15 +211,20 @@ async fn start_web_stack(name: &str, admin_email: &str) -> WebStack {
     let auth = AuthState::new(keys, webui_config);
     let state = Arc::new(WebState::new(link.client, auth));
 
+    // Issue #209: the same router is published into the relay's single-port
+    // ALPN demux, so every stack test can also reach it over TLS on the
+    // relay port.
+    let router = build_router(state.clone());
+    let _ = relay.config.web_app.set(router.clone());
+
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr");
-    let serve_state = state.clone();
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            build_router(serve_state).into_make_service_with_connect_info::<SocketAddr>(),
+            router.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .expect("server should serve");
@@ -1247,4 +1254,216 @@ async fn expired_magic_token_is_rejected() {
     stack.server.abort();
     drop(stack.state);
     stack.relay.server.shutdown().await;
+}
+
+// --- issue #209: the dashboard on the relay port's ALPN-demuxed TLS -------
+
+/// Test-only verifier: accept any server certificate (the relay serves a
+/// self-signed one; browsers warn, the client joins do the same).
+#[derive(Debug)]
+struct AcceptAnyServerCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// One HTTPS GET against the relay port's web ALPN route, speaking HTTP/1.1
+/// manually over rustls. Returns status, headers, and body.
+async fn https_get(
+    relay_port: u16,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> (u16, Vec<(String, String)>, String) {
+    install_provider();
+    let mut config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let tcp = timeout(
+        NO_DEADLOCK,
+        tokio::net::TcpStream::connect(("127.0.0.1", relay_port)),
+    )
+    .await
+    .expect("tcp connect should finish")
+    .expect("tcp connect should succeed");
+    let server_name = rustls::pki_types::ServerName::try_from("127.0.0.1").expect("ip name");
+    let mut tls = timeout(NO_DEADLOCK, connector.connect(server_name, tcp))
+        .await
+        .expect("tls handshake should finish")
+        .expect("tls handshake should succeed");
+    assert_eq!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(b"http/1.1".as_slice()),
+        "the web route negotiates http/1.1"
+    );
+
+    let mut request = format!(
+        "GET {path} HTTP/1.1\r\nhost: 127.0.0.1:{relay_port}\r\nuser-agent: {TEST_UA}\r\nconnection: close\r\n"
+    );
+    for (name, value) in extra_headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    tls.write_all(request.as_bytes())
+        .await
+        .expect("request should write");
+    let mut raw = Vec::new();
+    tls.read_to_end(&mut raw)
+        .await
+        .expect("response should read");
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, body) = text.split_once("\r\n\r\n").expect("a header block");
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .expect("a status line")
+        .split_whitespace()
+        .nth(1)
+        .expect("a status code")
+        .parse::<u16>()
+        .expect("a numeric status");
+    let headers = lines
+        .map(|line| {
+            let (name, value) = line.split_once(':').expect("a header line");
+            (name.trim().to_lowercase(), value.trim().to_string())
+        })
+        .collect::<Vec<_>>();
+    let decoded = decode_chunked(&headers, body);
+    (status, headers, decoded)
+}
+
+/// hyper answers HTTP/1.1 without a content-length with chunked encoding;
+/// decode it well enough for assertions.
+fn decode_chunked(headers: &[(String, String)], body: &str) -> String {
+    if header(headers, "transfer-encoding") != Some("chunked") {
+        return body.to_string();
+    }
+    let bytes = body.as_bytes();
+    let mut out = String::new();
+    let mut position = 0usize;
+    while position < bytes.len() {
+        let line_end = bytes[position..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|offset| position + offset)
+            .unwrap_or(bytes.len());
+        let size_text = String::from_utf8_lossy(&bytes[position..line_end])
+            .trim()
+            .to_string();
+        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("0"), 16)
+            .expect("a chunk size");
+        if size == 0 {
+            break;
+        }
+        let chunk_start = line_end + 1;
+        out.push_str(&String::from_utf8_lossy(
+            &bytes[chunk_start..chunk_start + size],
+        ));
+        position = chunk_start + size + 1; // skip the trailing newline
+    }
+    out
+}
+
+/// Issue #209: the dashboard serves on the relay port itself — TLS with the
+/// web ALPN, session cookies flagged Secure, auth semantics identical to
+/// the standalone listener.
+#[tokio::test]
+async fn single_port_tls_serves_the_dashboard_with_secure_cookies() {
+    let stack = start_web_stack("single-port-tls", "admin@example.com").await;
+    let relay_port = stack.relay.server.local_addr().port();
+
+    // healthz over the relay port's TLS web route.
+    let (code, _, _) = https_get(relay_port, "/healthz", &[]).await;
+    assert_eq!(code, 200, "healthz over the single-port TLS demux");
+
+    // Auth middleware runs unchanged (ConnectInfo injected per connection).
+    let (code, headers, _) = https_get(relay_port, "/", &[]).await;
+    assert_eq!(code, 303, "unauthenticated / must redirect over TLS");
+    assert_eq!(header(&headers, "location"), Some("/login"));
+
+    // Mint a magic link over the plain listener, redeem it over TLS: the
+    // session cookie must carry Secure on the TLS path.
+    let form = format!(
+        "email={}&platform={}&timezone={}&language={}&screen={}",
+        form_escape("admin@example.com"),
+        form_escape(&test_probe().platform),
+        form_escape(&test_probe().timezone),
+        form_escape(&test_probe().language),
+        form_escape(&test_probe().screen),
+    );
+    let (code, _, body) = http(
+        stack.addr,
+        "POST",
+        "/auth/magic",
+        &[("content-type", "application/x-www-form-urlencoded")],
+        &form,
+    )
+    .await;
+    assert_eq!(code, 200, "login form should answer 200: {body}");
+    let transcript = stack.stub.wait_for_data().await;
+    let magic = magic_token_from_mail(transcript.data_body().expect("body"));
+    let (code, headers, _) =
+        https_get(relay_port, &format!("/auth/magic?token={magic}"), &[]).await;
+    assert_eq!(code, 303, "redeem over TLS should redirect: {headers:?}");
+    let cookie = header(&headers, "set-cookie").expect("a session cookie");
+    assert!(
+        cookie.contains("Secure"),
+        "TLS-served session cookies are Secure: {cookie}"
+    );
+    let session = cookie.split(';').next().expect("cookie value").to_string();
+
+    // The session works over TLS too.
+    let (code, body) = {
+        let (code, _, body) = https_get(relay_port, "/", &[("cookie", &session)]).await;
+        (code, body)
+    };
+    assert_eq!(code, 200, "dashboard over TLS: {body}");
+    assert!(body.contains(&stack.node_fingerprint), "{body}");
+
+    drop(stack);
 }

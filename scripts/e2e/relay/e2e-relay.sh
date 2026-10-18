@@ -486,6 +486,41 @@ scenario_streams() {
     log "streams OK: 4 concurrent streams held through the relay"
 }
 
+scenario_singleport() {
+    log "scenario: singleport (enrollment via the main port's ALPN demux; legacy port+1 off)"
+    docker network create --internal "$NET_A" >/dev/null
+
+    # Issue #209: the relay.toml key closes the legacy enrollment listener
+    # (port+1); enrollment must still work, negotiated on the main port via
+    # the waitagent-enroll ALPN.
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        sh -c "mkdir -p /root/.waitagent \
+            && printf 'legacy_enroll_listener = false\n' > /root/.waitagent/relay.toml \
+            && exec waitagent relay serve --listen $RELAY_LISTEN" >/dev/null
+
+    wait_for_relay_admin_on "$RELAY"
+
+    # The legacy enrollment port must not be listening.
+    if docker exec "$RELAY" sh -c "(echo > /dev/tcp/127.0.0.1/$((RELAY_PORT + 1))) 2>/dev/null"; then
+        die "port $((RELAY_PORT + 1)) must stay closed when legacy_enroll_listener = false"
+    fi
+
+    token=$(docker exec "$RELAY" waitagent relay invite --listen "$RELAY_LISTEN" --deploy \
+        | sed -n 's/^token: //p')
+    [ -n "$token" ] || die "relay invite produced no token"
+
+    # The join's first attempt offers the enroll ALPN on the main port; with
+    # the legacy listener closed, success proves the single-port demux.
+    docker exec "$RELAY" sh -c "waitagent relay join relay:$RELAY_PORT '$token'" \
+        || die "join through the main-port ALPN demux failed"
+
+    mapfile -t FINGERPRINTS < <(docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes')
+    [ "${#FINGERPRINTS[@]}" -eq 1 ] \
+        || die "expected 1 whitelisted node, got ${#FINGERPRINTS[@]}: ${FINGERPRINTS[*]:-<none>}"
+
+    log "singleport OK: enrollment over the main port ALPN; the legacy port+1 stayed closed"
+}
+
 scenario_direct() {
     log "scenario: direct (direct-dial regression; no relay in topology)"
     docker network create --internal "$NET_DIRECT" >/dev/null
@@ -1506,6 +1541,9 @@ for scenario in "${scenarios[@]}"; do
             ;;
         pinautodiscovery)
             scenario_pinautodiscovery
+            ;;
+        singleport)
+            scenario_singleport
             ;;
         *)
             die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay pinautodiscovery)"
