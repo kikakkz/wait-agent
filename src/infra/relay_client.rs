@@ -282,10 +282,9 @@ struct ClientLinkState {
 pub struct RelayClientHandle {
     stop_tx: watch::Sender<bool>,
     worker: Option<JoinHandle<()>>,
-    // Consumed by `open_stream`/`accept_inbound`/`watch`: the relay
-    // stream/presence integration tests exercise them end-to-end; the
-    // runtime consumer lands with the relay session-sync wiring.
-    #[allow(dead_code)]
+    // Consumed by `open_stream`/`accept_inbound`/`watch` and the issue #220
+    // `is_link_established` ready probe; the relay stream/presence
+    // integration tests exercise them end-to-end.
     link_state: Arc<ClientLinkState>,
     #[allow(dead_code)]
     inbound: Mutex<mpsc::Receiver<MuxStream>>,
@@ -358,6 +357,19 @@ impl RelayClientHandle {
             self.declare_watch_now(&target);
         }
         Ok(())
+    }
+
+    /// Whether a link is fully established — i.e. the dial path can serve
+    /// streams right now. Reads the same invariant `open_stream` /
+    /// `admin_request` rely on (the opener slot installed only after the
+    /// register handshake completes), so a `true` answer means a dial will
+    /// not race the link. Brief leaf lock; no I/O under it.
+    pub fn is_link_established(&self) -> bool {
+        self.link_state
+            .opener_slot
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
     }
 
     /// Records a watch interest (lowercase target) for re-declaration on

@@ -2,6 +2,44 @@ use super::*;
 use rustls::client::danger::ServerCertVerifier;
 
 #[test]
+fn is_link_established_is_false_until_the_handshake_installs_the_opener() {
+    // Issue #220: the ready probe must read the SAME invariant as the dial
+    // path (opener_slot). A freshly spawned handle whose link never comes
+    // up (unreachable relay) reports false, never true-by-accident.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = std::env::temp_dir().join(format!(
+        "waitagent-relay-client-probe-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let credentials = NodeCredentialPaths {
+        key_path: dir.join("node.key"),
+        cert_path: dir.join("node.crt"),
+    };
+    let _ = node_credentials::ensure_credentials(&credentials);
+    let (event_tx, _events) = mpsc::channel(16);
+    let handle = RelayClient::spawn(
+        RelayClientConfig::from_relay_toml(
+            RelayTomlConfig {
+                address: "127.0.0.1:1".to_string(),
+                relay_fingerprint: "ab".repeat(32),
+                heartbeat_interval_secs: None,
+                use_proxy: false,
+            },
+            credentials,
+        ),
+        event_tx,
+    );
+    assert!(
+        !handle.is_link_established(),
+        "no handshake ran, so the opener slot must be empty"
+    );
+    handle.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn retry_policy_defaults_to_half_second_initial_and_five_second_cap() {
     let policy = RelayRetryPolicy::default();
     assert_eq!(policy.initial_delay, Duration::from_millis(500));

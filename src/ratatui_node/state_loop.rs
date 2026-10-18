@@ -2290,10 +2290,18 @@ fn perform_remote_host_connect(
     }))
     .with_relay_link_ready_probe(Arc::new(move || {
         // m07: brief locked snapshot; no I/O under the lock.
+        // Issue #220: the probe must read the SAME invariant as the dial
+        // path (the opener slot installed at handshake completion). The old
+        // `slot.is_some()` check went true at SetRelayClient — before the
+        // link handshake — letting the first relay-via dial race and die
+        // with "no relay link is currently established".
         link_ready_shared
             .relay_client
             .lock()
-            .map(|slot| slot.is_some())
+            .map(|slot| {
+                slot.as_ref()
+                    .is_some_and(|client| client.is_link_established())
+            })
             .unwrap_or(false)
     }));
 

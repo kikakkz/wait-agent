@@ -421,3 +421,41 @@ async fn client_heartbeats_survive_eviction_window_but_silence_does_not() {
     expect_clean_stop(event_rx).await;
     server.server.shutdown().await;
 }
+
+/// Issue #220: `is_link_established` tracks the same invariant the dial
+/// path reads (`opener_slot`): false before the handshake, true once the
+/// link is registered — the ready probe relies on exactly this.
+#[tokio::test]
+async fn is_link_established_tracks_the_live_link() {
+    install_provider();
+    let node = TestNode::generate();
+    let server = start_test_server_with(&[node.fingerprint()], long_lived_lifecycle()).await;
+    let relay_fingerprint = relay_fingerprint(&server);
+    let dir = temp_dir("relay-client-probe-live");
+    let credentials = node_credentials_in(&dir, &node);
+
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let handle = RelayClient::spawn(
+        relay_client_config(
+            server.server.local_addr(),
+            relay_fingerprint,
+            credentials,
+            Duration::from_millis(50),
+        ),
+        event_tx,
+    );
+    assert!(
+        !handle.is_link_established(),
+        "before the handshake the opener slot is not installed"
+    );
+
+    expect_connected(&mut event_rx).await;
+    assert!(
+        handle.is_link_established(),
+        "once Connected, the dial path's opener_slot invariant holds"
+    );
+
+    handle.cancel();
+    expect_clean_stop(event_rx).await;
+    server.server.shutdown().await;
+}
