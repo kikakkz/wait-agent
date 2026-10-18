@@ -29,6 +29,11 @@ use serde::{Deserialize, Serialize};
 pub const MAGIC_TTL_SECS: u64 = 10 * 60;
 /// Absolute lifetime of a session (v3 parameter table).
 pub const SESSION_TTL_SECS: u64 = 12 * 60 * 60;
+/// Issue #208: the `sub` of a self-service enrollment magic link. Same
+/// envelope and TTL as the dashboard login link, different subject, so a
+/// dashboard token can never redeem an enrollment and vice versa
+/// ([`WebAuthKeys::verify`] rejects cross-subject tokens).
+pub const ENROLL_MAGIC_SUB: &str = "enroll-magic";
 
 /// Fixed JWT header: Ed25519 signatures, nothing negotiable.
 const JWT_HEADER: &str = r#"{"alg":"Ed25519","typ":"JWT"}"#;
@@ -254,6 +259,20 @@ mod tests {
             keys.verify(&magic, "session"),
             Err(AuthKeyError::WrongSubject(_))
         ));
+        // Issue #208: the enrollment link subject is segregated from the
+        // dashboard subjects in both directions.
+        let enroll = keys
+            .sign(&claims(ENROLL_MAGIC_SUB, "fp", now_unix(), MAGIC_TTL_SECS))
+            .expect("sign");
+        assert!(matches!(
+            keys.verify(&enroll, "magic"),
+            Err(AuthKeyError::WrongSubject(sub)) if sub == ENROLL_MAGIC_SUB
+        ));
+        assert!(matches!(
+            keys.verify(&magic, ENROLL_MAGIC_SUB),
+            Err(AuthKeyError::WrongSubject(sub)) if sub == "magic"
+        ));
+        assert!(keys.verify(&enroll, ENROLL_MAGIC_SUB).is_ok());
 
         let expired = keys
             .sign(&claims(

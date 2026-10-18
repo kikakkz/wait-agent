@@ -19,6 +19,12 @@ remove)全部经它的已认证长连接送达 relay——同机也不开进程�
   #131 已接受);经该端口登录颁发的会话 cookie 带 `Secure` 属性。
   独立的 `--web-listen` HTTP 监听仍保留(deprecated 提示),供 magic
   link 里的 `public_base_url` 与既有反代继续工作。
+- 自助入网(issue #208):`relay serve --web` 且配好 `webui.toml` 时,
+  任何设备可用 `waitagent relay join-request <relay:port>` 发起入网
+  ——relay 把一次性、绑定该设备指纹的 magic link 发给管理员邮箱,
+  管理员转发即审批,申请人执行
+  `waitagent relay join <relay> --link <链接>` 完成入网。`relay invite`
+  保留给部署流(Install as relay 的 SSH 自动铸 token)。
 - 独立启动:`waitagent web serve [--listen <addr>]`(默认
   `0.0.0.0:8788`,公网部署形态;启动时会打印暴露告警)。
 - 纯本机使用:`--listen 127.0.0.1:8788` 回环绑定,无告警。

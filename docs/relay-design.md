@@ -91,6 +91,24 @@ relay 只解外层 TLS 和 mux 帧头用于路由；node 间内容仍是内层 E
    - relay 同时把该 node 的证书指纹自动加入白名单。
    - 双向绑定一次完成，全程无需手工抄写指纹。
 
+自助入网（issue #208，与 dashboard magic-link 同机制）：
+
+1. 申请人在发起设备执行 `waitagent relay join-request <relay:port>`：
+   无需任何凭证，CLI 以 node 凭证指纹（SPKI SHA-256，本机稳定可重算）
+   向 relay 的 dashboard 公开路由 `POST /auth/join-request`；
+2. relay 用与 dashboard 登录完全相同的 SMTP/JWT 设施给管理员邮箱发信
+   （subject 区分两种流程；`sub = "enroll-magic"`，10 分钟有效，jti
+   一次性，AuthStores 同窗口限速 3 次/10 分钟）；未配 mail 时给出可操
+   作报错并指向 `relay invite` 路径；
+3. 管理员把邮件转发给申请人 = 审批（无单独批准 UI）；
+4. 申请人在同一设备执行
+   `waitagent relay join <relay> --link <邮件中的 URL 或裸 token>`：
+   CLI 以重算的指纹 `POST /auth/enroll`，服务端校验 sub/exp、比对设备
+   指纹、消费 jti 后，经 dashboard 同款 admin-socket Invite 通道铸一次性
+   enroll token 返回；CLI 随后走现有 Enroll 协议（#209 双路协商）完成
+   入网与 pin——Enroll wire 协议零改动。两条 HTTPS 腿与 join 一致走激
+   活 proxy profile。
+
 ### 单端口 ALPN 分流（issue #209）
 
 relay 只用一个对外端口同时承载三类流量，按 ClientHello 的 ALPN 在

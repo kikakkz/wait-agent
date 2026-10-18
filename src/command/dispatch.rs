@@ -109,6 +109,9 @@ impl CommandDispatcher {
             Command::RelayJoin(command) => {
                 crate::command::relay_enroll::run_join(command, &self.network)
             }
+            Command::RelayJoinRequest(command) => {
+                crate::command::relay_enroll::run_join_request(command, &self.network)
+            }
             Command::RelayRemove(command) => crate::command::relay_enroll::run_remove(command),
             Command::WebServe(command) => crate::command::web_serve::run(command),
             Command::GenerateNodeCredentials => {

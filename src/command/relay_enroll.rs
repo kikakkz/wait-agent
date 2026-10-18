@@ -4,10 +4,13 @@
 //! runs the token-authenticated enrollment session and pins the relay
 //! identity into `~/.waitagent/relay.toml`.
 
-use crate::cli::{RelayInviteCommand, RelayJoinCommand, RelayRemoveCommand, RemoteNetworkConfig};
+use crate::cli::{
+    RelayInviteCommand, RelayJoinCommand, RelayJoinRequestCommand, RelayRemoveCommand,
+    RemoteNetworkConfig,
+};
 use crate::command::relay_serve::admin_request;
 use crate::error::AppError;
-use crate::infra::node_credentials::NodeCredentialPaths;
+use crate::infra::node_credentials::{self, NodeCredentialPaths};
 use crate::infra::relay_join;
 use crate::infra::relay_toml_store::RelayTomlConfig;
 use crate::lifecycle::LifecycleError;
@@ -88,11 +91,158 @@ pub fn run_remove(command: RelayRemoveCommand) -> Result<(), AppError> {
 
 pub fn run_join(command: RelayJoinCommand, network: &RemoteNetworkConfig) -> Result<(), AppError> {
     let proxy = resolve_join_proxy(command.via_proxy)?;
-    let outcome = join_and_pin_relay(&command.address, &command.token, network, proxy)?;
+    let token = match &command.link {
+        // Issue #208: redeem the self-service link for a one-time enroll
+        // token, then fall through to the standard enrollment protocol.
+        Some(link) => redeem_enroll_link(link, &command.address, network)?,
+        None => command.token.clone(),
+    };
+    let outcome = join_and_pin_relay(&command.address, &token, network, proxy)?;
     println!("relay fingerprint: {}", outcome.relay_fingerprint);
     println!("pinned to: {}", outcome.toml_path.display());
     println!("join complete: this node is enrolled and whitelisted by the relay");
     Ok(())
+}
+
+/// `waitagent relay join-request <relay:port>` (issue #208): the
+/// credential-less start of the self-service enrollment. Posts this
+/// device's credential fingerprint to the relay's dashboard; the relay
+/// mails the administrator a one-time, device-bound magic link, and
+/// forwarding that mail to the applicant is the approval.
+pub fn run_join_request(
+    command: RelayJoinRequestCommand,
+    network: &RemoteNetworkConfig,
+) -> Result<(), AppError> {
+    let credentials = NodeCredentialPaths::resolve_overrides(
+        network.node_key_path.as_deref(),
+        network.node_cert_path.as_deref(),
+    );
+    // The fingerprint binds the request to THIS device; the relay refuses
+    // redemption from anywhere else (issue #208 semantics).
+    node_credentials::ensure_credentials(&credentials)
+        .map_err(|error| join_request_error(error.to_string()))?;
+    let fp = node_credentials::load_cert_fingerprint(&credentials.cert_path)
+        .map_err(|error| join_request_error(error.to_string()))?;
+    let proxy = resolve_enroll_leg_proxy()?;
+    let body = serde_json::json!({ "fp": fp }).to_string();
+    let (status, answer) = enroll_api_post(
+        &command.address,
+        proxy.as_ref(),
+        "/auth/join-request",
+        &body,
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(join_request_error(format!(
+            "the relay refused the enrollment request (HTTP {status}): {answer}"
+        )));
+    }
+    println!("enrollment request mailed to the relay administrator.");
+    println!("once the mail is forwarded to you, run:");
+    println!("  waitagent relay join <relay> --link <the link from the mail>");
+    Ok(())
+}
+
+/// Redeems a self-service link (full URL or bare JWT) for a one-time enroll
+/// token via `POST /auth/enroll`. The HTTPS legs follow the active proxy
+/// profile (issue #208: same local→relay proxy semantics as the join
+/// itself; there is no pin yet, so the current active profile decides).
+fn redeem_enroll_link(
+    link: &str,
+    relay_address: &str,
+    network: &RemoteNetworkConfig,
+) -> Result<String, AppError> {
+    let magic = extract_magic_token(link).map_err(join_request_error)?;
+    let credentials = NodeCredentialPaths::resolve_overrides(
+        network.node_key_path.as_deref(),
+        network.node_cert_path.as_deref(),
+    );
+    let fp = node_credentials::load_cert_fingerprint(&credentials.cert_path)
+        .map_err(|error| join_request_error(error.to_string()))?;
+    let proxy = resolve_enroll_leg_proxy()?;
+    let body = serde_json::json!({ "token": magic, "fp": fp }).to_string();
+    let (status, answer) = enroll_api_post(relay_address, proxy.as_ref(), "/auth/enroll", &body)?;
+    if !(200..300).contains(&status) {
+        return Err(join_request_error(format!(
+            "the link was refused (HTTP {status}): {answer}"
+        )));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&answer).map_err(|error| {
+        join_request_error(format!(
+            "the relay answered /auth/enroll with no JSON ({error})"
+        ))
+    })?;
+    parsed["token"].as_str().map(str::to_string).ok_or_else(|| {
+        join_request_error("the relay answered /auth/enroll without an enroll token")
+    })
+}
+
+/// Accepts both shapes the operator can paste: a full
+/// `.../auth/enroll?token=<jwt>` URL (query parameters after `token=` are
+/// ignored) or the bare JWT itself.
+fn extract_magic_token(link: &str) -> Result<String, String> {
+    let trimmed = link.trim();
+    if let Some(query) = trimmed.split_once('?').map(|(_, query)| query) {
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix("token=") {
+                if !value.is_empty() {
+                    return Ok(value.to_string());
+                }
+            }
+        }
+        return Err("the link URL carries no token= parameter".to_string());
+    }
+    if trimmed.matches('.').count() == 2 && !trimmed.contains('/') {
+        return Ok(trimmed.to_string());
+    }
+    Err("expected a full enroll URL or the bare token from the mail".to_string())
+}
+
+/// Issue #208: resolves the proxy for the self-service HTTPS legs. No pin
+/// exists at request time, so the CURRENT active remote-install proxy
+/// profile decides — consistent with the local→relay legs of the join
+/// itself. A broken profile fails the command with the actionable message
+/// rather than silently falling back (same policy as `--via-proxy`).
+fn resolve_enroll_leg_proxy() -> Result<Option<crate::infra::proxy_stream::SshProxy>, AppError> {
+    crate::host::ssh::remote_install_proxy_store::load_active_ssh_proxy().map_err(|error| {
+        join_request_error(format!(
+            "the active proxy profile cannot be used for the enrollment request: {error}"
+        ))
+    })
+}
+
+fn enroll_api_post(
+    relay_address: &str,
+    proxy: Option<&crate::infra::proxy_stream::SshProxy>,
+    path: &str,
+    body: &str,
+) -> Result<(u16, String), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            AppError::Lifecycle(LifecycleError::Io(
+                "build enrollment request runtime".to_string(),
+                error,
+            ))
+        })?;
+    runtime
+        .block_on(crate::infra::relay_join::post_enroll_api(
+            relay_address,
+            proxy,
+            path,
+            body,
+        ))
+        .map_err(|error| join_request_error(error.to_string()))
+}
+
+fn join_request_error(message: impl Into<String>) -> AppError {
+    AppError::Lifecycle(LifecycleError::Protocol(
+        format!(
+            "self-service enrollment failed: {}\n\
+             (fall back to the operator-minted token: `waitagent relay invite`, then `waitagent relay join <relay> <token>`)",
+            message.into()
+        ),
+    ))
 }
 
 /// Issue #206: resolves the active remote-install proxy profile when the
@@ -217,6 +367,29 @@ mod tests {
             heartbeat_interval_secs: None,
             use_proxy: false,
         }
+    }
+
+    #[test]
+    fn extract_magic_token_accepts_urls_and_bare_jwts() {
+        assert_eq!(
+            extract_magic_token("https://dash.example/auth/enroll?token=aaa.bbb.ccc").unwrap(),
+            "aaa.bbb.ccc"
+        );
+        // Extra query parameters after the token are ignored.
+        assert_eq!(
+            extract_magic_token("https://dash.example/auth/enroll?token=aaa.bbb.ccc&utm=x")
+                .unwrap(),
+            "aaa.bbb.ccc"
+        );
+        assert_eq!(extract_magic_token("aaa.bbb.ccc").unwrap(), "aaa.bbb.ccc");
+        // A dash-leading base64url token survives untouched.
+        assert_eq!(
+            extract_magic_token("-dG9rZW4.sig.part").unwrap(),
+            "-dG9rZW4.sig.part"
+        );
+        assert!(extract_magic_token("https://dash.example/auth/enroll?nope=1").is_err());
+        assert!(extract_magic_token("not a token").is_err());
+        assert!(extract_magic_token("").is_err());
     }
 
     #[test]

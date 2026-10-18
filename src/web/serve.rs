@@ -39,7 +39,8 @@ use crate::infra::relay_join::{join_relay, parse_relay_address};
 use crate::infra::relay_toml_store::{RelayTomlConfig, RelayTomlStoreError};
 use crate::platform::remote_ipc::{RemoteControlAddr, RemoteControlAsyncStream};
 use crate::web::auth::routes::{
-    auth_middleware, heartbeat, login_form, login_page, magic_link, AuthState, WebState,
+    auth_middleware, enroll_redeem, heartbeat, join_request, login_form, login_page, magic_link,
+    AuthState, WebState,
 };
 use crate::web::auth::token::WebAuthKeys;
 use crate::web::config::{WebuiConfig, WebuiConfigError};
@@ -200,6 +201,8 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/", get(dashboard))
         .route("/login", get(login_page))
         .route("/auth/magic", get(magic_link).post(login_form))
+        .route("/auth/join-request", post(join_request))
+        .route("/auth/enroll", post(enroll_redeem))
         .route("/api/heartbeat", post(heartbeat))
         .route("/api/invite", post(invite))
         .route("/api/remove", post(remove))

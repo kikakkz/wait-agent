@@ -96,6 +96,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required for host-side status parsin
 command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is required for the direct scenario"
 
 cleanup() {
+    [ -n "${MAGICENROLL_SINK_PID:-}" ] && kill "$MAGICENROLL_SINK_PID" >/dev/null 2>&1 || true
     docker rm -f "$RELAY" "$RELAY2" "$NODE_A" "$NODE_B" "$NODE_C" >/dev/null 2>&1 || true
     docker network rm "$NET_A" "$NET_B" "$NET_C" "$NET_DIRECT" >/dev/null 2>&1 || true
 }
@@ -484,6 +485,121 @@ scenario_streams() {
     rm -f "$probe_out"
 
     log "streams OK: 4 concurrent streams held through the relay"
+}
+
+scenario_magicenroll() {
+    log "scenario: magicenroll (self-service enrollment via the admin magic link)"
+    # A regular (not --internal) bridge so the relay container can reach the
+    # host-bound stub SMTP through the gateway.
+    docker network create "$NET_A" >/dev/null
+    local gateway sink_port mail_file sink_pid applicant_fp link
+    gateway=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NET_A")
+    sink_port=$((15810 + RUN % 500))
+    mail_file=$(mktemp)
+    MAGICENROLL_SINK_PID=""
+    # Host-side scripted SMTP sink (same shape as e2e-web.sh's stub).
+    python3 - "$sink_port" "$mail_file" >"$mail_file.stdout" 2>"$mail_file.stderr" <<'PY' &
+import socket, sys, threading
+port, outpath = int(sys.argv[1]), sys.argv[2]
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("0.0.0.0", port)); srv.listen(8)
+out = open(outpath, "a", buffering=1)
+out.write("SINK READY\n")
+def handle(conn):
+    conn.sendall(b"220 stub ESMTP\r\n")
+    f = conn.makefile("rb")
+    state, body = "cmd", []
+    def send(b): conn.sendall(b)
+    while True:
+        raw = f.readline()
+        if raw == b"":
+            return
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        if state == "cmd":
+            if line.startswith("EHLO") or line.startswith("HELO"):
+                send(b"250-stub\r\n250 AUTH LOGIN\r\n")
+            elif line.startswith("AUTH LOGIN"):
+                send(b"334 VXNlcm5hbWU6\r\n"); state = "user"
+            elif line.startswith("MAIL FROM"):
+                send(b"250 ok\r\n")
+            elif line.startswith("RCPT TO"):
+                send(b"250 ok\r\n")
+            elif line.startswith("DATA"):
+                send(b"354 go\r\n"); state = "data"; body = []
+            elif line.startswith("QUIT"):
+                send(b"221 bye\r\n"); return
+            else:
+                send(b"250 ok\r\n")
+        elif state == "user":
+            out.write("AUTH USER %s\n" % line); send(b"334 UGFzc3dvcmQ6\r\n"); state = "pass"
+        elif state == "pass":
+            out.write("AUTH CODE %s\n" % line); send(b"235 ok\r\n"); state = "cmd"
+        else:
+            if line == ".":
+                out.write("DATA\n%s\nDATA END\n" % "\n".join(body)); send(b"250 queued\r\n"); state = "cmd"
+            else:
+                body.append(line.lstrip("."))
+while True:
+    conn, _ = srv.accept()
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+PY
+    sink_pid=$!
+    MAGICENROLL_SINK_PID=$sink_pid
+
+    # Relay with the web half. The webui.toml is seeded up front (mail via
+    # the host sink); the web node's pin is created by a first plain-relay
+    # phase in the same container home, then `relay serve --web` takes over
+    # — the e2e-web.sh phase structure inside one container.
+    docker run -d --name "$RELAY" --network "$NET_A" --network-alias relay "$IMAGE" \
+        sh -c "mkdir -p /root/.waitagent && \
+printf 'admin_email = \"admin@example.com\"\nmail_auth_code = \"code\"\npublic_base_url = \"http://relay:7475\"\nmail_custom_host = \"$gateway\"\nmail_custom_port = $sink_port\nmail_custom_tls = \"none\"\nmail_custom_user = \"admin@example.com\"\n' > /root/.waitagent/webui.toml && \
+waitagent relay serve --listen 0.0.0.0:7475 >/tmp/relay-plain.log 2>&1 & \
+plain=\$!; \
+for i in \$(seq 1 100); do [ -S /tmp/waitagent-relay-admin-0_0_0_0_7475.sock ] && break; sleep 0.2; done; \
+token=\$(waitagent relay invite --listen 0.0.0.0:7475 | sed -n 's/^token: //p'); \
+waitagent relay join 127.0.0.1:7475 \"\$token\" >/dev/null || exit 1; \
+kill \$plain 2>/dev/null; wait \$plain 2>/dev/null; \
+exec waitagent relay serve --web --listen 0.0.0.0:7475 --web-listen 127.0.0.1:8788" >/dev/null
+    wait_for_relay_admin_on "$RELAY"
+    local deadline=$((SECONDS + GATE_TIMEOUT_SECS))
+    while ((SECONDS < deadline)); do
+        if docker logs "$RELAY" 2>/dev/null | grep -q "web listening"; then
+            break
+        fi
+        sleep 1
+    done
+    docker logs "$RELAY" 2>/dev/null | grep -q "web listening" \
+        || { docker logs "$RELAY"; die "integrated web did not come up"; }
+
+    # The applicant: a credential-less join-request from a fresh device.
+    docker run -dt --name "$NODE_A" --network "$NET_A" "$IMAGE" \
+        sh -c "tail -f /dev/null" >/dev/null
+    docker exec "$NODE_A" waitagent relay join-request relay:7475 \
+        || die "join-request failed"
+    deadline=$((SECONDS + 60))
+    while ((SECONDS < deadline)); do
+        if grep -q 'auth/enroll?token=' "$mail_file" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    link=$(grep -o 'http://relay:7475/auth/enroll?token=[A-Za-z0-9._-]*' "$mail_file" | tail -1)
+    [ -n "$link" ] || { cat "$mail_file"; die "no enrollment link in the admin mail"; }
+
+    # Redeem on the requesting device: --link accepts the full URL.
+    docker exec "$NODE_A" waitagent relay join relay:7475 --link "$link" \
+        || die "redeem + join via --link failed"
+    applicant_fp=$(docker exec "$NODE_A" sh -c \
+        "waitagent __generate-node-credentials | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p'")
+    [ -n "$applicant_fp" ] || die "could not read the applicant fingerprint"
+    docker exec "$RELAY" sh -c 'ls /root/.waitagent/authorized_nodes' | grep -q "$applicant_fp" \
+        || die "self-service enrollment did not whitelist the applicant"
+
+    kill "$sink_pid" 2>/dev/null || true
+    MAGICENROLL_SINK_PID=""
+    rm -f "$mail_file" "$mail_file.stdout" "$mail_file.stderr"
+    log "magicenroll OK: join-request → admin mail → --link redeem → enrolled and whitelisted"
 }
 
 scenario_singleport() {
@@ -1544,6 +1660,9 @@ for scenario in "${scenarios[@]}"; do
             ;;
         singleport)
             scenario_singleport
+            ;;
+        magicenroll)
+            scenario_magicenroll
             ;;
         *)
             die "unknown scenario '$scenario' (known: smoke reconnect reregister streams direct pastefile revoke capacity presence joinkeypaths relaymgmt viaautodirect viaautorelay pinautodiscovery)"

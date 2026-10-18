@@ -260,6 +260,240 @@ pub(crate) async fn heartbeat() -> Response {
     axum::Json(serde_json::json!({"ok": true})).into_response()
 }
 
+/// `POST /auth/join-request` (issue #208): the credential-less start of the
+/// self-service enrollment. The body is `{"fp": <node credential
+/// fingerprint>}`; the answer is a one-time, device-bound magic link mailed
+/// to the administrator — forwarding the mail to the applicant IS the
+/// approval. Rate limit, stores, JWT envelope, and SMTP facility are the
+/// dashboard magic-link ones, so both flows share one budget and one key.
+pub(crate) async fn join_request(
+    State(state): State<Arc<WebState>>,
+    connect: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let ip = request_ip(&connect, &headers, &state.auth.config.trusted_proxies);
+    if !state.auth.stores.allow_magic_request(ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limited: at most 3 enrollment requests per 10 minutes\n",
+        )
+            .into_response();
+    }
+    let fp = match parse_enroll_fingerprint(&body) {
+        Ok(fp) => fp,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let iat = token::now_unix();
+    let claims = Claims {
+        sub: token::ENROLL_MAGIC_SUB.to_string(),
+        jti: token::new_jti(),
+        iat,
+        exp: iat + MAGIC_TTL_SECS,
+        fp: fp.clone(),
+    };
+    let signed = match state.auth.keys.sign(&claims) {
+        Ok(signed) => signed,
+        Err(error) => {
+            ERROR_LOG.log_error(format!("[web] enroll magic token sign failed: {error}"));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error creating the enrollment link\n",
+            )
+                .into_response();
+        }
+    };
+    // One-time liveness starts now; the JWT rides the mail. A failed send
+    // leaves a live-but-unknown jti, which expires unused — harmless.
+    state.auth.stores.mint_magic(
+        &claims.jti,
+        fp.clone(),
+        Probe::default(),
+        Duration::from_secs(MAGIC_TTL_SECS),
+    );
+    let link = format!(
+        "{}/auth/enroll?token={signed}",
+        state.auth.config.public_base_url.trim_end_matches('/')
+    );
+    if let Err(error) = send_enroll_request_mail(&state.auth.config, &fp, &link).await {
+        // Actionable gate (#208 acceptance): a relay without working mail
+        // points the applicant at the operator-minted path.
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "enrollment request mail could not be sent: {error}\n\
+                 ask the operator for a token instead: `waitagent relay invite`, \
+                 then `waitagent relay join <relay> <token>`\n"
+            ),
+        )
+            .into_response();
+    }
+    ERROR_LOG.log_debug(format!(
+        "[web] enrollment request for device {} mailed to the administrator",
+        &fp[..fp.len().min(8)]
+    ));
+    (
+        StatusCode::OK,
+        "enrollment request mailed to the relay administrator; \
+         forward the mail to the applicant to approve\n",
+    )
+        .into_response()
+}
+
+/// `POST /auth/enroll` (issue #208): redeems a self-service enrollment
+/// link. The body is `{"token": <enroll-magic JWT>, "fp": <requesting
+/// device's credential fingerprint>}`. The JWT's subject, expiry, and
+/// device binding are verified; the jti is consumed exactly once; and the
+/// one-time enroll token is minted over the SAME admin-socket invite
+/// channel the dashboard's /api/invite uses — no new token-minting surface.
+pub(crate) async fn enroll_redeem(State(state): State<Arc<WebState>>, body: Bytes) -> Response {
+    #[derive(serde::Deserialize)]
+    struct EnrollRedeem {
+        token: String,
+        fp: String,
+    }
+    let parsed: EnrollRedeem = match serde_json::from_slice(&body) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "expected a JSON {token, fp} body\n",
+            )
+                .into_response()
+        }
+    };
+    let claims = match state
+        .auth
+        .keys
+        .verify(&parsed.token, token::ENROLL_MAGIC_SUB)
+    {
+        Ok(claims) => claims,
+        Err(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                "enrollment link is invalid, expired, or not an enrollment link\n",
+            )
+                .into_response();
+        }
+    };
+    if !fingerprint::constant_time_eq(&claims.fp, &parsed.fp.to_lowercase()) {
+        ERROR_LOG.log_warn(format!(
+            "[web] enrollment link {} redeemed from a mismatched device",
+            claims.jti
+        ));
+        return (
+            StatusCode::FORBIDDEN,
+            "this enrollment link is bound to the device that requested it\n",
+        )
+            .into_response();
+    }
+    if !matches!(
+        state.auth.stores.redeem_magic(&claims.jti),
+        MagicRedeem::Ok { .. }
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            "enrollment link is unknown, already used, or expired\n",
+        )
+            .into_response();
+    }
+    let body = match state.client.admin_request(r#"{"command":"invite"}"#).await {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("could not mint the enrollment token: {error}\n"),
+            )
+                .into_response();
+        }
+    };
+    match admin_envelope_token(&body) {
+        Ok(token) => axum::Json(serde_json::json!({"ok": true, "token": token})).into_response(),
+        Err(message) => (
+            StatusCode::BAD_GATEWAY,
+            format!("could not mint the enrollment token: {message}\n"),
+        )
+            .into_response(),
+    }
+}
+
+/// Extracts the node credential fingerprint from a join-request body:
+/// 64 hex characters (case-insensitive), normalized to lowercase.
+fn parse_enroll_fingerprint(body: &[u8]) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct JoinRequest {
+        fp: String,
+    }
+    let parsed: JoinRequest =
+        serde_json::from_slice(body).map_err(|_| "expected a JSON {fp} body\n".to_string())?;
+    let fp = parsed.fp.trim().to_lowercase();
+    if fp.len() != 64 || !fp.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("fp must be the 64-hex node credential fingerprint\n".to_string());
+    }
+    Ok(fp)
+}
+
+/// Extracts the raw one-time token from a relay admin invite envelope —
+/// the same `{"ok": true, "message": "token: <raw>\n..."}` shape the
+/// dashboard's /api/invite consumes (mirrors `command::relay_enroll`'s
+/// `message_field`, which the web layer cannot import).
+fn admin_envelope_token(body: &str) -> Result<String, String> {
+    let envelope: serde_json::Value =
+        serde_json::from_str(body).map_err(|error| format!("admin answer is not json: {error}"))?;
+    if envelope["ok"] != true {
+        return Err(format!(
+            "relay admin refused the invite request: {}",
+            envelope["error"]
+        ));
+    }
+    let message = envelope["message"]
+        .as_str()
+        .ok_or_else(|| "invite answer carries no message".to_string())?;
+    message
+        .lines()
+        .find_map(|line| line.strip_prefix("token: "))
+        .map(str::to_string)
+        .ok_or_else(|| "invite answer carries no token".to_string())
+}
+
+/// Issue #208: mails the administrator the self-service enrollment link.
+/// The subject names the requesting device so enrollment mail is
+/// distinguishable from dashboard login mail at a glance; the body says
+/// forwarding IS the approval and states the 10-minute / one-time /
+/// one-device rules.
+async fn send_enroll_request_mail(
+    config: &WebuiConfig,
+    fp: &str,
+    link: &str,
+) -> Result<(), String> {
+    let SmtpEndpoint {
+        host,
+        port,
+        tls,
+        user,
+    } = mail::smtp_endpoint(config)?;
+    let device = &fp[..fp.len().min(8)];
+    // RFC 2047 encoded-word for the em-dash: the client speaks plain SMTP
+    // (no SMTPUTF8), so non-ASCII header text must ride an encoded-word;
+    // the rest of the subject stays readable ASCII.
+    let message = MailMessage {
+        from: config.admin_email.clone(),
+        to: config.admin_email.clone(),
+        subject: format!("[waitagent relay] enrollment request =?UTF-8?B?4oCU?= device {device}"),
+        body: format!(
+            "Device {device} (fingerprint {fp}) requests to join this waitagent relay.\n\n\
+             Approval is forwarding this mail to the applicant. On the REQUESTING\n\
+             device, the applicant runs:\n\n\
+             \x20 waitagent relay join <relay-address> --link {link}\n\n\
+             The link is valid for 10 minutes, works exactly once, and only on the\n\
+             requesting device. When it expires, re-run `waitagent relay join-request`.\n"
+        ),
+    };
+    smtp::send(&host, port, tls, &user, &config.mail_auth_code, &message)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// The session guard for `/` and `/api/*`. Public: `/healthz`, `/login`,
 /// `/auth/magic`. Failures are 403 under `/api` and a redirect to the
 /// login page everywhere else (browser-friendly).
@@ -383,7 +617,10 @@ fn is_write_path(path: &str) -> bool {
 }
 
 fn is_public_path(path: &str) -> bool {
-    matches!(path, "/healthz" | "/login" | "/auth/magic")
+    matches!(
+        path,
+        "/healthz" | "/login" | "/auth/magic" | "/auth/join-request" | "/auth/enroll"
+    )
 }
 
 fn reject(path: &str) -> Response {

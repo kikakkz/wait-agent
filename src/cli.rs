@@ -7,8 +7,8 @@ pub mod relay;
 pub mod web;
 
 pub use relay::{
-    RelayInviteCommand, RelayJoinCommand, RelayRemoveCommand, RelayServeCommand,
-    RelayShutdownCommand, RelayStatusCommand,
+    RelayInviteCommand, RelayJoinCommand, RelayJoinRequestCommand, RelayRemoveCommand,
+    RelayServeCommand, RelayShutdownCommand, RelayStatusCommand,
 };
 pub use web::WebServeCommand;
 
@@ -187,6 +187,7 @@ pub enum Command {
     RelayShutdown(RelayShutdownCommand),
     RelayInvite(RelayInviteCommand),
     RelayJoin(RelayJoinCommand),
+    RelayJoinRequest(RelayJoinRequestCommand),
     RelayRemove(RelayRemoveCommand),
     WebServe(WebServeCommand),
     GenerateNodeCredentials,
@@ -609,6 +610,8 @@ fn help_text() -> String {
         "  waitagent relay serve [--listen <addr>] [--authorized-nodes <dir>] [--web] [--web-listen <addr>]",
         "  waitagent relay invite [--ttl <secs>] [--deploy] [--listen <addr>]",
         "  waitagent relay join <address> <token> [--via-proxy]",
+        "  waitagent relay join <address> --link <url-or-token>  (self-service, issue #208)",
+        "  waitagent relay join-request <address>  (self-service enrollment request, issue #208)",
         "  waitagent relay remove <fingerprint> [--listen <addr>]",
         "  waitagent relay status [--listen <addr>]",
         "  waitagent relay shutdown [--listen <addr>]",

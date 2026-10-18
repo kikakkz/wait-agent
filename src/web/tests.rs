@@ -1467,3 +1467,339 @@ async fn single_port_tls_serves_the_dashboard_with_secure_cookies() {
 
     drop(stack);
 }
+
+// --- issue #208: self-service enrollment via admin-email magic link -------
+
+use crate::infra::relay_join::join_relay;
+use crate::web::auth::routes::join_request;
+use crate::web::auth::token::ENROLL_MAGIC_SUB;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode};
+
+/// The enrollment link out of a captured request mail: the `--link` URL is
+/// the whitespace word carrying the enroll path.
+fn enroll_link_from_mail(transcript_body: &str) -> String {
+    transcript_body
+        .split_whitespace()
+        .find(|word| word.starts_with("http://dash.test/auth/enroll?token="))
+        .expect("the mail body carries the enrollment link")
+        .to_string()
+}
+
+#[tokio::test]
+async fn join_request_mails_a_device_bound_enrollment_link() {
+    let stack = start_web_stack("join-request", "admin@example.com").await;
+    let device_fp = node_credentials::load_cert_fingerprint(&stack.dir.join("web-node.crt"))
+        .expect("web node fingerprint");
+
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/auth/join-request",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 200, "join-request should answer 200");
+
+    let transcript = stack.stub.wait_for_data().await;
+    // Subject distinguishes enrollment mail from dashboard login mail; it
+    // rides inside the DATA payload.
+    let body = transcript.data_body().expect("mail body");
+    let subject = body
+        .lines()
+        .find_map(|line| line.strip_prefix("Subject: "))
+        .expect("a Subject header");
+    assert!(
+        subject.contains("enrollment request") && subject.contains(&device_fp[..8]),
+        "the subject names the flow and the device: {subject}"
+    );
+    assert!(
+        body.contains("--link"),
+        "the body carries the join command: {body}"
+    );
+    let link = enroll_link_from_mail(body);
+    let token = link
+        .strip_prefix("http://dash.test/auth/enroll?token=")
+        .expect("the link embeds the token");
+    let claims = stack
+        .state
+        .auth
+        .keys
+        .verify(token, ENROLL_MAGIC_SUB)
+        .expect("the mailed token is an enroll-magic JWT");
+    assert_eq!(
+        claims.fp, device_fp,
+        "the link is bound to the requesting device"
+    );
+}
+
+#[tokio::test]
+async fn join_request_is_rate_limited_per_ip() {
+    let stack = start_web_stack("join-request-limit", "admin@example.com").await;
+    let device_fp = node_credentials::load_cert_fingerprint(&stack.dir.join("web-node.crt"))
+        .expect("web node fingerprint");
+    let body = serde_json::json!({"fp": device_fp}).to_string();
+    for attempt in 1..=3 {
+        let (code, _, _) = http(
+            stack.addr,
+            "POST",
+            "/auth/join-request",
+            &[("content-type", "application/json")],
+            &body,
+        )
+        .await;
+        assert_eq!(code, 200, "request {attempt} should pass");
+    }
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/join-request",
+        &[("content-type", "application/json")],
+        &body,
+    )
+    .await;
+    assert_eq!(
+        code, 429,
+        "the 4th request inside the window is refused: {answer}"
+    );
+}
+
+#[tokio::test]
+async fn join_request_rejects_a_malformed_fingerprint() {
+    let stack = start_web_stack("join-request-bad-fp", "admin@example.com").await;
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/join-request",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"fp": "not-hex"}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 400, "a non-hex fp must fail: {answer}");
+}
+
+/// The full self-service flow: request → mail → redeem (enroll token) →
+/// the standard Enroll protocol enrolls and whitelists the device.
+#[tokio::test]
+async fn enroll_redeem_mints_a_one_time_token_that_enrolls_the_device() {
+    let stack = start_web_stack("enroll-redeem", "admin@example.com").await;
+    let relay_address = format!("127.0.0.1:{}", stack.relay.server.local_addr().port());
+    let relay_fp = relay_fingerprint(&stack.relay);
+
+    // A fresh applicant identity on the "requesting device".
+    let dir = temp_dir("enroll-redeem-device");
+    let credentials = NodeCredentialPaths {
+        key_path: dir.join("node.key"),
+        cert_path: dir.join("node.crt"),
+    };
+    let device_fp = node_credentials::ensure_credentials(&credentials).expect("device identity");
+
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/auth/join-request",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 200);
+    let transcript = stack.stub.wait_for_data().await;
+    let link = enroll_link_from_mail(transcript.data_body().expect("body"));
+    let magic = link
+        .strip_prefix("http://dash.test/auth/enroll?token=")
+        .expect("token in the link")
+        .to_string();
+
+    // Redeem: one-time enroll token, machine-readable answer.
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/enroll",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"token": magic, "fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 200, "redeem should answer 200: {answer}");
+    let enroll_token = serde_json::from_str::<serde_json::Value>(&answer).expect("json answer")
+        ["token"]
+        .as_str()
+        .expect("an enroll token")
+        .to_string();
+
+    // The standard enrollment protocol (#209 dual-path negotiation).
+    let toml_path = dir.join("relay.toml");
+    let outcome = join_relay(
+        &relay_address,
+        &enroll_token,
+        &credentials,
+        &toml_path,
+        None,
+    )
+    .await
+    .expect("the enroll token must redeem through the standard flow");
+    assert_eq!(outcome.relay_fingerprint, relay_fp);
+    assert!(
+        stack
+            .relay
+            .config
+            .authorized_nodes_dir
+            .join(&device_fp)
+            .is_file(),
+        "the self-service enrollment must whitelist the device"
+    );
+
+    // A second redeem of the same link is refused (one-time jti).
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/enroll",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"token": magic, "fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 403, "the link redeems exactly once: {answer}");
+}
+
+#[tokio::test]
+async fn enroll_redeem_rejects_other_devices_and_dashboard_tokens() {
+    let stack = start_web_stack("enroll-redeem-guards", "admin@example.com").await;
+    let device_fp = node_credentials::load_cert_fingerprint(&stack.dir.join("web-node.crt"))
+        .expect("web node fingerprint");
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/auth/join-request",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 200);
+    let transcript = stack.stub.wait_for_data().await;
+    let link = enroll_link_from_mail(transcript.data_body().expect("body"));
+    let magic = link
+        .strip_prefix("http://dash.test/auth/enroll?token=")
+        .expect("the token in the link")
+        .to_string();
+
+    // A different device presenting the same link is refused — and the
+    // refusal does NOT consume the link (the fp check precedes redemption),
+    // so the legitimate device can still use it afterwards.
+    let other = "ab".repeat(32);
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/enroll",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"token": magic, "fp": other}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 403, "fp mismatch must refuse: {answer}");
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/enroll",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"token": magic, "fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        code, 200,
+        "a wrong-device attempt leaves the link usable for the requesting device: {answer}"
+    );
+
+    // The legitimate redemption consumed the jti: no third use.
+    let (code, _, answer) = http(
+        stack.addr,
+        "POST",
+        "/auth/enroll",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"token": magic, "fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 403, "the link redeems exactly once: {answer}");
+
+    // A dashboard login token (sub = "magic") redeems nothing here.
+    let iat = crate::web::auth::token::now_unix();
+    let dashboard_token = stack
+        .state
+        .auth
+        .keys
+        .sign(&crate::web::auth::token::Claims {
+            sub: "magic".to_string(),
+            jti: crate::web::auth::token::new_jti(),
+            iat,
+            exp: iat + crate::web::auth::token::MAGIC_TTL_SECS,
+            fp: device_fp.clone(),
+        })
+        .expect("sign");
+    let (code, _, _) = http(
+        stack.addr,
+        "POST",
+        "/auth/enroll",
+        &[("content-type", "application/json")],
+        &serde_json::json!({"token": dashboard_token, "fp": device_fp}).to_string(),
+    )
+    .await;
+    assert_eq!(code, 403, "cross-subject tokens are refused");
+}
+
+/// The mail-failure gate calls the handler directly (no listener needed):
+/// a relay whose SMTP is unreachable answers 502 with the `relay invite`
+/// fallback spelled out.
+#[tokio::test]
+async fn join_request_mail_failure_names_the_relay_invite_fallback() {
+    install_provider();
+    let dir = temp_dir("join-request-dead-mail");
+    let credentials = NodeCredentialPaths {
+        key_path: dir.join("node.key"),
+        cert_path: dir.join("node.crt"),
+    };
+    let _ = node_credentials::ensure_credentials(&credentials);
+    let (event_tx, _events) = mpsc::channel(16);
+    let client = crate::infra::relay_client::RelayClient::spawn(
+        crate::infra::relay_client::RelayClientConfig::from_relay_toml(
+            RelayTomlConfig {
+                address: "127.0.0.1:1".to_string(),
+                relay_fingerprint: "ab".repeat(32),
+                heartbeat_interval_secs: None,
+                use_proxy: false,
+            },
+            credentials,
+        ),
+        event_tx,
+    );
+    let config = WebuiConfig {
+        admin_email: "admin@example.com".to_string(),
+        mail_auth_code: "code".to_string(),
+        public_base_url: "http://dash.test".to_string(),
+        trusted_proxies: Vec::new(),
+        mail_custom: Some(MailCustom {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            tls: MailTls::None,
+            user: "admin@example.com".to_string(),
+        }),
+    };
+    let state = Arc::new(WebState::new(
+        client,
+        AuthState::new(WebAuthKeys::generate().expect("keys"), config),
+    ));
+    let fp = "cd".repeat(32);
+    let answer = join_request(
+        State(state),
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))),
+        HeaderMap::new(),
+        axum::body::Bytes::from(serde_json::json!({"fp": fp}).to_string()),
+    )
+    .await;
+    assert_eq!(answer.status(), StatusCode::BAD_GATEWAY);
+    let body = axum::body::to_bytes(answer.into_body(), 4096)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("relay invite"),
+        "the error names the operator path: {text}"
+    );
+}

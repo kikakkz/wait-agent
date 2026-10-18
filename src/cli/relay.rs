@@ -61,6 +61,19 @@ pub struct RelayJoinCommand {
     /// Issue #206: dial the enrollment through the active remote-install
     /// proxy profile and record the proxy marker in the written pin.
     pub via_proxy: bool,
+    /// Issue #208: a self-service enrollment link (full URL or bare JWT)
+    /// from `relay join-request`; redeemed for a one-time enroll token
+    /// against `/auth/enroll` before the standard join.
+    pub link: Option<String>,
+}
+
+/// Issue #208: `waitagent relay join-request <relay:port>` — the
+/// credential-less start of the self-service enrollment; the relay mails a
+/// one-time, device-bound magic link to the administrator.
+#[derive(Debug, Clone, Default)]
+pub struct RelayJoinRequestCommand {
+    /// Relay address (`host[:port]`, default 7475).
+    pub address: String,
 }
 
 pub(crate) fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
@@ -81,6 +94,10 @@ pub(crate) fn parse_relay(mut args: Vec<String>) -> Result<Command, CliError> {
         "join" => {
             args.remove(0);
             Ok(Command::RelayJoin(parse_relay_join(args)?))
+        }
+        "join-request" => {
+            args.remove(0);
+            Ok(Command::RelayJoinRequest(parse_relay_join_request(args)?))
         }
         "remove" => {
             args.remove(0);
@@ -276,6 +293,15 @@ fn parse_relay_join(mut args: Vec<String>) -> Result<RelayJoinCommand, CliError>
                 args.remove(0);
                 command.via_proxy = true;
             }
+            "--link" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--link".to_string()))?;
+                args.remove(0);
+                command.link = Some(value);
+            }
             "--" => {
                 args.remove(0);
                 positional_only = true;
@@ -292,9 +318,31 @@ fn parse_relay_join(mut args: Vec<String>) -> Result<RelayJoinCommand, CliError>
             _ => return Err(CliError::UnexpectedArgument(flag)),
         }
     }
-    if command.address.is_empty() || command.token.is_empty() {
+    if command.address.is_empty() || (command.token.is_empty() && command.link.is_none()) {
         return Err(CliError::MissingValue(
-            "relay join <address> <token>".to_string(),
+            "relay join <address> <token|--link <url-or-token>>".to_string(),
+        ));
+    }
+    Ok(command)
+}
+
+/// `relay join-request <address>`: one positional address, nothing else.
+fn parse_relay_join_request(mut args: Vec<String>) -> Result<RelayJoinRequestCommand, CliError> {
+    let mut command = RelayJoinRequestCommand::default();
+    while let Some(flag) = args.first().cloned() {
+        match flag.as_str() {
+            "--help" | "-h" => return Ok(command),
+            _ if flag.starts_with("--") => return Err(CliError::UnexpectedArgument(flag)),
+            _ if command.address.is_empty() => {
+                args.remove(0);
+                command.address = flag;
+            }
+            _ => return Err(CliError::UnexpectedArgument(flag)),
+        }
+    }
+    if command.address.is_empty() {
+        return Err(CliError::MissingValue(
+            "relay join-request <address>".to_string(),
         ));
     }
     Ok(command)
@@ -507,11 +555,11 @@ mod tests {
     fn relay_join_requires_address_and_token() {
         assert_eq!(
             parse_error(&["waitagent", "relay", "join"]),
-            "missing value for relay join <address> <token>"
+            "missing value for relay join <address> <token|--link <url-or-token>>"
         );
         assert_eq!(
             parse_error(&["waitagent", "relay", "join", "relay.example"]),
-            "missing value for relay join <address> <token>"
+            "missing value for relay join <address> <token|--link <url-or-token>>"
         );
     }
 
@@ -548,6 +596,66 @@ mod tests {
             Command::RelayJoin(command) => assert!(!command.via_proxy),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn relay_join_link_flag_carries_the_magic_link() {
+        // Issue #208: `relay join <relay> --link <url-or-token>` redeems a
+        // self-service enrollment link instead of taking the invite token
+        // positionally.
+        match parse(&[
+            "waitagent",
+            "relay",
+            "join",
+            "relay.example:7475",
+            "--link",
+            "https://dash.example/auth/enroll?token=abc.def.ghi",
+        ])
+        .command
+        {
+            Command::RelayJoin(command) => {
+                assert_eq!(command.address, "relay.example:7475");
+                assert!(command.token.is_empty(), "--link replaces the token");
+                assert_eq!(
+                    command.link.as_deref(),
+                    Some("https://dash.example/auth/enroll?token=abc.def.ghi")
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        // A bare JWT is accepted too; a dash-leading base64url value sits in
+        // the flag's value slot, never the flag scan (issue #197 rule).
+        match parse(&[
+            "waitagent",
+            "relay",
+            "join",
+            "relay.example:7475",
+            "--link",
+            "-dG9rZW4.signature.part",
+        ])
+        .command
+        {
+            Command::RelayJoin(command) => {
+                assert_eq!(command.link.as_deref(), Some("-dG9rZW4.signature.part"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_join_request_subcommand_parses_the_address() {
+        // Issue #208: `relay join-request <relay>` starts the self-service
+        // enrollment; no token on the command line.
+        match parse(&["waitagent", "relay", "join-request", "relay.example:7475"]).command {
+            Command::RelayJoinRequest(command) => {
+                assert_eq!(command.address, "relay.example:7475");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert_eq!(
+            parse_error(&["waitagent", "relay", "join-request"]),
+            "missing value for relay join-request <address>"
+        );
     }
 
     #[test]

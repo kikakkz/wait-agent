@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
 use crate::infra::node_credentials::{self, NodeCredentialPaths};
@@ -401,6 +402,67 @@ pub(crate) fn parse_relay_address(address: &str) -> Result<(String, u16), RelayJ
         }
         None => Ok((address.to_string(), DEFAULT_RELAY_LISTEN_PORT)),
     }
+}
+
+/// Builds a client TLS config trusting ANY server certificate. The Enroll
+/// session uses this philosophy (the relay fingerprint is learned from the
+/// authenticated response, not pinned beforehand); issue #208's self-service
+/// enrollment HTTPS legs (`/auth/join-request`, `/auth/enroll`) reuse it for
+/// the same reason — a not-yet-enrolled node has nothing to pin against.
+/// `alpn_protocols` selects the application layer (`http/1.1` for the web
+/// demux route).
+pub fn any_server_tls_config(alpn_protocols: Vec<Vec<u8>>) -> rustls::ClientConfig {
+    let verifier = Arc::new(AnyServerCertVerifier);
+    let mut config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    config.alpn_protocols = alpn_protocols;
+    config
+}
+
+/// Issue #208: one HTTPS POST against the relay's dashboard surface (the
+/// web ALPN route from issue #209's single-port demux), dialing through
+/// `proxy` when one is given — the local→relay legs follow the same active
+/// proxy profile as the enrollment itself. The request is HTTP/1.1 written
+/// directly on the TLS stream (the response is small and hop-by-hop); a
+/// non-2xx answer surfaces the server's body so the relay's actionable
+/// errors (e.g. "use `relay invite`") reach the operator verbatim.
+///
+/// Returns `(status, body)`.
+pub async fn post_enroll_api(
+    relay_address: &str,
+    proxy: Option<&SshProxy>,
+    path: &str,
+    body: &str,
+) -> Result<(u16, String), RelayJoinError> {
+    let (host, port) = parse_relay_address(relay_address)?;
+    let tcp = dial_peer_connection(proxy, &host, port).await?;
+    let connector = TlsConnector::from(Arc::new(any_server_tls_config(vec![b"http/1.1".to_vec()])));
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|error| RelayJoinError::Tls(error.to_string()))?;
+    let mut tls = tokio::time::timeout(JOIN_HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp))
+        .await
+        .map_err(|_| RelayJoinError::Timeout("relay dashboard handshake"))??;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nhost: {host}:{port}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    tls.write_all(request.as_bytes()).await?;
+    let mut raw = Vec::new();
+    tls.read_to_end(&mut raw).await?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, response_body) = text.split_once("\r\n\r\n").ok_or_else(|| {
+        RelayJoinError::Protocol(format!("relay answered {path} without a header block"))
+    })?;
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| {
+            RelayJoinError::Protocol(format!("relay answered {path} without a status code"))
+        })?;
+    Ok((status, response_body.to_string()))
 }
 
 /// rustls server-cert verifier for the enrollment session: any end-entity

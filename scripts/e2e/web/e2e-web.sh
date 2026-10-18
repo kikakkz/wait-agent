@@ -427,6 +427,20 @@ code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$RELAY_PORT/he
 code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$RELAY_PORT/")
 [ "$code" = "303" ] || die "single-port TLS / must redirect when unauthenticated (got $code)"
 
+# Issue #208: the self-service enrollment end to end on the integrated
+# relay — credential-less join-request, admin mail, --link redeem, joined.
+log "issue #208: self-service enrollment via the admin magic link"
+: > "$MAIL_FILE"
+"$BIN" relay join-request "127.0.0.1:$RELAY_PORT"
+wait_for_file "auth/enroll?token=" "$MAIL_FILE" "the enrollment request mail"
+ENROLL_LINK=$(grep -o 'http://127.0.0.1:'"$WEB_PORT"'/auth/enroll?token=[A-Za-z0-9._-]*' "$MAIL_FILE" | tail -1)
+[ -n "$ENROLL_LINK" ] || die "no enrollment link in the admin mail"
+"$BIN" relay join "127.0.0.1:$RELAY_PORT" --link "$ENROLL_LINK"
+SELF_FP=$("$BIN" __generate-node-credentials 2>/dev/null | sed -n 's/^WAITAGENT_CREDENTIALS\([0-9a-f]\{64\}\):.*/\1/p' | head -1)
+[ -n "$SELF_FP" ] && [ -f "$WAITAGENT_HOME/authorized_nodes/$SELF_FP" ] \
+    || die "self-service enrollment did not whitelist this device"
+log "self-service enrollment OK: join-request → mail → --link → whitelisted"
+
 # The special node enrolled over the standard loopback protocol: the
 # connection table holds exactly the web node's link.
 web_fp=$(sed -n 's/^web node fingerprint: //p' "$WAITAGENT_HOME/relay-web.log" | head -1)
