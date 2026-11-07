@@ -193,6 +193,9 @@ pub enum Command {
     GenerateNodeCredentials,
     ProvisionMsys,
     NodeControl(NodeControlCommand),
+    /// Issue #224 slice 0 (spike): hidden iroh mesh probe; arguments are
+    /// parsed by the command module, not the CLI surface.
+    MeshProbe(Vec<String>),
     Help(String),
     Version,
 }
@@ -358,6 +361,13 @@ impl Cli {
                 args.remove(0);
                 parse_no_args(args)?;
                 Command::ProvisionMsys
+            }
+            "mesh-probe" => {
+                // Issue #224 slice 0 (spike): hidden evaluation harness,
+                // intentionally absent from the help listing and the TUI;
+                // the arguments are parsed by command::mesh_probe.
+                args.remove(0);
+                Command::MeshProbe(args)
             }
             "version" => Command::Version,
             "help" => Command::Help(help_text()),

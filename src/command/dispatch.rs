@@ -113,6 +113,7 @@ impl CommandDispatcher {
                 crate::command::relay_enroll::run_join_request(command, &self.network)
             }
             Command::RelayRemove(command) => crate::command::relay_enroll::run_remove(command),
+            Command::MeshProbe(args) => crate::command::mesh_probe::run(args),
             Command::WebServe(command) => crate::command::web_serve::run(command),
             Command::GenerateNodeCredentials => {
                 let paths = NodeCredentialPaths::resolve_overrides(
