@@ -423,6 +423,24 @@ pub fn config_text_has_unclosed_multiline_string(content: &str) -> bool {
         || !content.matches("'''").count().is_multiple_of(2)
 }
 
+/// Resolve an agent home directory from environment fallbacks.
+///
+/// Order: the agent-specific override, `HOME` (Unix-style environments),
+/// `USERPROFILE` (native Windows), then the bare relative directory so the
+/// caller still constructs when nothing is set.
+pub(crate) fn agent_home(
+    override_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+    dir: &str,
+) -> std::path::PathBuf {
+    override_home
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|value| std::path::PathBuf::from(value).join(dir)))
+        .or_else(|| userprofile.map(|value| std::path::PathBuf::from(value).join(dir)))
+        .unwrap_or_else(|| std::path::PathBuf::from(dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +554,39 @@ command = "/tmp/send Stop"
         );
         assert!(!next.contains("/tmp/send Stop"));
         assert!(next.contains("event = \"UserPromptSubmit\""));
+    }
+
+    #[test]
+    fn agent_home_prefers_override_then_home_then_userprofile() {
+        let override_home = Some(std::ffi::OsString::from("override-home"));
+        let home = Some(std::ffi::OsString::from("env-home"));
+        let profile = Some(std::ffi::OsString::from("profile-home"));
+
+        assert_eq!(
+            agent_home(override_home, home, profile, ".kimi-code"),
+            std::path::PathBuf::from("override-home")
+        );
+        assert_eq!(
+            agent_home(
+                None,
+                Some(std::ffi::OsString::from("env-home")),
+                None,
+                ".kimi-code"
+            ),
+            std::path::Path::new("env-home").join(".kimi-code")
+        );
+        assert_eq!(
+            agent_home(
+                None,
+                None,
+                Some(std::ffi::OsString::from("profile-home")),
+                ".kimi-code"
+            ),
+            std::path::Path::new("profile-home").join(".kimi-code")
+        );
+        assert_eq!(
+            agent_home(None, None, None, ".kimi-code"),
+            std::path::PathBuf::from(".kimi-code")
+        );
     }
 }

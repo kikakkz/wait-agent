@@ -1,3 +1,4 @@
+use crate::application::agent_hooks_config_service::agent_home;
 use crate::application::agent_hooks_config_service::AgentHooksConfigService;
 use std::path::PathBuf;
 
@@ -16,10 +17,12 @@ impl KimiHooksConfigService {
     }
 
     pub fn from_env(sender_path: PathBuf) -> Self {
-        let kimi_home = std::env::var_os("KIMI_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".kimi-code")))
-            .unwrap_or_else(|| PathBuf::from(".kimi-code"));
+        let kimi_home = agent_home(
+            std::env::var_os("KIMI_HOME"),
+            std::env::var_os("HOME"),
+            std::env::var_os("USERPROFILE"),
+            ".kimi-code",
+        );
         Self::new(kimi_home, sender_path)
     }
 }
