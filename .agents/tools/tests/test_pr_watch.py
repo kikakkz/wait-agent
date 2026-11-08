@@ -118,6 +118,16 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual(report["status"], "failing_checks")
         self.assertEqual(report["failing"]["test"]["status"], "missing")
 
+    def test_all_missing_checks_are_pending_not_failing(self):
+        api = FakeApi({
+            "/pulls/1": [json.loads(json.dumps(PR_OPEN))],
+            "/branches/main/protection": [PROTECTION],
+            f"/commits/{SHA}/check-runs?per_page=100": [{"check_runs": []}],
+        })
+        report = pr_watch.run_once(api, "o/r", 1)
+        self.assertEqual(report["status"], "checks_pending")
+        self.assertIn("check", report["pending"])
+
     def test_failing_checks_report_only_bad_ones(self):
         api = FakeApi({
             "/pulls/1": [json.loads(json.dumps(PR_OPEN))],

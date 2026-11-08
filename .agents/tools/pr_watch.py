@@ -260,6 +260,10 @@ def run_once(api, repo, pr_num):
         report["status"] = "checks_pending"
         report["pending"] = pending
         return report
+    if states and all(s["status"] == "missing" for s in states.values()):
+        report["status"] = "checks_pending"
+        report["pending"] = list(states)
+        return report
     bad = failing_checks(states)
     if bad:
         report["status"] = "failing_checks"
