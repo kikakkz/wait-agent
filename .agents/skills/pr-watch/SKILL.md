@@ -52,17 +52,20 @@ enabled this enqueues, without it merges directly.
 ## Running the watcher
 
 The watcher is a per-PR lifecycle process, not a scheduler poll: opening
-a PR and starting its watcher are one action. Start it detached from
-inside the repository so it outlives the session:
+a PR and starting its watcher are one action. Start it as a background
+task of the agent session (panel-visible, completion-notified):
 
-  setsid nohup python3 .agents/tools/pr_watch.py <owner/repo> <pr> \
-      --interval 60 --cleanup > /tmp/pr-watch-<pr>.log 2>&1 &
+  PYTHONUNBUFFERED=1 python3 .agents/tools/pr_watch.py <owner/repo> <pr> \
+      --interval 60 --cleanup
 
 It polls until the required checks are green, hands in once per head,
 waits for the merge, then runs the post-merge cleanup (stop condition 1)
-and exits. In the log, exit 0 with a `cleanup` JSON line means done;
-exit 2 means it stopped at failing checks or changes-requested — triage,
-fix on-branch, push, and relaunch the watcher.
+and exits. The background task ends with the watcher: exit 0 means the
+cleanup is done; exit 2 means it stopped at failing checks or
+changes-requested — triage, fix on-branch, push, and relaunch the
+watcher. Watchers are session-scoped by design (cross-session survival
+is not required): when a session starts, list the repo's open PRs and
+relaunch a watcher for any that lack one.
 
 ## Stop conditions
 
