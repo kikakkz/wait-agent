@@ -2346,6 +2346,7 @@ fn sidebar_badge(task_state: &str) -> (&'static str, usize) {
         "running" => "🔥R",
         "input" => "🔊I",
         "confirm" => "📢C",
+        "background" => "🧵B",
         _ => "·U",
     };
     (badge, display_width(badge))
@@ -2356,6 +2357,7 @@ fn badge_style(task_state: &str) -> Style {
         "running" => Style::default().fg(Color::Yellow),
         "input" => Style::default().fg(Color::Cyan),
         "confirm" => Style::default().fg(Color::Magenta),
+        "background" => Style::default().fg(Color::Blue),
         _ => Style::default().fg(Color::Gray),
     }
 }
@@ -2662,6 +2664,25 @@ mod tests {
         assert!(
             !text.contains("relay error"),
             "a clean footer renders no relay error: {text}"
+        );
+    }
+
+    #[test]
+    fn sidebar_badge_renders_background_state() {
+        let (badge, badge_width) = sidebar_badge("background");
+        assert_eq!(badge, "🧵B");
+        assert_eq!(badge_width, display_width(badge));
+        assert_eq!(badge_style("background"), Style::default().fg(Color::Blue));
+    }
+
+    #[test]
+    fn selected_detail_text_shows_background_suffix() {
+        let mut session = remote_session_view(None);
+        session.task_state = "background".to_string();
+        let detail = selected_detail_text(&session, 200);
+        assert!(
+            detail.contains("BACKGROUND"),
+            "the detail line names the background state: {detail}"
         );
     }
 }

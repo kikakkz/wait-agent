@@ -115,11 +115,14 @@ impl ManagedSessionAddress {
     }
 }
 
+/// Sidebar task state of a managed session; see `docs/task-state-detection.md`
+/// for the state semantics, the Kimi precedence ladder, and writer convergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ManagedSessionTaskState {
     Running,
     Input,
     Confirm,
+    Background,
     #[default]
     Unknown,
 }
@@ -130,6 +133,7 @@ impl ManagedSessionTaskState {
             Self::Running => "running",
             Self::Input => "input",
             Self::Confirm => "confirm",
+            Self::Background => "background",
             Self::Unknown => "unknown",
         }
     }
@@ -139,6 +143,7 @@ impl ManagedSessionTaskState {
             "running" => Some(Self::Running),
             "input" => Some(Self::Input),
             "confirm" => Some(Self::Confirm),
+            "background" => Some(Self::Background),
             "unknown" => Some(Self::Unknown),
             _ => None,
         }
@@ -648,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn task_state_keeps_kimi_running_when_background_task_and_prompt_are_visible() {
+    fn task_state_infers_background_when_background_task_and_prompt_are_visible() {
         let state = DetectorRegistry::default().infer_task_state(
             Some("kimi"),
             "● bash task started in background\n\
@@ -659,7 +664,7 @@ mod tests {
              context: 8.4% (22.0k/262.1k)",
         );
 
-        assert_eq!(state, ManagedSessionTaskState::Running);
+        assert_eq!(state, ManagedSessionTaskState::Background);
     }
 
     #[test]
@@ -1049,5 +1054,19 @@ mod tests {
              ? for shortcuts    ● high · /effort",
         );
         assert_eq!(state, ManagedSessionTaskState::Input);
+    }
+
+    #[test]
+    fn task_state_str_round_trip() {
+        for state in [
+            ManagedSessionTaskState::Running,
+            ManagedSessionTaskState::Input,
+            ManagedSessionTaskState::Confirm,
+            ManagedSessionTaskState::Background,
+            ManagedSessionTaskState::Unknown,
+        ] {
+            assert_eq!(ManagedSessionTaskState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(ManagedSessionTaskState::parse("bogus"), None);
     }
 }
