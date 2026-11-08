@@ -5,9 +5,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-/// `coordination.toml`: listen, admin mailbox, operators, token TTL.
+/// `coordination.toml`: listen, embedded relay, presence, admin mailbox, operators, token TTL.
 pub struct CoordinationConfig {
     pub listen: Option<SocketAddr>,
+    pub relay: Option<bool>,
+    pub relay_url: Option<String>,
+    pub presence_timeout_secs: Option<u64>,
     pub admin_email: Option<String>,
     pub mail_auth_code: Option<String>,
     pub operators: Vec<String>,
@@ -21,6 +24,19 @@ impl CoordinationConfig {
             self.token_ttl_secs
                 .unwrap_or(crate::infra::coordination::DEFAULT_TOKEN_TTL_SECS),
         )
+    }
+
+    /// Effective presence timeout (default three missed 15 s heartbeats).
+    pub fn presence_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.presence_timeout_secs
+                .unwrap_or(crate::infra::coordination::presence::DEFAULT_PRESENCE_TIMEOUT_SECS),
+        )
+    }
+
+    /// Whether the embedded iroh relay starts with `coordination serve`.
+    pub fn relay_enabled(&self) -> bool {
+        self.relay.unwrap_or(true)
     }
 
     /// Loads the config; a missing file yields the defaults.
@@ -75,6 +91,23 @@ fn parse_config(text: &str) -> Result<CoordinationConfig, CoordinationTomlError>
                     ))
                 })?);
             }
+            "relay" => {
+                config.relay = Some(parse_bool(&value, "relay")?);
+            }
+            "relay_url" => config.relay_url = non_empty(value),
+            "presence_timeout_secs" => {
+                let secs: u64 = value.parse().map_err(|_| {
+                    CoordinationTomlError::new(format!(
+                        "coordination.toml `presence_timeout_secs` must be a whole number, got {value:?}"
+                    ))
+                })?;
+                if secs == 0 {
+                    return Err(CoordinationTomlError::new(
+                        "coordination.toml `presence_timeout_secs` must be greater than 0",
+                    ));
+                }
+                config.presence_timeout_secs = Some(secs);
+            }
             "admin_email" => config.admin_email = non_empty(value),
             "mail_auth_code" => config.mail_auth_code = non_empty(value),
             "operators" => config.operators = parse_list(&value)?,
@@ -104,6 +137,16 @@ fn parse_config(text: &str) -> Result<CoordinationConfig, CoordinationTomlError>
 fn non_empty(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+fn parse_bool(value: &str, key: &str) -> Result<bool, CoordinationTomlError> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(CoordinationTomlError::new(format!(
+            "coordination.toml `{key}` must be true or false, got {other:?}"
+        ))),
+    }
 }
 
 fn parse_list(value: &str) -> Result<Vec<String>, CoordinationTomlError> {
@@ -291,6 +334,31 @@ mod tests {
         assert!(parse_config("listen = \"nope\"\n").is_err());
         assert!(parse_config("token_ttl_secs = 0\n").is_err());
         assert!(parse_config("operators = \"op1\"\n").is_err());
+        assert!(parse_config("relay = maybe\n").is_err());
+        assert!(parse_config("presence_timeout_secs = 0\n").is_err());
+    }
+
+    #[test]
+    fn relay_and_presence_config_defaults_and_parsing() {
+        let defaults = parse_config("").unwrap();
+        assert!(defaults.relay_enabled());
+        assert_eq!(
+            defaults.presence_timeout(),
+            std::time::Duration::from_secs(
+                crate::infra::coordination::presence::DEFAULT_PRESENCE_TIMEOUT_SECS
+            )
+        );
+
+        let config = parse_config(
+            "relay = false\nrelay_url = \"https://relay.example\"\npresence_timeout_secs = 90\n",
+        )
+        .unwrap();
+        assert!(!config.relay_enabled());
+        assert_eq!(config.relay_url.as_deref(), Some("https://relay.example"));
+        assert_eq!(
+            config.presence_timeout(),
+            std::time::Duration::from_secs(90)
+        );
     }
 
     #[test]

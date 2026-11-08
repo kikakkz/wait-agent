@@ -22,6 +22,17 @@ pub fn run(command: CoordinationCommand) -> Result<(), AppError> {
         CoordinationSubcommand::Requests { coordination } => {
             run_admin(&coordination, "{\"command\":\"requests\"}")
         }
+        CoordinationSubcommand::Presence { coordination } => {
+            run_admin(&coordination, "{\"command\":\"presence\"}")
+        }
+        CoordinationSubcommand::Heartbeat {
+            coordination,
+            every,
+        } => run_heartbeat(coordination.as_deref(), every),
+        CoordinationSubcommand::Resolve {
+            node_id,
+            coordination,
+        } => run_resolve(&node_id, &coordination),
         CoordinationSubcommand::Approve {
             request_id,
             coordination,
@@ -66,6 +77,7 @@ fn run_serve(listen: Option<String>, admin_stdout: bool) -> Result<(), AppError>
                 config,
                 stores,
                 admin_stdout,
+                relay_url: None,
             },
         ))
         .map_err(protocol_error)
@@ -88,6 +100,7 @@ fn run_enroll_request(coordination: &str) -> Result<(), AppError> {
         .block_on(round_trip(key, node_addr, NODE_ALPN, &frame))
         .map_err(protocol_error)?;
     print_response(&response)?;
+    save_announced_relay(&response);
     Ok(())
 }
 
@@ -109,10 +122,118 @@ fn run_join(link: &str, coordination: Option<&str>) -> Result<(), AppError> {
         "token": token,
     });
     let response = runtime()?
+        .block_on(round_trip(
+            key.clone(),
+            node_addr.clone(),
+            NODE_ALPN,
+            &frame,
+        ))
+        .map_err(protocol_error)?;
+    print_response(&response)?;
+    if response.get("ok") == Some(&serde_json::Value::Bool(true)) {
+        save_announced_relay(&response);
+        let relay = announced_or_saved_relay(&response);
+        if let Err(message) = heartbeat_round_trip(&key, node_addr, relay.as_deref()) {
+            eprintln!("post-join heartbeat failed: {message}");
+        }
+    }
+    Ok(())
+}
+
+fn run_resolve(node_id: &str, coordination: &str) -> Result<(), AppError> {
+    node_id
+        .parse::<iroh::PublicKey>()
+        .map_err(|error| protocol_error(format!("invalid node id {node_id:?}: {error}")))?;
+    let key_path = node_key_path();
+    let key = load_key_notice(&key_path, "node")?;
+    let node_addr = parse_coordination_addr(coordination).map_err(protocol_error)?;
+    let frame = serde_json::json!({
+        "command": "resolve",
+        "node_id": node_id,
+    });
+    let response = runtime()?
         .block_on(round_trip(key, node_addr, NODE_ALPN, &frame))
         .map_err(protocol_error)?;
     print_response(&response)?;
     Ok(())
+}
+
+fn run_heartbeat(coordination: Option<&str>, every: Option<u64>) -> Result<(), AppError> {
+    let interval = every.unwrap_or(0);
+    if every.is_some() && interval == 0 {
+        return Err(protocol_error("--every must be greater than 0".to_string()));
+    }
+    let key_path = node_key_path();
+    let key = load_key_notice(&key_path, "node")?;
+    let node_addr = match coordination {
+        Some(text) => parse_coordination_addr(text).map_err(protocol_error)?,
+        None => {
+            let saved = std::fs::read_to_string(saved_coordination_path())
+                .map_err(|_| protocol_error("no --coordination given and no saved coordination address; run enroll-request first".to_string()))?;
+            crate::infra::mesh_probe::parse_node_addr(&saved).map_err(protocol_error)?
+        }
+    };
+    let relay = load_saved_relay();
+    loop {
+        let response = heartbeat_round_trip(&key, node_addr.clone(), relay.as_deref())
+            .map_err(protocol_error)?;
+        print_response(&response)?;
+        if interval == 0 {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+    }
+}
+
+fn heartbeat_round_trip(
+    key: &iroh::SecretKey,
+    node_addr: iroh::EndpointAddr,
+    relay: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut addrs = Vec::new();
+    if let Some(url) = relay {
+        addrs
+            .push(iroh::TransportAddr::Relay(url.parse().map_err(
+                |error| format!("invalid relay url {url:?}: {error}"),
+            )?));
+    }
+    let addr = iroh::EndpointAddr::from_parts(key.public(), addrs);
+    let frame = serde_json::json!({
+        "command": "heartbeat",
+        "node_id": key.public().to_string(),
+        "addr": node_addr_string(&addr),
+    });
+    round_trip_blocking(key.clone(), node_addr, NODE_ALPN, &frame)
+}
+
+fn save_announced_relay(response: &serde_json::Value) {
+    let Some(url) = response
+        .get("relay_url")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    if let Err(error) = crate::infra::coordination::enrollment::write_private_file(
+        &saved_relay_path(),
+        url.as_bytes(),
+    ) {
+        eprintln!("could not save the announced relay url: {error}");
+    }
+}
+
+fn announced_or_saved_relay(response: &serde_json::Value) -> Option<String> {
+    response
+        .get("relay_url")
+        .and_then(serde_json::Value::as_str)
+        .map(|url| url.to_string())
+        .or_else(load_saved_relay)
+}
+
+fn load_saved_relay() -> Option<String> {
+    std::fs::read_to_string(saved_relay_path())
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn run_admin(coordination: &str, body: &str) -> Result<(), AppError> {
@@ -260,6 +381,10 @@ pub fn operator_key_path() -> PathBuf {
 
 fn saved_coordination_path() -> PathBuf {
     crate::host::ssh::remote_host_home::waitagent_home().join("coordination-server.json")
+}
+
+fn saved_relay_path() -> PathBuf {
+    crate::host::ssh::remote_host_home::waitagent_home().join("coordination-relay.json")
 }
 
 fn load_key_notice(path: &Path, role: &str) -> Result<SecretKey, AppError> {

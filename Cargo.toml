@@ -61,6 +61,7 @@ tower = "0.4"
 hyper-util = { version = "0.1", features = ["server", "service"] }
 hyper = "1"
 iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
+iroh-relay = { version = "1.4.1", default-features = false, features = ["server"] }
 unicode-width = "0.1.14"
 alacritty_terminal = "0.25"
 # MSYS2 runtime provisioning on Windows (download + sha256 + tar.xz unpack).
@@ -102,3 +103,4 @@ cc = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 protoc-bin-vendored = "3"
 tonic-build = "0.12"
+

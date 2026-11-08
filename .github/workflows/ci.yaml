@@ -177,6 +177,9 @@ jobs:
       - name: coordination e2e (loopback serve + enrollment flow)
         run: WA_E2E_BINARY=target/release/waitagent scripts/e2e/coordination/e2e-coordination.sh
 
+      - name: coordination relay/presence e2e (embedded relay + resolve + relay-only dial)
+        run: WA_E2E_BINARY=target/release/waitagent scripts/e2e/coordination/e2e-coordination-relay.sh
+
   # Install-source docker e2e (issue #168, AGENTS.md constraint #6): a real
   # sshd host on an internal docker network proves the LocalUpload install
   # source end to end (artifact upload over SSH exec, remote install, node
