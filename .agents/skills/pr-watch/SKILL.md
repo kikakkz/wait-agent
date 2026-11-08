@@ -14,10 +14,12 @@ stay explicit. See #60 for the acceptance contract.
 ## Division of labor
 
 - **The tool** (`.agents/tools/pr_watch.py`) observes and reports: required
-  checks per head SHA, review decisions, hand-in state. It never guesses at
-  fixes. Run it with `--once` for a single observation, or as a loop; it
-  exits (and prints a JSON report) the moment anything needs an agent:
-  failing checks, new changes-requested, merged, or handed-in state.
+  checks per head SHA, review decisions, hand-in state, and post-merge
+  cleanup targets (the merged report names the head branch and its local
+  worktree, if any). It never guesses at fixes. Run it with `--once` for
+  a single observation, or as a loop; it exits (and prints a JSON report)
+  the moment anything needs an agent: failing checks, new
+  changes-requested, merged, or handed-in state.
 - **The agent** triages each finding and fixes on-branch:
   - classify per repo convention: codified rule (`AGENTS.md`,
     `.agents/context/constraints.yaml`) / documented craft (skills) /
@@ -33,8 +35,9 @@ stay explicit. See #60 for the acceptance contract.
 - Follow-up commits on the SAME branch — never open a replacement PR,
   never rename the branch, never rebase or force-push an open PR (AGENTS.md
   collaboration protocol; squash cleans history at land time).
-- Every fix commit carries the attribution trailer (`Generated-by:` for
-  machine-led work); AI never signs `Signed-off-by:`.
+- Every fix commit carries DCO sign-off under the repository's configured
+  identity (`git commit -s`, per AGENTS.md constraint 3) plus the
+  attribution trailer (`Generated-by:` for machine-led work).
 - After pushing, run `pr_watch.py --once` again — the head SHA changed, so
   hand-in eligibility is re-evaluated from scratch.
 
@@ -48,7 +51,14 @@ enabled this enqueues, without it merges directly.
 
 ## Stop conditions
 
-1. PR merged — done; report the squash SHA to the issue.
+1. PR merged — run the post-merge cleanup, then report to the issue:
+   - remove the branch's dedicated worktree (`git worktree remove <path>`;
+     the merged report's `cleanup.worktree` names it, null when absent);
+   - delete the branch locally (`git branch -D <branch>`) and on the
+     remote (`git push origin --delete <branch>`);
+   - confirm the main worktree is checked out on `main` and clean
+     (AGENTS.md constraint 10) — report, never force, deviations;
+   - post the squash SHA and the cleanup result to the issue thread.
 2. Genuinely new changes-requested — stop, summarize findings to the user.
 3. User interrupt — always honored; state file keeps hand-in memory.
 
