@@ -401,4 +401,16 @@ mod tests {
             Some(&"./scripts/run_local.sh".to_string())
         );
     }
+
+    #[test]
+    fn primary_descends_through_windows_shell_to_exe_child() {
+        let mut tree =
+            SessionProcessTree::new(1, "bash.exe".to_string(), vec!["bash.exe".to_string()]);
+        tree.add_child(1, 10, "kimi.exe".to_string(), vec!["kimi.exe".to_string()]);
+
+        let primary = tree
+            .primary_process(None)
+            .expect("kimi child should surface");
+        assert_eq!(primary.command_name, "kimi");
+    }
 }

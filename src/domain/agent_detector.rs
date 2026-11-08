@@ -18,14 +18,16 @@ pub fn accepts_at_reference(command_name: &str) -> bool {
 }
 
 /// Returns the first whitespace-delimited token of an argv[0] string, after
-/// stripping any leading directory path.
-///
-/// Some programs (notably Chrome) embed spaces in argv[0] to encode a profile
-/// name together with flags, e.g. `google-chrome-replier --disable-gpu`. For
-/// command-name purposes only the leading executable token matters.
+/// stripping the leading directory path (both `/` and `\` separators) and a
+/// trailing Windows `.exe` suffix of any casing.
 pub(crate) fn first_argv_token(argv0: &str) -> &str {
-    let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    base.split_whitespace().next().unwrap_or(base)
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
+    let token = base.split_whitespace().next().unwrap_or(base);
+    if token.len() > 4 && token[token.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &token[..token.len() - 4]
+    } else {
+        token
+    }
 }
 
 /// Returns the script argument from a shell argv, if one exists.
@@ -537,5 +539,19 @@ mod tests {
         assert!(accepts_at_reference("codex"));
         assert!(!accepts_at_reference("bash"));
         assert!(!accepts_at_reference("python"));
+    }
+
+    #[test]
+    fn first_argv_token_normalizes_windows_exe_names() {
+        assert_eq!(
+            first_argv_token("C:\\Program Files\\Git\\bin\\bash.exe"),
+            "bash"
+        );
+        assert_eq!(first_argv_token("kimi.EXE"), "kimi");
+        assert_eq!(
+            first_argv_token("C:/Users/kk/AppData/Local/Programs/kimi/kimi-code.exe"),
+            "kimi-code"
+        );
+        assert_eq!(first_argv_token("powershell.exe"), "powershell");
     }
 }
