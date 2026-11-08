@@ -3,9 +3,11 @@ use std::ffi::OsString;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+pub mod coordination;
 pub mod relay;
 pub mod web;
 
+pub use coordination::{parse_coordination, CoordinationCommand, CoordinationSubcommand};
 pub use relay::{
     RelayInviteCommand, RelayJoinCommand, RelayJoinRequestCommand, RelayRemoveCommand,
     RelayServeCommand, RelayShutdownCommand, RelayStatusCommand,
@@ -186,6 +188,7 @@ pub enum Command {
     RelayStatus(RelayStatusCommand),
     RelayShutdown(RelayShutdownCommand),
     RelayInvite(RelayInviteCommand),
+    Coordination(CoordinationCommand),
     RelayJoin(RelayJoinCommand),
     RelayJoinRequest(RelayJoinRequestCommand),
     RelayRemove(RelayRemoveCommand),
@@ -361,6 +364,10 @@ impl Cli {
                 args.remove(0);
                 parse_no_args(args)?;
                 Command::ProvisionMsys
+            }
+            "coordination" => {
+                args.remove(0);
+                parse_coordination(args)?
             }
             "mesh-probe" => {
                 // Issue #224 slice 0 (spike): hidden evaluation harness,
@@ -622,6 +629,7 @@ fn help_text() -> String {
         "  waitagent relay join <address> <token> [--via-proxy]",
         "  waitagent relay join <address> --link <url-or-token>  (self-service, issue #208)",
         "  waitagent relay join-request <address>  (self-service enrollment request, issue #208)",
+        "  waitagent coordination <serve|enroll-request|join|requests|approve|revoke>",
         "  waitagent relay remove <fingerprint> [--listen <addr>]",
         "  waitagent relay status [--listen <addr>]",
         "  waitagent relay shutdown [--listen <addr>]",

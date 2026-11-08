@@ -150,6 +150,33 @@ jobs:
       - name: web e2e (loopback processes + stub SMTP)
         run: WA_E2E_BINARY=target/release/waitagent scripts/e2e/web/e2e-web.sh
 
+  # Coordination e2e (issue #236, AGENTS.md constraint #6): loopback-only
+  # enrollment flow — serve + enroll-request + admin-stdout magic link +
+  # approve + join + registry, plus the one-time token rule.
+  e2e-coordination:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison pkg-config libevent-dev libncurses-dev \
+            build-essential automake autoconf \
+            libdbus-1-dev libkeyutils-dev
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo build (release binary for the e2e)
+        run: cargo build --release
+
+      - name: coordination e2e (loopback serve + enrollment flow)
+        run: WA_E2E_BINARY=target/release/waitagent scripts/e2e/coordination/e2e-coordination.sh
+
   # Install-source docker e2e (issue #168, AGENTS.md constraint #6): a real
   # sshd host on an internal docker network proves the LocalUpload install
   # source end to end (artifact upload over SSH exec, remote install, node
