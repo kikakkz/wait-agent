@@ -28,7 +28,8 @@ Closes #
       is named `<type>/<issue>-<slug>` with the matching title type
 - [ ] CI added/updated in this PR for every code change (CI-first rule)
 - [ ] PR title is Conventional Commits format
-- [ ] DCO sign-off present on every commit (`git commit -s`); the human
-      operator signs for AI-assisted commits too, and AI contributions add
-      `Assisted-by:` / `Generated-by:`, never `Co-Authored-By:`
+- [ ] DCO sign-off present on every commit (`git commit -s`), including
+      agent-made commits under the standing instruction in AGENTS.md
+      constraint 3; AI contributions add `Assisted-by:` / `Generated-by:`,
+      never `Co-Authored-By:`
 - [ ] AGENTS.md updated if conventions changed

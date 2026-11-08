@@ -4,7 +4,8 @@
 # Policy (see AGENTS.md and .github/PULL_REQUEST_TEMPLATE.md):
 #   - Co-Authored-By is banned (it misattributes authorship and breaks DCO).
 #   - AI assistance is disclosed with Assisted-by: / Generated-by: trailers.
-#   - With --dco, every commit must carry Signed-off-by (human DCO).
+#   - With --dco, every commit must carry Signed-off-by (see the AGENTS.md
+#     attribution rule; agent-made commits sign under the repo identity).
 #
 # Usage: check-trailers.sh [--dco] [REV_RANGE]
 #   REV_RANGE defaults to HEAD.
