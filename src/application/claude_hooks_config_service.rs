@@ -1,3 +1,4 @@
+use crate::application::agent_hooks_config_service::agent_home;
 use crate::application::agent_hooks_config_service::AgentHooksConfigService;
 use std::path::PathBuf;
 
@@ -21,10 +22,12 @@ impl ClaudeHooksConfigService {
     }
 
     pub fn from_env(sender_path: PathBuf) -> Self {
-        let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
-            .unwrap_or_else(|| PathBuf::from(".claude"));
+        let claude_home = agent_home(
+            std::env::var_os("CLAUDE_CONFIG_DIR"),
+            std::env::var_os("HOME"),
+            std::env::var_os("USERPROFILE"),
+            ".claude",
+        );
         Self::new(claude_home, sender_path)
     }
 }

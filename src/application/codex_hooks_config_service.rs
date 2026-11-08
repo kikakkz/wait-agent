@@ -1,3 +1,4 @@
+use crate::application::agent_hooks_config_service::agent_home;
 use crate::application::agent_hooks_config_service::AgentHooksConfigService;
 use std::path::PathBuf;
 
@@ -18,10 +19,12 @@ impl CodexHooksConfigService {
     }
 
     pub fn from_env(sender_path: PathBuf) -> Self {
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-            .unwrap_or_else(|| PathBuf::from(".codex"));
+        let codex_home = agent_home(
+            std::env::var_os("CODEX_HOME"),
+            std::env::var_os("HOME"),
+            std::env::var_os("USERPROFILE"),
+            ".codex",
+        );
         Self::new(codex_home, sender_path)
     }
 }
