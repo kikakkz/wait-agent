@@ -44,6 +44,8 @@ impl fmt::Display for RemoteControlPlaneTransportError {
 
 impl std::error::Error for RemoteControlPlaneTransportError {}
 
+// Legacy placeholder: only constructed by not-yet-migrated wiring.
+#[allow(dead_code)]
 pub struct UnconfiguredRemoteControlPlaneSink;
 
 impl RemoteControlPlaneSink for UnconfiguredRemoteControlPlaneSink {

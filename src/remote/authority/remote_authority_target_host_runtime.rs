@@ -90,6 +90,8 @@ where
     }
 }
 
+// Legacy helper: only the legacy authority connection runtime consumed it.
+#[allow(dead_code)]
 #[cfg(unix)]
 pub(crate) fn wait_for_ready_socket(socket_path: &Path) -> Result<(), LifecycleError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

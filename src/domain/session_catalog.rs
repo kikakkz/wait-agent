@@ -115,11 +115,12 @@ impl ManagedSessionAddress {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ManagedSessionTaskState {
     Running,
     Input,
     Confirm,
+    #[default]
     Unknown,
 }
 
@@ -141,12 +142,6 @@ impl ManagedSessionTaskState {
             "unknown" => Some(Self::Unknown),
             _ => None,
         }
-    }
-}
-
-impl Default for ManagedSessionTaskState {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 

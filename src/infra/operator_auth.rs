@@ -49,13 +49,20 @@ pub trait OperatorKeyStore: Send + Sync {
     fn sign_challenge(&self, challenge: &[u8]) -> Result<(String, Vec<u8>), OperatorAuthError>;
 }
 
+// Used only by the keyring store, which `select_operator_key_store`
+// constructs on non-Linux hosts (Linux uses the file store).
+#[allow(dead_code)]
 const OPERATOR_KEYRING_SERVICE: &str = "waitagent";
+#[allow(dead_code)]
 const OPERATOR_KEYRING_ACCOUNT: &str = "operator.private_key";
 
-/// Operator key stored in the OS keyring.
+/// Operator key stored in the OS keyring. Constructed only on non-Linux
+/// hosts (`select_operator_key_store`); kept for Windows/macOS.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct KeyringOperatorKeyStore;
 
+#[allow(dead_code)]
 impl KeyringOperatorKeyStore {
     fn entry() -> Result<keyring::Entry, OperatorAuthError> {
         keyring::Entry::new(OPERATOR_KEYRING_SERVICE, OPERATOR_KEYRING_ACCOUNT)

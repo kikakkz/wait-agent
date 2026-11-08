@@ -426,7 +426,7 @@ async fn handle_open_stream(
     capacity: &RelayCapacityConfig,
     meter: &SharedUsageMeter,
 ) -> bool {
-    if stream_id % 2 == 0 {
+    if stream_id.is_multiple_of(2) {
         ERROR_LOG.log_error(format!(
             "[relay] ({node_id}): OpenStream with even (relay-initiated) stream id {stream_id}"
         ));

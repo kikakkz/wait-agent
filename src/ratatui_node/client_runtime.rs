@@ -2238,7 +2238,7 @@ fn render_session_row(
     width: usize,
     is_focused: bool,
     dim_background: bool,
-) -> Line {
+) -> Line<'_> {
     let marker = if is_selected {
         ">"
     } else if is_current {
@@ -2428,7 +2428,7 @@ fn render_footer_line(
     area_width: usize,
     sidebar_hidden: bool,
     dim_background: bool,
-) -> Line {
+) -> Line<'_> {
     let muted_style = dim_style(Style::default().fg(Color::Gray), dim_background);
     let accent_style = dim_style(Style::default().fg(Color::White), dim_background);
 

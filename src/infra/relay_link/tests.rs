@@ -437,7 +437,7 @@ async fn mtls_rejects_missing_client_cert() {
 async fn removed_fingerprint_fails_new_handshakes() {
     let client = TestNode::generate();
     let fingerprint = client.fingerprint();
-    let server = start_test_server(&[fingerprint.clone()]).await;
+    let server = start_test_server(std::slice::from_ref(&fingerprint)).await;
     let server_der = server_cert_der(&server.config);
 
     let first_link = open_node_link(server.server.local_addr(), &client, &server_der)

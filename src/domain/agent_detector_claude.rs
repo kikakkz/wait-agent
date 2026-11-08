@@ -154,6 +154,9 @@ fn notification_mentions_permission(payload: &Value) -> bool {
         || lowered.contains("allow")
 }
 
+// Kept for the detector's stability policy; no current caller after the
+// state-machine refactor (rust 1.91 dead_code reach).
+#[allow(dead_code)]
 fn claude_has_stable_input_prompt(pane_text: &str) -> bool {
     let lines = pane_text
         .lines()

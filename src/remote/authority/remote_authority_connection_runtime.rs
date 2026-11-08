@@ -1,4 +1,6 @@
 // Legacy tmux-era authority connection runtime kept during the ratatui migration; most items are currently unused.
+// Rust 1.91's dead_code rework flags every retained item on Linux builds; the module is transitional by design.
+#![allow(dead_code)]
 
 #[cfg(unix)]
 use crate::infra::remote_protocol::RawPtyInputPayload;

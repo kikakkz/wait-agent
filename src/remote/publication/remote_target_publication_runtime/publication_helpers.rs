@@ -1152,6 +1152,8 @@ pub(crate) fn published_remote_target_record_from_payload(
     })
 }
 
+// Legacy runtime consumers; kept for the migration window.
+#[allow(dead_code)]
 #[cfg(unix)]
 pub(crate) fn signal_publication_sender_live_session_registered(
     socket_name: &str,
@@ -1171,6 +1173,7 @@ pub(crate) fn signal_publication_sender_live_session_registered(
     )
 }
 
+#[allow(dead_code)]
 #[cfg(unix)]
 pub(crate) fn signal_publication_sender_live_session_unregistered(
     socket_name: &str,

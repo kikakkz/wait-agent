@@ -235,7 +235,7 @@ fn read_text_powershell() -> Result<String, String> {
 }
 
 fn decode_utf16le(bytes: &[u8]) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("UTF-16-LE data has odd byte length".to_string());
     }
     let u16s: Vec<u16> = bytes
@@ -246,7 +246,7 @@ fn decode_utf16le(bytes: &[u8]) -> Result<String, String> {
 }
 
 fn decode_utf16be(bytes: &[u8]) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("UTF-16-BE data has odd byte length".to_string());
     }
     let u16s: Vec<u16> = bytes

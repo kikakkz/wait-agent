@@ -57,7 +57,9 @@ pub fn write_registration_frame(
     Ok(())
 }
 
-// Only the Unix authority connection runtime consumes registration frames.
+// Only the Unix authority connection runtime consumes registration frames;
+// that runtime is legacy, so the reader is unused on current Linux builds.
+#[allow(dead_code)]
 #[cfg(unix)]
 pub fn read_registration_frame(
     reader: &mut impl Read,
