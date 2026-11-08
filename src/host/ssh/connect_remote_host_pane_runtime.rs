@@ -7198,6 +7198,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn default_key_path_skips_unreadable_keys() {
         let dir = unique_test_dir("default-unreadable");
