@@ -8047,7 +8047,7 @@ mod tests {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = state.proxy_selection_index();
-        state.proxy_draft.https_proxy = "ab好d".to_string();
+        state.proxy_draft.https_proxy = "abéd".to_string();
         state.set_focus(Focus::HttpsProxy);
 
         state.apply_key(KeyEvent::from(KeyCode::Left));
@@ -8056,14 +8056,14 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Char('c'))),
             PaneAction::None
         );
-        assert_eq!(state.proxy_draft.https_proxy, "ab好cd");
+        assert_eq!(state.proxy_draft.https_proxy, "abécd");
         assert_eq!(state.edit_cursor, 4);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
             PaneAction::None
         );
-        assert_eq!(state.proxy_draft.https_proxy, "ab好d");
+        assert_eq!(state.proxy_draft.https_proxy, "abéd");
         assert_eq!(state.edit_cursor, 3);
     }
 

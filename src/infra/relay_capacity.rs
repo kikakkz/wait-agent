@@ -1,10 +1,10 @@
 //! Relay capacity model and admission control, per docs/relay-design.md
-//! 容量评估与准入控制. The connection table and routing table are the live
+//! Capacity Modeling and Admission Control. The connection table and routing table are the live
 //! usage; throughput is metered on the routing path; admission decisions
-//! (`接入决策 = capacity − usage`) happen at register and open_stream. The
+//! (`admission decision = capacity − usage`) happen at register and open_stream. The
 //! phase-2 cluster scheduler consumes exactly this shape.
 //!
-//! Defaults are conservative and provisional (压测标定后再修订); relay.toml
+//! Defaults are conservative and provisional (revised after load-test calibration); relay.toml
 //! wiring lands with the config-surface slice.
 
 use std::sync::atomic::{AtomicU64, Ordering};

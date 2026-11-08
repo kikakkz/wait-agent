@@ -1,358 +1,473 @@
-# Relay 功能设计
+# Relay Feature Design
 
-跨地点主机互连。地点 1 的 node 主动 outbound 连接一台公网可达的 relay；
-地点 2 的 node 同样连接 relay，并通过 relay 与地点 1 的 node 建立 session，
-体验与今天的直连完全一致。直连方式继续保留，未配置 relay 时行为与现状完全一致。
+Interconnecting hosts across locations. A site-1 node actively makes an
+outbound connection to a publicly reachable relay; a site-2 node likewise
+connects to the relay and establishes a session with the site-1 node through
+the relay, with an experience fully identical to today's direct connection.
+The direct-connection path is kept; when no relay is configured, behavior is
+fully identical to the status quo.
 
-## 目标与非目标
+## Goals and Non-Goals
 
-目标：
+Goals:
 
-- 定位：self-hosted。名称就叫 relay；公共云版本另行命名与设计
-  （随计费另行展开）。
-- Phase 1（本文）：CS 星型拓扑。所有 node 与 relay 保持一条 TLS 长连接，
-  跨 node 流量在该连接上以 stream 多路复用。
-- 数据策略：relay 只转发，不持久化任何会话或流量数据；磁盘状态仅
-  relay.toml、白名单目录、token 生成参数。流量只在内存中经帧头路由。
-- 单机容量模型：可标定、可配置、可观测的准入控制，作为将来集群
-  调度器的输入。
-- 管理面：WebUI 是日常管理面（连接表、usage、invite、在线状态、
-  浏览器内 coding）；CLI 收敛为 bootstrap 最小集（serve、join、
-  一行安装命令）。
-- 复用现有 node↔node 协议：之上的 TLS、AuthorityTransport、ControlPlane、
-  session 机制（OpenMirror/RawPty/Resize/bootstrap）一律不动。
-- 双向身份认证：relay 只接受自己的 node，node 只连自己的 relay。
-- 为将来云端计费预留扩展位（API key + 订阅档位），Phase 1 不实现计费。
+- Positioning: self-hosted. The name is simply relay; the public-cloud
+  version gets its own naming and design (covered separately alongside
+  billing).
+- Phase 1 (this document): client-server star topology. Every node keeps one
+  long-lived TLS connection to the relay, and cross-node traffic is
+  multiplexed on that connection as streams.
+- Data policy: the relay only forwards; it persists no session or traffic
+  data; on-disk state is limited to relay.toml, the whitelist directory, and
+  token-generation parameters. Traffic is routed in memory by frame headers
+  only.
+- Single-machine capacity model: calibratable, configurable, observable
+  admission control, serving as input for a future cluster scheduler.
+- Management plane: the WebUI is the everyday management plane (connection
+  table, usage, invite, online status, in-browser coding); the CLI is reduced
+  to a minimal bootstrap set (serve, join, one-line install command).
+- Reuse the existing node↔node protocol: the TLS on top of it,
+  AuthorityTransport, ControlPlane, and the session machinery
+  (OpenMirror/RawPty/Resize/bootstrap) are all left untouched.
+- Mutual authentication: the relay only accepts its own nodes; a node only
+  connects to its own relay.
+- Reserve extension points for future cloud billing (API key + subscription
+  tiers); Phase 1 does not implement billing.
 
-非目标：
+Non-goals:
 
-- NAT 穿透 / P2P（Phase 2，仅替换传输腿，mux 与协议层复用）。
-- 跨账户互访授权。不同账户的 node 经由 relay 是完全独立的，不存在互信，
-  也不需要配对机制。公共 relay 集群的跨账户问题随计费功能另行设计。
-- 会话数据持久化 / 录制 / 审计落盘（relay 不做，见数据策略）。
-- WebUI 的浏览器端 E2E（self-hosted 形态下 web 服务可见流量，
-  等同人坐在该机器前；公共云形态再升级，见计费扩展位）。
+- NAT traversal / P2P (Phase 2; only the transport leg is replaced, the mux
+  and protocol layers are reused).
+- Cross-account access authorization. Nodes of different accounts are fully
+  independent through the relay: there is no mutual trust and no pairing
+  mechanism is needed. Cross-account concerns for public relay clusters are
+  designed separately alongside billing.
+- Session-data persistence / recording / audit to disk (the relay does none
+  of these; see data policy).
+- Browser-side E2E for the WebUI (in the self-hosted form the web service
+  sees traffic, equivalent to a person sitting in front of that machine; the
+  public-cloud form upgrades this further — see the billing extension
+  points).
 
-## 架构
-
-```
-site1 node ══TLS 长连接══╗                 ╔══TLS 长连接══ site 2 node
-site3 node ══TLS 长连接══╣═══ relay hub ═══╣══TLS 长连接══ site 4 node
-                         ╚═════════════════╝
-```
-
-- 每个 node 启动后向 relay 建一条持久连接：认证 + 注册 node_id、心跳、
-  承载所有跨 node 流量。断线由 node 侧重连重注册（复用现有 reconnect
-  worker 模式）。
-- site2 连接 site1 = 在两条长连接上开一条虚拟流：site2 发送
-  `open_stream(target_node_id)`，relay 路由，两端得到一对全双工、有序、
-  可靠的 byte stream —— 与一条 TCP 语义相同。
-- 集成 seam：把现有"node 拨 node"的 TCP 建立路径抽象为 `PeerConnection`
-  （有序可靠全双工 byte 流）。直连 TCP 是一个实现；relay stream 是另一个
-  实现。现有协议代码运行在 seam 之上，不感知传输方式。
-
-## 协议分层
+## Architecture
 
 ```
-现有会话协议（AuthorityTransport / ControlPlane / ClientHello...）   不动
-node↔node TLS（现有 rustls 双向自签证书，E2E 加密）                  不动
+site1 node ══TLS long conn══╗                 ╔══TLS long conn══ site 2 node
+site3 node ══TLS long conn══╣═══ relay hub ═══╣══TLS long conn══ site 4 node
+                            ╚════════════════╝
+```
+
+- After startup, each node establishes one persistent connection to the
+  relay: authentication + registering node_id, heartbeats, and carrying all
+  cross-node traffic. Disconnects are handled by the node side reconnecting
+  and re-registering (reusing the existing reconnect worker pattern).
+- site2 connecting to site1 = opening one virtual stream over the two
+  long-lived connections: site2 sends
+  `open_stream(target_node_id)`, the relay routes it, and both ends get a
+  pair of full-duplex, ordered, reliable byte streams — the same semantics
+  as a TCP connection.
+- Integration seam: abstract the existing "node dials node" TCP
+  establishment path into `PeerConnection` (an ordered, reliable,
+  full-duplex byte stream). Direct TCP is one implementation; a relay stream
+  is another. The existing protocol code runs on top of the seam and is
+  unaware of the transport.
+
+## Protocol Layers
+
+```
+Existing session protocol (AuthorityTransport / ControlPlane / ClientHello...)   unchanged
+node↔node TLS (existing rustls mutual self-signed certs, E2E encryption)         unchanged
 ────────────────────────────────────────────────────────────
-mux 帧层：stream open / close / data / window（逐流背压）
-relay 控制帧：register / unregister / open_stream / close_stream /
-             error(结构化原因码) / heartbeat
-node↔relay 外层连接：TLS + 心跳
+mux frame layer: stream open / close / data / window (per-stream backpressure)
+relay control frames: register / unregister / open_stream / close_stream /
+             error (structured reason code) / heartbeat
+node↔relay outer connection: TLS + heartbeat
 ────────────────────────────────────────────────────────────
-relay hub：连接表（node_id → 连接）、流路由、公平调度、逐流窗口
+relay hub: connection table (node_id → connection), stream routing, fair scheduling, per-stream windows
 ```
 
-relay 只解外层 TLS 和 mux 帧头用于路由；node 间内容仍是内层 E2E TLS
-密文，relay 不可信也成立。
+The relay only terminates the outer TLS and parses mux frame headers for
+routing; the content between nodes remains the inner E2E TLS ciphertext, so
+the design holds even with an untrusted relay.
 
-## 身份认证与入网（已定案：邀请制）
+## Authentication and Enrollment (decided: invite-based)
 
-设备身份 = node 自签证书（`~/.waitagent/node.crt`）的 SHA-256 SPKI 指纹，
-复用 `src/infra/node_credentials.rs` 的既有机制。无 CA。
+Device identity = the SHA-256 SPKI fingerprint of the node's self-signed
+certificate (`~/.waitagent/node.crt`), reusing the existing mechanism in
+`src/infra/node_credentials.rs`. No CA.
 
-- node → relay：relay 持独立自签证书；node 在 `~/.waitagent/relay.toml`
-  钉扎 relay 指纹，TLS 校验"对端指纹 == 配置值"，不匹配即断连。
-- relay → node：relay 维护 `authorized_nodes/` 白名单目录
-  （照 `authorized_operators/` 模式）；mTLS 握手要求 client 证书，
-  指纹不在白名单即拒绝，拒绝发生在传输层。
+- node → relay: the relay holds a separate self-signed certificate; the node
+  pins the relay fingerprint in `~/.waitagent/relay.toml`, and TLS verifies
+  "peer fingerprint == configured value", dropping the connection on
+  mismatch.
+- relay → node: the relay maintains the `authorized_nodes/` whitelist
+  directory (following the `authorized_operators/` pattern); the mTLS
+  handshake requires a client certificate, and a fingerprint not in the
+  whitelist is rejected — the rejection happens at the transport layer.
 
-入网流程（`waitagent relay invite` / `waitagent relay join`）：
+Enrollment flow (`waitagent relay invite` / `waitagent relay join`):
 
-1. 在 relay 侧（或任一已信任 node）执行 `waitagent relay invite`，生成
-   一次性、短时有效的邀请 token，自动复制到剪贴板；批量装机可用长期
-   部署 token。
-2. 在新 node 执行 `waitagent relay join <relay地址> <token>`：
-   - token 认证入网会话，无 token 者无法建立会话（无 MitM 窗口）；
-   - 会话建立后 relay 通过该已认证通道下发自己的证书指纹，node 自动
-     写入 `relay.toml`；
-   - relay 同时把该 node 的证书指纹自动加入白名单。
-   - 双向绑定一次完成，全程无需手工抄写指纹。
+1. On the relay side (or any already-trusted node), run
+   `waitagent relay invite`, which generates a one-time, short-lived
+   invitation token and copies it to the clipboard automatically; for mass
+   provisioning, a long-term deployment token can be used.
+2. On the new node, run `waitagent relay join <relay-address> <token>`:
+   - The token authenticates the enrollment session; without a token no
+     session can be established (no MitM window).
+   - Once the session is established, the relay delivers its own certificate
+     fingerprint over that authenticated channel, and the node writes it to
+     `relay.toml` automatically.
+   - The relay also automatically adds the node's certificate fingerprint to
+     the whitelist.
+   - Mutual binding completes in one pass; no fingerprint needs to be copied
+     by hand at any point.
 
-自助入网（issue #208，与 dashboard magic-link 同机制）：
+Self-service enrollment (issue #208, same mechanism as the dashboard magic
+link):
 
-1. 申请人在发起设备执行 `waitagent relay join-request <relay:port>`：
-   无需任何凭证，CLI 以 node 凭证指纹（SPKI SHA-256，本机稳定可重算）
-   向 relay 的 dashboard 公开路由 `POST /auth/join-request`；
-2. relay 用与 dashboard 登录完全相同的 SMTP/JWT 设施给管理员邮箱发信
-   （subject 区分两种流程；`sub = "enroll-magic"`，10 分钟有效，jti
-   一次性，AuthStores 同窗口限速 3 次/10 分钟）；未配 mail 时给出可操
-   作报错并指向 `relay invite` 路径；
-3. 管理员把邮件转发给申请人 = 审批（无单独批准 UI）；
-4. 申请人在同一设备执行
-   `waitagent relay join <relay> --link <邮件中的 URL 或裸 token>`：
-   CLI 以重算的指纹 `POST /auth/enroll`，服务端校验 sub/exp、比对设备
-   指纹、消费 jti 后，经 dashboard 同款 admin-socket Invite 通道铸一次性
-   enroll token 返回；CLI 随后走现有 Enroll 协议（#209 双路协商）完成
-   入网与 pin——Enroll wire 协议零改动。两条 HTTPS 腿与 join 一致走激
-   活 proxy profile。
+1. The requester runs `waitagent relay join-request <relay:port>` on the
+   initiating device: without any credential, the CLI posts the node
+   credential fingerprint (SPKI SHA-256, stably recomputable on the machine)
+   to the relay's dashboard public route `POST /auth/join-request`.
+2. The relay emails the administrator using exactly the same SMTP/JWT
+   facilities as dashboard login (the subject distinguishes the two flows;
+   `sub = "enroll-magic"`, valid for 10 minutes, single-use jti, AuthStores
+   rate limit of 3 per 10-minute window); when mail is not configured, it
+   gives an actionable error and points to the `relay invite` path.
+3. The administrator forwarding the email to the requester constitutes
+   approval (no separate approval UI).
+4. The requester runs on the same device
+   `waitagent relay join <relay> --link <URL from the email or bare token>`:
+   the CLI recomputes the fingerprint and calls `POST /auth/enroll`; the
+   server validates sub/exp, compares the device fingerprint, and consumes
+   the jti, then mints a one-time enroll token via the same admin-socket
+   Invite channel as the dashboard and returns it; the CLI then completes
+   enrollment and pinning via the existing Enroll protocol (#209 dual-path
+   negotiation) — zero changes to the Enroll wire protocol. Both HTTPS legs,
+   consistent with join, go through the activated proxy profile.
 
-### 单端口 ALPN 分流（issue #209）
+### Single-Port ALPN Demultiplexing (issue #209)
 
-relay 只用一个对外端口同时承载三类流量，按 ClientHello 的 ALPN 在
-TLS 握手前分流（`LazyConfigAcceptor` peek ClientHello → 选 ServerConfig
-与处理器）：
+The relay serves three traffic classes on a single public port,
+demultiplexing by the ClientHello ALPN before the TLS handshake
+(`LazyConfigAcceptor` peeks the ClientHello → selects the ServerConfig and
+handler):
 
-| ALPN | 流量 | 客户端认证 | 处理器 |
+| ALPN | Traffic | Client auth | Handler |
 |---|---|---|---|
-| 无 / 其他 | node link（向后兼容） | 白名单 mTLS | 现有 register/heartbeat 生命周期 |
-| `waitagent-enroll` | 入网 enroll | 任意 client 证书（token 才是授权） | 现有 Enroll 帧协议 |
-| `h2` / `http/1.1` | dashboard Web | 无 client 证书 | axum app（`relay serve --web` 发布） |
+| none / other | node link (backward compatible) | whitelist mTLS | existing register/heartbeat lifecycle |
+| `waitagent-enroll` | enrollment | any client cert (the token is the authorization) | existing Enroll frame protocol |
+| `h2` / `http/1.1` | dashboard Web | no client cert | axum app (served by `relay serve --web`) |
 
-- link 客户端不发 ALPN，"无 ALPN → link" 保证了旧 node 零改动兼容。
-- join 双路协商：新 relay 上第一跳直接成功；旧 relay（主端口白名单
-  拒绝未注册证书）第一跳 TLS 失败，自动回退 `port + 1` 遗留 enroll
-  监听。仅 TLS 层失败回退；握手成功后的协议层错误（token 拒绝等）
-  原样上报。错误信息写明两条路径都已尝试。
-- dashboard 走自签证书，浏览器访问 `https://relay:7475/` 有证书告警
-  （#131 已接受）；经 TLS 服务的会话 cookie 带 `Secure` 属性，遗留
-  HTTP 监听不加。
-- **废弃窗口**：`port + 1` enroll 监听默认仍开，relay.toml 的
-  `legacy_enroll_listener = false` 或 CLI `--no-legacy-enroll` 关闭；
-  独立 HTTP web 监听（8788）维持现状，启动日志带 deprecated 提示。
-  窗口期后两者下线。
+- link clients send no ALPN; "no ALPN → link" guarantees zero-change
+  compatibility with old nodes.
+- join dual-path negotiation: on a new relay the first hop succeeds
+  directly; on an old relay (whose main port whitelist-rejects unregistered
+  certificates) the first hop fails at TLS and automatically falls back to
+  the legacy enroll listener on `port + 1`. Fallback happens only on
+  TLS-layer failure; protocol-layer errors after a successful handshake
+  (token rejection, etc.) are reported as-is. The error message states that
+  both paths were tried.
+- The dashboard uses a self-signed certificate, so browsers show a
+  certificate warning on `https://relay:7475/` (accepted in #131); session
+  cookies served over TLS carry the `Secure` attribute, and the legacy HTTP
+  listener does not add it.
+- **Deprecation window**: the `port + 1` enroll listener stays on by default
+  and can be disabled via `legacy_enroll_listener = false` in relay.toml or
+  the CLI `--no-legacy-enroll`; the standalone HTTP web listener (8788) stays
+  as-is, with a deprecation notice in the startup log. Both are removed after
+  the window.
 
-## node 生命周期
+## Node Lifecycle
 
-- 入网：join 后指纹写入 `authorized_nodes/` 白名单；node register 建立
-  长连接，relay 连接表登记 `node_id → 连接`。
-- 心跳：node 每 10 秒一帧；relay 连续 3 次未收到（30s）判定离线，清理
-  连接表、释放容量。node 断线由侧重连重注册（复用现有 reconnect worker
-  模式）。间隔与阈值可在 relay.toml 调整，默认值如上。
-- 主动下线：node 发 unregister 控制帧优雅关闭。
-- 吊销：`relay remove <fingerprint>` 从白名单删除该 node 并断开其在线
-  连接；被吊销 node 后续 register 在传输层即失败（mTLS 指纹校验不在
-  白名单）。
-- 在线状态：register / unregister / 心跳超时事件经结构化通道推送到
-  关注方的 console —— remote-hosts 条目的 sidebar 状态与 status line
-  展示对端 node 在线 / 离线（与错误语义同一通道；interest 在 register
-  声明 remote-hosts 或 open_stream 指向该 target 时建立）。
+- Enrollment: after join, the fingerprint is written to the
+  `authorized_nodes/` whitelist; the node registers and establishes the
+  long-lived connection, and the relay's connection table records
+  `node_id → connection`.
+- Heartbeat: the node sends one frame every 10 seconds; if the relay misses
+  3 in a row (30s), it deems the node offline, cleans up the connection
+  table, and releases capacity. A disconnected node reconnects and
+  re-registers from its own side (reusing the existing reconnect worker
+  pattern). Intervals and thresholds can be tuned in relay.toml; the
+  defaults are as above.
+- Voluntary offline: the node sends an unregister control frame for a
+  graceful shutdown.
+- Revocation: `relay remove <fingerprint>` deletes the node from the
+  whitelist and drops its online connection; a revoked node's subsequent
+  register fails at the transport layer (the mTLS fingerprint check finds it
+  not in the whitelist).
+- Online status: register / unregister / heartbeat-timeout events are pushed
+  over a structured channel to interested parties' consoles — the sidebar
+  status of the remote-hosts entry and the status line show the peer node
+  online / offline (same channel as the error semantics; interest is
+  established when register declares remote-hosts or open_stream targets
+  that node).
 
-## 管理通道（WebUI / CLI ↔ relay）
+## Management Channel (WebUI / CLI ↔ relay)
 
-- relay 守护进程由 `waitagent relay serve` 启动（hub：监听、连接表、
-  路由、心跳、容量准入）。
-- **WebUI 是日常管理面**。web 服务是一个特殊 node：持有自己证书、经
-  标准 register 入网，管理操作（连接表、usage/capacity、invite、remove、
-  在线状态）经它的已认证 node↔relay 长连接以远端控制流送达 relay；
-  浏览器 terminal 同样复用现有 ControlPlane（OpenMirror/RawPty/Resize）
-  作为又一个 observer 参与者接入各 node 的 session。
-- 部署形态：web 服务与 relay 同机、一体启动（`relay serve --web` 拉起 web
-  面，fail-stop 单 Lifetime：任一半退出则整进程退出），同仓库同二进制；
-  两进程经 loopback 走标准 node↔relay 协议，不开"同进程走内存"的特例
-  路径（本地跳微秒级，相对广域网可忽略；单一协议路径被所有 node 共同
-  dogfood；故障域与部署拓扑保持解耦，压测有实测依据后再评估内存捷径）。
-- **CLI 收敛为 bootstrap 最小集**：`relay serve`、`relay join`，以及
-  供批量装机的一行安装命令（WebUI 生成 token → node 上 paste 执行）。
-- relay-role bootstrap（Install as relay）的幂等探针在 admin socket 之外
-  加**版本闸**（issue #215）：探针通过后以 `relay status` 读运行中 relay
-  的版本，缺失（旧 relay 的 status 无 version 字段）或与当前二进制不符时
-  先 `relay shutdown` 等 socket 消失、再用当前二进制 `relay serve` 重启；
-  版本相符才原样保留。旧进程没有单端口 ALPN 分流，link handler 会把
-  Enroll 帧掐断（"truncated frame header or payload"），不能误留。
-- 本机 admin socket（照 `remote_node_ingress_owner_socket_path` 的
-  owner-control socket 模式；Windows 用等价命名管道 / `.port` marker）
-  保留为 bootstrap 与应急通道，日常管理不经过它。CLI 连不上运行中的
-  relay 时明确报错引导，不隐式启动。
-- 权限边界：self-hosted 单管理员形态，WebUI 可达即可管理（等同拥有
-  该机器）；吊销（remove）在 WebUI 执行，不经远端 node 控制流。
-  多账户/细粒度授权随公共云另行设计。
+- The relay daemon is started by `waitagent relay serve` (the hub:
+  listening, connection table, routing, heartbeats, capacity admission).
+- **The WebUI is the everyday management plane.** The web service is a
+  special node: it holds its own certificate and enrolls via the standard
+  register; management operations (connection table, usage/capacity, invite,
+  remove, online status) reach the relay as remote control streams over its
+  authenticated node↔relay long-lived connection; the in-browser terminal
+  likewise reuses the existing ControlPlane (OpenMirror/RawPty/Resize) to
+  join each node's session as one more observer participant.
+- Deployment form: the web service runs on the same machine as the relay and
+  starts as one (`relay serve --web` brings up the web plane; fail-stop
+  single Lifetime: if either half exits, the whole process exits), same
+  repo, same binary; the two processes talk over loopback using the standard
+  node↔relay protocol, with no special-case "in-process over memory" path
+  (the local hop is microseconds, negligible against the WAN; the single
+  protocol path is dogfooded by all nodes; the failure domain stays decoupled
+  from the deployment topology, and an in-memory shortcut is reconsidered
+  only once load tests provide measured evidence).
+- **The CLI is reduced to a minimal bootstrap set**: `relay serve`,
+  `relay join`, plus a one-line install command for mass provisioning (the
+  WebUI generates a token → paste and run it on the node).
+- The relay-role bootstrap (Install as relay) idempotency probe gains a
+  **version gate** in addition to the admin socket (issue #215): after the
+  probe passes, it reads the running relay's version via `relay status`; if
+  the version is missing (an old relay's status has no version field) or
+  does not match the current binary, it first runs `relay shutdown`, waits
+  for the socket to disappear, and then restarts with `relay serve` from the
+  current binary; only a matching version is kept as-is. An old process lacks
+  single-port ALPN demultiplexing, and its link handler would cut Enroll
+  frames short ("truncated frame header or payload"), so it must not be left
+  in place by mistake.
+- The local admin socket (following the owner-control socket pattern of
+  `remote_node_ingress_owner_socket_path`; Windows uses an equivalent named
+  pipe / `.port` marker) is kept as a bootstrap and emergency channel;
+  everyday management does not go through it. When the CLI cannot connect to
+  a running relay, it reports a clear, guiding error and does not start one
+  implicitly.
+- Permission boundary: self-hosted single-administrator form — if the WebUI
+  is reachable, it can be managed (equivalent to owning the machine);
+  revocation (remove) is performed in the WebUI, not via a remote node
+  control stream. Multi-account / fine-grained authorization is designed
+  separately with the public cloud.
 
-## node_id 策略
+## node_id Strategy
 
-- 协议中 node_id 保持 opaque String，不改协议。
-- 直连模式：沿用现有 `host#port`。
-- relay 模式：node_id 直接用证书指纹（或短形式），自证明全局唯一，
-  无需注册表。
+- In the protocol, node_id remains an opaque String; the protocol is not
+  changed.
+- Direct mode: keep the existing `host#port`.
+- Relay mode: node_id is the certificate fingerprint directly (or a short
+  form), self-proving globally unique, no registry needed.
 
-## 计费扩展位（Phase 1 只留 seam，不实现）
+## Billing Extension Points (Phase 1 leaves the seam only; not implemented)
 
-- register 的 auth 块带版本号；认证后端可插拔：私有模式 = 白名单
-  （本地 Authenticator），云模式 = API key（Cloud Authenticator 调控制面）。
-- `open_stream` 过一道 Policy hook：私有模式 = allowlist；云模式 =
-  额度校验（按账户并发对端数）+ 拒绝时返回结构化原因码。
-- relay 集群不同步依赖计费服务：key 换签名、短 TTL 的额度凭证（JWT 风
-  格），之后校验全部本地完成；计量异步批量上报。
-- 公共 relay 形态：relay 用真实域名 + 公网 CA 证书（WebPKI 验域名），
-  指纹钉扎仅保留给自有部署。
+- The auth block of register carries a version number; the authentication
+  backend is pluggable: private mode = whitelist (local Authenticator),
+  cloud mode = API key (Cloud Authenticator calling the control plane).
+- `open_stream` passes through a Policy hook: private mode = allowlist;
+  cloud mode = quota check (concurrent peer count per account) + a
+  structured reason code on rejection.
+- The relay cluster does not take a synchronous dependency on the billing
+  service: quota credentials with short TTLs signed via key rotation
+  (JWT-style) are validated entirely locally afterwards; metering is
+  reported asynchronously in batches.
+- Public relay form: the relay uses a real domain name + a public-CA
+  certificate (WebPKI validates the domain); fingerprint pinning is kept only
+  for self-owned deployments.
 
-## 容量评估与准入控制
+## Capacity Modeling and Admission Control
 
-定位：Phase 1 单机 relay 就要有**可标定、可配置、可观测**的容量模型。
-它是将来集群调度的输入 —— 调度器按
-`接入决策 = capacity(能力评估) − usage(当前使用)` 分配 node 到 relay。
+Positioning: a Phase 1 single-machine relay must already have a
+**calibratable, configurable, observable** capacity model. It is the input
+for future cluster scheduling — the scheduler assigns nodes to relays by
+`admission decision = capacity (capability estimate) − usage (current use)`.
 
-容量维度（单机，全部可在 relay.toml 覆盖）：
+Capacity dimensions (single machine, all overridable in relay.toml):
 
-- `max_nodes`：最大并发 node 长连接数。
-- `max_streams`：最大并发 stream 数。
-- 转发吞吐保护阈值（bytes/s）：超限时拒绝新 open_stream（保守策略，
-  压测标定后再评估是否改为收紧窗口降级）。
-- 资源基线：每连接 / 每流内存与 CPU 开销随版本发布给出实测值，
-  部署者按自机实测覆盖默认值。
+- `max_nodes`: maximum number of concurrent node long-lived connections.
+- `max_streams`: maximum number of concurrent streams.
+- Forwarding throughput guard threshold (bytes/s): when exceeded, new
+  open_streams are rejected (conservative policy; reevaluate after load-test
+  calibration whether to change to window-tightening degradation).
+- Resource baseline: per-connection / per-stream memory and CPU costs are
+  published as measured values with each release, and deployers override the
+  defaults with measurements from their own machines.
 
-计量与准入：
+Metering and admission:
 
-- relay hub 的连接表 / 流表本身就是实时 usage（活跃连接数、活跃流数、
-  逐流窗口占用、转发字节率），计量在路由路径上完成，不另建指标系统。
-- register 超 `max_nodes` → 结构化拒绝；open_stream 超 `max_streams`
-  → 结构化拒绝（挂在已定案的 Policy hook 上）。
-- 心跳超时回收连接即释放容量，node 重连重注册重新准入。
+- The relay hub's connection table / stream table is itself real-time usage
+  (active connection count, active stream count, per-stream window
+  occupancy, forwarding byte rate); metering happens on the routing path
+  with no separate metrics system.
+- register over `max_nodes` → structured rejection; open_stream over
+  `max_streams` → structured rejection (hooked on the decided Policy hook).
+- A connection reclaimed on heartbeat timeout releases capacity immediately;
+  a node reconnects and re-registers for fresh admission.
 
-标定方法：e2e 压测（docker 网络隔离，见任务拆分测试项）扫描连接数 /
-流数 / 吞吐拐点，产出推荐默认值；默认值保守发布，实测后修订。
+Calibration method: e2e load tests (docker network isolation; see the
+task-breakdown test items) scan the knee points of connection count / stream
+count / throughput and produce recommended defaults; defaults are published
+conservatively and revised after measurement.
 
-可观测性：relay 子命令展示 capacity 与 usage；node 侧 register /
-open_stream 被拒时拿到结构化原因码，经已定案错误通道展示到 console。
+Observability: a relay subcommand shows capacity and usage; when a node's
+register / open_stream is rejected, it receives a structured reason code,
+shown in the console via the decided error channel.
 
-## 错误语义（quota/key/设备解绑等）
+## Error Semantics (quota / key / device unbinding, etc.)
 
-relay → node → console 的错误通道现在定义好结构：错误码 + 人类可读消息，
-能显示到 sidebar item 状态与 status line，不用裸字符串。
+The error channel relay → node → console gets its structure defined now:
+error code + human-readable message, displayable on the sidebar item status
+and the status line, no raw strings.
 
-## 配置面
+## Configuration Surface
 
-- node 侧 `~/.waitagent/relay.toml`：`address`、`relay_fingerprint`（join 后
-  自动写入）、心跳参数。
-- relay 侧 `~/.waitagent/relay.toml`：listen 地址、admin socket 路径、
-  白名单目录路径、
-  token 生成参数、心跳参数（间隔默认 10s、离线阈值默认 3 次）、
-  容量上限（`max_nodes`、`max_streams`、吞吐保护阈值）。
-- remote-hosts 条目增加 `via = "auto" | "relay" | "direct"`：auto 为缺省
-  （旧条目缺省由隐式 direct 升级而来，显式旧值保留）；auto = 直通优先、
-  relay 兜底——connect 时先探测 direct（TCP + TLS pin 握手，短超时上限），
-  失败再经 relay dial；显式 direct/relay 不回退（报错信息中给出引导）。
-  生效路径记入 `last_via_used` 供 UI 标注，不静默改写用户选择
-  （issue #156，取代本文件原"显式指定、不做隐式回退"决策条）。
-- remote-hosts 条目的 `tls_pin_sha256` 可省略：pin 缺失且 via 为
-  auto/relay 时，connect 经 node↔relay 管理通道的 `resolve-node` 按
-  host 标签查对端已注册指纹（唯一命中才采用，多命中/未命中回退 SSH
-  bootstrap 旧路径），发现的 pin 随 profile 落盘、响应注明
-  （issue #156 切片 3）。节点 register 后经同一通道 `announce` 公告自身
-  标签（主机名 + 对 relay 字面地址的 egress IP，≤8 个 × ≤64 字节），
-  只写本链接自己的连接表项。
+- Node side `~/.waitagent/relay.toml`: `address`, `relay_fingerprint`
+  (written automatically after join), heartbeat parameters.
+- Relay side `~/.waitagent/relay.toml`: listen address, admin socket path,
+  whitelist directory path, token-generation parameters, heartbeat parameters
+  (interval default 10s, offline threshold default 3 misses), capacity limits
+  (`max_nodes`, `max_streams`, throughput guard threshold).
+- remote-hosts entries gain `via = "auto" | "relay" | "direct"`: auto is the
+  default (old entries default from an implicit direct upgrade; explicit old
+  values are preserved); auto = direct first, relay as fallback — connect
+  probes direct first (TCP + TLS pin handshake, short timeout bound) and
+  dials via relay on failure; explicit direct/relay does not fall back
+  (guidance is given in the error message). The effective path is recorded in
+  `last_via_used` for UI display; user choice is not silently rewritten
+  (issue #156, superseding this file's earlier "explicit specification, no
+  implicit fallback" decision entry).
+- The `tls_pin_sha256` of a remote-hosts entry may be omitted: when the pin
+  is missing and via is auto/relay, connect queries the peer's registered
+  fingerprint by host label via the node↔relay management channel's
+  `resolve-node` (adopted only on a unique hit; multiple hits / no hit fall
+  back to the legacy SSH bootstrap path), and the discovered pin is persisted
+  with the profile and noted in the response (issue #156 slice 3). After
+  registering, a node announces its own labels over the same channel via
+  `announce` (hostname + egress IP toward the relay's literal address,
+  ≤8 entries × ≤64 bytes), writing only its own connection-table entry on
+  this link.
 
-## 兼容性承诺
+## Compatibility Commitments
 
-- relay 只是 dial 路径新增的一个 transport 分支；未配置 relay 时代码
-  路径与现在完全一致。
-- 现有直连 TCP、socks5 代理路径不动。
-- 所有现有 session 协议不变。
+- The relay is only a new transport branch on the dial path; when no relay
+  is configured, the code path is fully identical to today.
+- The existing direct TCP and socks5 proxy paths are untouched.
+- All existing session protocols are unchanged.
 
-## Phase 1 任务拆分
+## Phase 1 Task Breakdown
 
-状态标记约定（issue #137 对账，2026-10-05）：✅ 已落地 / 🔶 部分 /
-⬜ 未实现 / — 不在本期；锚点 = 落地 PR 或代码位置。状态随落地 PR 更新。
+Status legend (issue #137 reconciliation, 2026-10-05): ✅ landed /
+🔶 partial / ⬜ not implemented / — out of scope this phase; anchor =
+landing PR or code location. Status is updated with each landing PR.
 
-1. ✅ 已落地 — mux 帧层 + `PeerConnection` seam（现有 TCP dial 收进
-   seam，行为不变）。锚点：#66（dial 收进 seam）、#69（mux 帧编解码与
-   流状态机）；`src/infra/peer_connection.rs`、`src/infra/relay_mux/`。
-   mux 模块只做流复用与 window 帧；relay 控制帧在
-   `src/infra/relay_link.rs` / `src/infra/relay_routing.rs`。
-2. ✅ 已落地（2026-10-05 补齐入站路径）— relay 守护进程与子命令：
-   `relay serve`、本机 admin socket 与本地 admin 协议（#81）、远端控制流
-   （node 侧管理通道，#135 读 / #140 写）、连接表（#75）、open/close
-   路由（#78）、心跳（10s / 3 次超时，#75）、白名单认证（#72，含
-   `relay remove` 吊销，吊销的进程级 e2e 见 #145 revoke 场景）。入站
-   relay 流接入 node ingress（#129 的
-   #130/#132，2026-10-05）后双向可用。锚点：`src/infra/relay_server.rs`、
-   `relay_admin.rs`、`relay_remote_admin.rs`、`relay_connection_table.rs`、
-   `relay_routing.rs`、`relay_ingress.rs`、`src/cli/relay.rs`。
-3. ✅ 已落地 — `relay invite` / `relay join` 入网流程（双向自动钉扎）。
-   锚点：#87；`src/infra/relay_enrollment.rs`、`relay_join.rs`、
-   `src/command/relay_enroll.rs`。
-4. ✅ 已落地（2026-10-05 补齐入站）— node relay client：长连接保活
-   （#90）、按需开流（#93，`via = "relay"` dial）、断线重注册（#90）、
-   presence 事件接收入 console（#96）。入站 accept 队列接进 ingress
-   （#130/#132）。锚点：`src/infra/relay_client.rs`、`relay_presence.rs`、
-   `src/ratatui_node/client_runtime.rs`（status line 渲染）。
-5. ✅ 已落地 — 逐流背压（window/ack）与公平调度。锚点：#101（背压 +
-   DRR 公平调度）、#110（控制帧旁路）、#123/#125（fairness 断言锚定）；
-   `src/infra/relay_scheduler.rs`、`src/infra/relay_mux/stream.rs`。
-6. 🔶 部分 — usage 计量、max_nodes / max_streams / 吞吐阈值准入已落地
-   （#84；`src/infra/relay_capacity.rs`，register 与 open_stream 两处
-   结构化拒绝；max_nodes 准入拒绝的进程级 e2e 见 #145 capacity 场景）。
-   压测标定 — 不在本期（默认值保守发布，实测后修订）。
-7. ✅ 已落地 — 配置面：relay.toml（#104；node 侧
-   `src/infra/relay_toml_store.rs`、relay 侧 `relay_serve_toml_store.rs`）、
-   remote-hosts `via`（#107 落地 direct/relay；#156 切片 2 扩为
-   auto|direct|relay 三选并加 `last_via_used` 生效路径标注；
-   `src/host/ssh/remote_host_history_store.rs`）、
-   Ctrl-W 连接路径接入（`src/host/ssh/connect_remote_host_pane_runtime.rs`
-   的 via 三选与 "via auto → …" 标记，dial 走
-   `remote_host_connect_runtime.rs`，auto 探测与回退在
-   `src/infra/remote_grpc_transport.rs`）。
-   ✅ 已落地（#156 切片 3）— 指纹自动发现：remote-hosts 的
-   `tls_pin_sha256` 可省略；connect 经 node↔relay 管理通道
-   `resolve-node` 按 host 标签唯一命中对端指纹（`announce` 在 register
-   后公告本节点主机名 + egress IP，只写本链接自己的连接表项；
-   锚点 `src/infra/relay_connection_table.rs`、
-   `relay_remote_admin.rs`、`relay_client.rs`、
-   `remote_host_connect_runtime.rs`）。进程级 e2e：e2e-relay.sh
-   pinautodiscovery 场景（pin-less 的 relay 与 auto 两腿，盘上 pin ==
-   对方 enrolled 指纹）。
-8. ✅ 已落地 — 结构化错误语义（relay → node → console）。锚点：#111
-   （错误码定型）、#112（节点内传播）、#113（console 渲染）；
-   `src/infra/relay_routing/error_code.rs`、`src/ratatui_node/client_runtime.rs`。
-   console 渲染面（footer status line + 行内 relay-error 标记）无进程级
-   e2e 锚点——relay_error 只在 TUI snapshot 渲染，`__node-command` 控制面
-   跳过 push 消息，已按 #136 机制登记豁免（#145；错误帧传输层通道由
-   #145 revoke 场景覆盖）。
-9. ✅ 已落地 — 双 node + relay 的 docker 网络隔离 e2e（#121 harness；
-   场景 smoke / reconnect / reregister / streams / direct / pastefile，
-   见 `scripts/e2e/relay/e2e-relay.sh`）、断连重连（#124）、多并发
-   stream（#126）、直连回归（#127）、relay 链路上的 paste-file
-   （#128→#133）；#137 对账缺口补齐（#145）：revoke（remove 吊销 +
-   传输层重连拒绝 + token 不受影响）、capacity（max_nodes 准入拒绝）、
-   presence（peer liveness → sidebar availability online/offline 往返）；
-   Windows CI（`ci.yaml` windows-check / windows-test 跑
-   全部 relay 单元套件；docker 场景天然 Linux-only）。
-10. 🔶 部分 — WebUI：web 服务作为特殊 node 入网（#134）、只读
-    dashboard 经 node 通道（#135）、magic-link 认证（#138）、invite /
-    remove 写操作 + CSRF + audit（#140），均 2026-10-05 落地；e2e 见
-    `scripts/e2e/web/e2e-web.sh`（invite + remove 全流程，含被删节点
-    relay link 死亡的进程级断言，#145）。✅ 已落地（2026-10-06）— 部署
-    形态一体启动：`relay serve --web [--web-listen <addr>]` 在同进程内
-    拉起 web 面（#142），fail-stop 单 Lifetime（任一半退出整进程退出；
-    web 缺失部署配置时启动即失败而不是跑无头 relay）；web 半仍走
-    loopback 标准 node↔relay 协议入网。进程级 e2e 见
-    `scripts/e2e/web/e2e-web.sh` phase 2。⬜ 未实现：浏览器 terminal 复用
-    OpenMirror/RawPty/Resize；一行安装命令。
+1. ✅ Landed — mux frame layer + `PeerConnection` seam (the existing TCP
+   dial is moved into the seam, behavior unchanged). Anchors: #66 (dial
+   moved into the seam), #69 (mux frame codec and stream state machine);
+   `src/infra/peer_connection.rs`, `src/infra/relay_mux/`. The mux module
+   only does stream multiplexing and window frames; relay control frames
+   live in `src/infra/relay_link.rs` / `src/infra/relay_routing.rs`.
+2. ✅ Landed (inbound path completed 2026-10-05) — relay daemon and
+   subcommands: `relay serve`, local admin socket and local admin protocol
+   (#81), remote control streams (node-side management channel, #135 read /
+   #140 write), connection table (#75), open/close routing (#78), heartbeats
+   (10s / 3-miss timeout, #75), whitelist authentication (#72, including
+   `relay remove` revocation; process-level e2e for revocation in the #145
+   revoke scenario). Inbound relay streams are wired into node ingress
+   (#129's #130/#132, 2026-10-05), making both directions usable. Anchors:
+   `src/infra/relay_server.rs`, `relay_admin.rs`, `relay_remote_admin.rs`,
+   `relay_connection_table.rs`, `relay_routing.rs`, `relay_ingress.rs`,
+   `src/cli/relay.rs`.
+3. ✅ Landed — `relay invite` / `relay join` enrollment flow (mutual
+   automatic pinning). Anchors: #87; `src/infra/relay_enrollment.rs`,
+   `relay_join.rs`, `src/command/relay_enroll.rs`.
+4. ✅ Landed (inbound completed 2026-10-05) — node relay client: long-lived
+   connection keepalive (#90), on-demand stream open (#93, `via = "relay"`
+   dial), re-register on disconnect (#90), presence events received into the
+   console (#96). The inbound accept queue is wired into ingress
+   (#130/#132). Anchors: `src/infra/relay_client.rs`, `relay_presence.rs`,
+   `src/ratatui_node/client_runtime.rs` (status line rendering).
+5. ✅ Landed — per-stream backpressure (window/ack) and fair scheduling.
+   Anchors: #101 (backpressure + DRR fair scheduling), #110 (control frame
+   bypass), #123/#125 (fairness assertions anchored);
+   `src/infra/relay_scheduler.rs`, `src/infra/relay_mux/stream.rs`.
+6. 🔶 Partial — usage metering, max_nodes / max_streams / throughput-threshold
+   admission landed (#84; `src/infra/relay_capacity.rs`, structured
+   rejections at both register and open_stream; process-level e2e for the
+   max_nodes admission rejection in the #145 capacity scenario). Load-test
+   calibration — out of scope this phase (defaults published conservatively,
+   revised after measurement).
+7. ✅ Landed — configuration surface: relay.toml (#104; node side
+   `src/infra/relay_toml_store.rs`, relay side `relay_serve_toml_store.rs`),
+   remote-hosts `via` (#107 landed direct/relay; #156 slice 2 extended to
+   the auto|direct|relay three-way choice with `last_via_used`
+   effective-path annotation; `src/host/ssh/remote_host_history_store.rs`),
+   Ctrl-W connection path integration (the via three-way choice and the
+   "via auto → …" marker in
+   `src/host/ssh/connect_remote_host_pane_runtime.rs`; dial goes through
+   `remote_host_connect_runtime.rs`; auto probing and fallback in
+   `src/infra/remote_grpc_transport.rs`).
+   ✅ Landed (#156 slice 3) — fingerprint auto-discovery: the remote-hosts
+   `tls_pin_sha256` may be omitted; connect uniquely hits the peer's
+   fingerprint by host label via the node↔relay management channel's
+   `resolve-node` (`announce` advertises the node's own hostname + egress IP
+   after register, writing only its own connection-table entry; anchors
+   `src/infra/relay_connection_table.rs`, `relay_remote_admin.rs`,
+   `relay_client.rs`, `remote_host_connect_runtime.rs`). Process-level e2e:
+   the e2e-relay.sh pinautodiscovery scenario (both the pin-less relay leg
+   and the auto leg, with the on-disk pin == the peer's enrolled
+   fingerprint).
+8. ✅ Landed — structured error semantics (relay → node → console). Anchors:
+   #111 (error codes finalized), #112 (propagation within a node), #113
+   (console rendering); `src/infra/relay_routing/error_code.rs`,
+   `src/ratatui_node/client_runtime.rs`. The console rendering surface
+   (footer status line + inline relay-error marker) has no process-level e2e
+   anchor — relay_error only renders in TUI snapshots, and the
+   `__node-command` control plane skips push messages; an exemption is
+   registered under the #136 mechanism (#145; the error-frame transport
+   channel is covered by the #145 revoke scenario).
+9. ✅ Landed — docker network-isolated e2e with two nodes + relay (#121
+   harness; scenarios smoke / reconnect / reregister / streams / direct /
+   pastefile, see `scripts/e2e/relay/e2e-relay.sh`), disconnect/reconnect
+   (#124), multiple concurrent streams (#126), direct regression (#127),
+   paste-file over the relay link (#128→#133); #137 reconciliation
+   gap-filling (#145): revoke (remove revocation + transport-layer reconnect
+   rejection + token unaffected), capacity (max_nodes admission rejection),
+   presence (peer liveness → sidebar availability online/offline round
+   trip); Windows CI (`ci.yaml` windows-check / windows-test run the full
+   relay unit suite; docker scenarios are Linux-only by nature).
+10. 🔶 Partial — WebUI: the web service enrolling as a special node (#134),
+    read-only dashboard over the node channel (#135), magic-link
+    authentication (#138), invite / remove write operations + CSRF + audit
+    (#140), all landed 2026-10-05; e2e in `scripts/e2e/web/e2e-web.sh` (full
+    invite + remove flow, including the process-level assertion that the
+    removed node's relay link dies, #145). ✅ Landed (2026-10-06) —
+    unified-start deployment form: `relay serve --web [--web-listen <addr>]`
+    brings up the web plane in the same process (#142), fail-stop single
+    Lifetime (if either half exits, the whole process exits; when the web
+    half lacks deployment configuration, startup fails instead of running a
+    headless relay); the web half still enrolls over loopback using the
+    standard node↔relay protocol. Process-level e2e in
+    `scripts/e2e/web/e2e-web.sh` phase 2. ⬜ Not implemented: in-browser
+    terminal reusing OpenMirror/RawPty/Resize; one-line install command.
 
-兼容性承诺（issue #137 核验，2026-10-05）：未配置 relay 时 relay client
-不安装（`src/ratatui_node/runtime.rs` 仅在 relay.toml 存在时建立长连接），
-直连 dial 收进 seam 行为逐字节保留（`src/infra/peer_connection.rs`），
-socks5 代理路径未动；session 协议全部运行在 seam 之上未改。直连回归有
-docker e2e（`scripts/e2e/relay/e2e-relay.sh` 的 direct 场景）。
+Compatibility commitments (issue #137 verification, 2026-10-05): when no
+relay is configured, the relay client is not installed
+(`src/ratatui_node/runtime.rs` establishes the long-lived connection only
+when relay.toml exists); the direct dial moved into the seam is
+byte-for-byte preserved in behavior (`src/infra/peer_connection.rs`), the
+socks5 proxy path is untouched; all session protocols run on top of the seam
+unchanged. Direct regression has docker e2e (the direct scenario in
+`scripts/e2e/relay/e2e-relay.sh`).
 
-## Phase 2 展望
+## Phase 2 Outlook
 
-- `PeerConnection` 增加 P2P 实现：经 relay 交换地址（rendezvous）、NAT
-  穿透打洞，成功后流量不过 relay；relay 退化为 registry + rendezvous。
-- relay 集群 + 接入调度器：调度器依据各 relay 的 capacity 声明与 usage
-  上报，按 `capacity − usage` 对 join / 重连请求做分配；调度决策短 TTL，
-  relay 故障由 node 重连触发重调度；容量视图允许秒级滞后，与计费凭证
-  短 TTL 本地校验同一套取舍，集群不强一致。
-- 设备身份升级为必须（证书指纹体系已就绪）；控制面实现计费。
+- `PeerConnection` gains a P2P implementation: addresses are exchanged via
+  the relay (rendezvous) and NAT traversal hole punching is performed; once
+  successful, traffic no longer flows through the relay, which degrades to
+  registry + rendezvous.
+- relay cluster + admission scheduler: the scheduler allocates join /
+  reconnect requests by `capacity − usage` based on each relay's capacity
+  declarations and usage reports; scheduling decisions have a short TTL, and
+  relay failures trigger rescheduling via node reconnects; the capacity view
+  tolerates second-level staleness — the same trade-off as locally
+  validating short-TTL billing credentials — and the cluster is not strongly
+  consistent.
+- Device identity becomes mandatory (the certificate fingerprint system is
+  ready); the control plane implements billing.

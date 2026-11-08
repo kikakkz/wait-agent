@@ -1,5 +1,5 @@
-//! Relay enrollment: invite-token mint/redeem (docs/relay-design.md 身份认证
-//! 与入网) and the whitelist file operations behind `relay invite` / `relay
+//! Relay enrollment: invite-token mint/redeem (docs/relay-design.md
+//! authentication and enrollment) and the whitelist file operations behind `relay invite` / `relay
 //! join` / `relay remove`.
 //!
 //! Tokens are opaque 256-bit random strings minted over the relay's local

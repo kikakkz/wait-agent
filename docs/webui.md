@@ -1,108 +1,141 @@
-# WebUI 部署与安全配置（issue #131）
+# WebUI Deployment and Security Configuration (issue #131)
 
-`waitagent web serve` 是 relay 的 WebUI 进程:一个持有自有节点证书
-的特殊 node,经标准 node↔relay 协议入网,管理操作(状态、invite、
-remove)全部经它的已认证长连接送达 relay——同机也不开进程内特例
-(docs/relay-design.md 管理通道)。浏览器侧为服务端渲染(askama),
-零 JS 框架/构建链。
+`waitagent web serve` is the relay's WebUI process: a special node holding
+its own node certificate that enrolls via the standard node↔relay protocol;
+all management operations (status, invite, remove) reach the relay over its
+authenticated long-lived connection — no in-process special case even on
+the same machine (docs/relay-design.md management channel). The browser
+side is server-rendered (askama), with zero JS framework/build chain.
 
-## 启动形态
+## Startup Modes
 
-- 一体启动(issue #142):`waitagent relay serve --web [--web-listen <addr>]`
-  在同进程内拉起 web 面——fail-stop 单 Lifetime,relay 退出 web 即退出,
-  web 启动失败/崩溃 relay 也随之退出(web 缺部署配置时启动即失败,不会
-  跑无头 relay)。web 半仍经 loopback 标准 node↔relay 协议入网,不开
-  进程内特例。
-- 单端口 dashboard(issue #209):`relay serve --web` 的 dashboard 同时
-  挂在 relay 自己的对外端口上(TLS + ALPN `h2`/`http/1.1`),即
-  `https://<relay>:7475/`。relay 是自签证书,浏览器有证书告警(预期,
-  #131 已接受);经该端口登录颁发的会话 cookie 带 `Secure` 属性。
-  独立的 `--web-listen` HTTP 监听仍保留(deprecated 提示),供 magic
-  link 里的 `public_base_url` 与既有反代继续工作。
-- 自助入网(issue #208):`relay serve --web` 且配好 `webui.toml` 时,
-  任何设备可用 `waitagent relay join-request <relay:port>` 发起入网
-  ——relay 把一次性、绑定该设备指纹的 magic link 发给管理员邮箱,
-  管理员转发即审批,申请人执行
-  `waitagent relay join <relay> --link <链接>` 完成入网。`relay invite`
-  保留给部署流(Install as relay 的 SSH 自动铸 token)。
-- 独立启动:`waitagent web serve [--listen <addr>]`(默认
-  `0.0.0.0:8788`,公网部署形态;启动时会打印暴露告警)。
-- 纯本机使用:`--listen 127.0.0.1:8788` 回环绑定,无告警。
-- 前置条件:本机已 `relay join` 过(`~/.waitagent/relay.toml` 存在),
-  且 `~/.waitagent/webui.toml` 已配置(缺失时启动报错并指引)。
+- Unified startup (issue #142): `waitagent relay serve --web [--web-listen <addr>]`
+  launches the web surface in the same process — fail-stop single Lifetime:
+  if the relay exits the web exits, and if the web fails to start or crashes
+  the relay exits too (when the web lacks deployment config it fails at
+  startup instead of running a headless relay). The web side still enrolls
+  via the loopback standard node↔relay protocol, with no in-process special
+  case.
+- Single-port dashboard (issue #209): with `relay serve --web`, the
+  dashboard is also served on the relay's own public port (TLS + ALPN
+  `h2`/`http/1.1`), i.e. `https://<relay>:7475/`. The relay uses a
+  self-signed certificate, so browsers show a certificate warning (expected,
+  accepted in #131); session cookies issued via logins on that port carry
+  the `Secure` attribute. The standalone `--web-listen` HTTP listener is
+  kept (with a deprecated notice) so the `public_base_url` in magic links
+  and existing reverse proxies keep working.
+- Self-service enrollment (issue #208): when `relay serve --web` is running
+  with `webui.toml` configured, any device can initiate enrollment with
+  `waitagent relay join-request <relay:port>` — the relay emails the admin
+  a one-time magic link bound to that device's fingerprint; the admin
+  forwards it to approve, and the applicant completes enrollment by running
+  `waitagent relay join <relay> --link <link>`. `relay invite` remains
+  reserved for the deployment flow (SSH auto-minting of tokens in Install
+  as relay).
+- Standalone startup: `waitagent web serve [--listen <addr>]` (default
+  `0.0.0.0:8788`, the public-internet deployment mode; it prints an
+  exposure warning at startup).
+- Local-only use: `--listen 127.0.0.1:8788` loopback binding, no warning.
+- Prerequisites: this machine has already done `relay join`
+  (`~/.waitagent/relay.toml` exists), and `~/.waitagent/webui.toml` is
+  configured (startup reports an error and guidance if missing).
 
-## webui.toml(部署时一次性填写)
+## webui.toml (filled in once at deployment)
 
 ```toml
-admin_email = "you@example.com"        # 唯一管理员邮箱
-mail_auth_code = "<授权码/app password>"
-public_base_url = "https://dash.example.com"   # magic link 里的外部地址
-# trusted_proxies = "127.0.0.1"        # 反代场景才配;默认空 = 仅直连
-# 表外域名自建邮件服务器的逃生门(全部四个键成组出现):
+admin_email = "you@example.com"        # the sole admin email
+mail_auth_code = "<auth code / app password>"
+public_base_url = "https://dash.example.com"   # external address in magic links
+# trusted_proxies = "127.0.0.1"        # only set behind a reverse proxy; empty default = direct connections only
+# escape hatch for self-hosted mail servers on domains outside the table (all four keys appear as a group):
 # mail_custom_host = "smtp.corp.example"
 # mail_custom_port = 465
 # mail_custom_tls = "ssl"              # ssl | starttls | none
 # mail_custom_user = "you@corp.example"
 ```
 
-SMTP host/port/TLS 按邮箱域名从内置服务商表选择,用户只填邮箱 +
-授权码(v4 拍板):
+The SMTP host/port/TLS are chosen from the built-in provider table based on
+the email domain; the user only fills in the email + auth code (decided in
+v4):
 
-| 域名 | SMTP host | 端口/TLS |
+| Domain | SMTP host | Port/TLS |
 |---|---|---|
 | qq.com | smtp.qq.com | 465 SSL |
 | 163.com | smtp.163.com | 465 SSL |
 | hotmail.com / outlook.com | smtp.office365.com | 587 STARTTLS |
 | gmail.com | smtp.gmail.com | 465 SSL |
 
-授权码获取指引:QQ/163 邮箱需在网页版设置中生成独立"授权码"
-(不是登录密码);Outlook/Gmail 需先开 2FA,再生成 app password。
-已知风险:Microsoft 在收紧基础认证,hotmail 的 app password 依赖
-租户策略;失效时走 `mail_custom_*` 或等 OAuth(Phase 1 不做 OAuth)。
+Auth code instructions: QQ/163 mailboxes require generating a separate
+"auth code" in the web settings (not the login password); Outlook/Gmail
+require enabling 2FA first, then generating an app password. Known risk:
+Microsoft is tightening basic auth; hotmail app passwords depend on tenant
+policy. If they stop working, use `mail_custom_*` or wait for OAuth (no
+OAuth in Phase 1).
 
-## 登录(magic link + 设备指纹)
+## Login (magic link + device fingerprint)
 
-1. 浏览器打开 dashboard → 无会话 → 登录页输入邮箱。**仅当输入 ==
-   admin_email 才发信**(其余地址得到相同的中性回答,防轰炸/探测);
-   限流 3 次/10 分钟/IP。
-2. 邮件内含 `public_base_url + /auth/magic?token=...`。token 为
-   Ed25519 签名的 JWT(**服务端密钥为内存临时 Ed25519 keypair**,每次启动
-   新生成、不落盘——issue #143;重启天然轮换,旧 token 验签失败即视为未
-   认证,重新走 magic link 即可;没有 key 文件需要备份,原轮换命令诉求
-   由此消解。注意与 relay 节点凭据不同:节点证书指纹绑定白名单身份,必须
-   持久),magic TTL 10 分钟、一次性
-   (任何兑换尝试即消耗)。
-3. 兑换时校验设备指纹:SHA-256(客户端IP[经 trusted_proxies 取真值]
-   + User-Agent + JS 探针 platform/timezone/language/screen)。**同机
-   约束按字面**:请求 link 的机器 == 点击的机器 == 会话全程的机器/
-   浏览器/网络;换即拒(重新 magic link 即可)。心跳 30s,90s 无心跳
-   会话作废;会话绝对寿命 12h。重启进程即全体会话失效(v3 明载)。
+1. The browser opens the dashboard → no session → enters an email on the
+   login page. **Mail is sent only when the input == admin_email** (all
+   other addresses get the same neutral response, to prevent
+   spamming/enumeration); rate limit 3 attempts/10 min/IP.
+2. The email contains `public_base_url + /auth/magic?token=...`. The token
+   is an Ed25519-signed JWT (**the server key is an in-memory ephemeral
+   Ed25519 keypair**, regenerated on every startup and never written to
+   disk — issue #143; restarts naturally rotate it, and an old token that
+   fails verification is simply treated as unauthenticated, so just go
+   through the magic link again; there is no key file to back up, which
+   dissolves the original request for a key-rotation command. Note the
+   difference from relay node credentials: the node certificate fingerprint
+   is bound to whitelist identity and must be persisted). Magic TTL is 10
+   minutes, one-time (any redemption attempt consumes it).
+3. Redemption validates the device fingerprint: SHA-256(client IP [real
+   value taken via trusted_proxies] + User-Agent + JS probe
+   platform/timezone/language/screen). **The same-machine constraint is
+   literal**: the machine that requested the link == the machine that
+   clicks it == the machine/browser/network for the entire session; any
+   change is rejected (just do the magic link again). Heartbeat every 30s;
+   a session is void after 90s without a heartbeat; absolute session
+   lifetime is 12h. Restarting the process invalidates all sessions (stated
+   explicitly in v3).
 
-## Dashboard 与写操作
+## Dashboard and Write Operations
 
-- 只读页:relay listen/uptime、连接表(node_id/idle/online)、
-  usage/capacity;10s `<meta refresh>` 轮询。
-- **invite**:一次性(默认)或 deploy(勾选,可复用至过期),TTL 可
-  选;结果 token 仅显示一次。生成 token 经 node 通道送达 relay 落盘,
-  被邀请节点照常用 `waitagent relay join <addr> <token>` 入网。
-- **remove**:需输入指纹(或唯一前缀)确认;relay 删除白名单条目并
-  断开其在线链路。前缀解析在 web 侧用当前连接表唯一匹配,歧义即拒。
-- **CSRF**:所有写 POST 带会话级 CSRF token(登录种入模板隐藏域,
-  常量时间校验);指纹中间件之外再挡一层跨站。
-- **审计**:invite/remove 写入 error_log(自带毫秒时间戳),操作者记
-  会话 jti 前 8 位(`waitagent __error-log` 查看)。
+- Read-only pages: relay listen/uptime, connection table
+  (node_id/idle/online), usage/capacity; polled with a 10s `<meta refresh>`.
+- **invite**: one-time (default) or deploy (checkbox, reusable until
+  expiry), with an optional TTL; the resulting token is shown only once.
+  The generated token reaches the relay over the node channel and is
+  persisted to disk; the invited node enrolls as usual with
+  `waitagent relay join <addr> <token>`.
+- **remove**: requires entering a fingerprint (or unique prefix) to
+  confirm; the relay deletes the whitelist entry and drops its online
+  connection. Prefix resolution matches uniquely against the current
+  connection table on the web side; any ambiguity is rejected.
+- **CSRF**: all write POSTs carry a session-level CSRF token (planted into
+  a template hidden field at login, verified in constant time); one more
+  layer of cross-site defense on top of the fingerprint middleware.
+- **Audit**: invite/remove are written to error_log (with built-in
+  millisecond timestamps); the operator is recorded as the first 8
+  characters of the session jti (view with `waitagent __error-log`).
 
-## 反代与公网部署
+## Reverse Proxy and Public Deployment
 
-- 反代/隧道部署时,把反代地址配进 `trusted_proxies`,指纹与限流才
-  取到真实客户端 IP;默认空 = 仅直连(X-Forwarded-For 被忽略)。
-- 会话 cookie `HttpOnly; SameSite=Strict`,无持久化会话表(内存)。
-- 邮件链接要求点击者网络与请求者一致(NAT 出口相同);手机流量点
-  PC 请求的链接会被指纹拒绝——这是设计内的明确取舍。
+- When deploying behind a reverse proxy/tunnel, configure the proxy address
+  in `trusted_proxies` so the fingerprinting and rate limiting see the real
+  client IP; empty by default = direct connections only (X-Forwarded-For
+  is ignored).
+- Session cookies are `HttpOnly; SameSite=Strict`; there is no persisted
+  session table (in-memory only).
+- The emailed link requires the clicker's network to match the requester's
+  (same NAT egress); tapping a link requested from a PC on mobile data is
+  rejected by the fingerprint — this is an explicit, by-design trade-off.
 
-## 应急通道保留
+## Emergency Channel Retained
 
-本机 admin socket(`relay status/invite/remove/shutdown --listen ...`)
-保留为 bootstrap 与应急通道,WebUI 全部能力之外仍可用;**shutdown
-只走本机 admin socket**,node 通道永久拒绝(网络可达的通道不应能
-停止 relay)。CLI 连不上运行中的 relay 时明确报错引导,不隐式启动。
+The local admin socket (`relay status/invite/remove/shutdown --listen ...`)
+is retained as the bootstrap and emergency channel, available alongside all
+WebUI capabilities; **shutdown only goes through the local admin socket**
+and is permanently refused on the node channel (a network-reachable
+channel must not be able to stop the relay). When the CLI cannot reach a
+running relay, it reports a clear error and guidance instead of implicitly
+starting one.

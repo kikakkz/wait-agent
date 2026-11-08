@@ -1,6 +1,6 @@
 //! PeerConnection transport seam.
 //!
-//! Governing design: `docs/relay-design.md` (协议分层 / 集成 seam). The
+//! Governing design: `docs/relay-design.md` (Protocol Layers / integration seam). The
 //! node-to-node inner TLS and all session protocols (AuthorityTransport,
 //! ControlPlane, ClientHello, ...) run **above** this seam and stay
 //! transport-unaware. Direct TCP is the phase-1 implementation; the relay

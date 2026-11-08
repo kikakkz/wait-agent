@@ -40,6 +40,11 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
    task status updates ride with the landing PR.
 7. **Process authority.** If an external skill or methodology pack
    disagrees with this file on *process*, this file wins.
+8. **English-only repo content.** Commit messages, PR titles/bodies, issue
+   titles/bodies, source comments, user-facing strings, and docs are written
+   in English. Chinese is allowed only in chat conversations (issue #230).
+   Exemption: test fixtures that intentionally use CJK characters to
+   exercise wide-character handling.
 
 ## Commands
 

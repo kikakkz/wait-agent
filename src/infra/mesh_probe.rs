@@ -17,7 +17,7 @@
 //! `mesh-probe listen` — iroh 0.92's `NodeAddr` has no string form of its
 //! own. The node id is iroh's ed25519 public key (z-base-32), which is the
 //! identity shape the migration maps the existing node-certificate
-//! fingerprints onto (issue #224 定稿).
+//! fingerprints onto (issue #224 final design).
 
 use std::fs;
 use std::io;

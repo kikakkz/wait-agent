@@ -273,7 +273,7 @@ pub trait RemoteHostBootstrapper {
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<(), Self::Error>;
 
-    /// Issue #197 (方案 B): for relay-role connects, registration is
+    /// Issue #197 (option B): for relay-role connects, registration is
     /// verified by polling the REMOTE relay admin over the existing SSH
     /// exec channel — `waitagent relay status --listen 127.0.0.1:7475` on
     /// the remote — until the remote node's enrolled fingerprint appears
@@ -317,7 +317,7 @@ pub struct RemoteRelayJoinRequest {
 
 /// Relay listen address deployed on relay-role hosts (issue #180).
 pub(crate) const RELAY_ROLE_LISTEN: &str = "0.0.0.0:7475";
-/// Remote admin probe for issue #197 (方案 B): runs on the remote over the
+/// Remote admin probe for issue #197 (option B): runs on the remote over the
 /// existing SSH exec channel, so registration needs no authority-side
 /// network path at all.
 /// The listen string must match the serving relay exactly: the admin
@@ -626,7 +626,7 @@ where
         Ok(())
     }
 
-    /// Issue #197 (方案 B): poll the remote relay admin over SSH until the
+    /// Issue #197 (option B): poll the remote relay admin over SSH until the
     /// remote node (matched by its enrolled fingerprint, known from the
     /// bootstrap credentials) appears online at the relay it serves. Runs
     /// entirely on the connect worker thread; no authority-side state is

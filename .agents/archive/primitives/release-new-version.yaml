@@ -3,7 +3,7 @@ kind: primitive
 version: 2
 purpose: Release a new waitagent version by tagging the current version and bumping main to the next patch version.
 use_when:
-  - user says "发布新版本" or asks to release a new version
+  - user says "release a new version" or asks to release a new version
 inputs:
   - Cargo.toml
   - Cargo.lock

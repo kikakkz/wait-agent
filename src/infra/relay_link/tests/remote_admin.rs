@@ -1,4 +1,4 @@
-//! Node-channel admin integration (docs/relay-design.md 管理通道): a
+//! Node-channel admin integration (docs/relay-design.md Management Channel): a
 //! registered node sends `Frame::AdminRequest` over its authenticated link
 //! and the relay answers with the status snapshot on `Frame::AdminResponse`.
 //! Read-only in this slice: write commands get a structured rejection, and

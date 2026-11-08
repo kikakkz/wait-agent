@@ -367,8 +367,8 @@ mod tests {
     fn choice_menu_is_confirm() {
         let pane_text = r#"question
 Next    Submit
-? browser-use Ozon POC 已跑通，接下来优先做哪件事？
-→ [1] 稳定商品提取 (Recommended)
+? browser-use Ozon POC works end-to-end. What should we prioritize next?
+→ [1] Stable product extraction (Recommended)
 [2] ...
 ↑↓ select  1-5 / ↵ choose  ←/→/tab switch  esc cancel
 K2.7 Code thinking  [1 task running]"#;
@@ -383,8 +383,8 @@ K2.7 Code thinking  [1 task running]"#;
     fn question_header_without_question_mark_is_confirm() {
         let pane_text = r#"question
 Next    Submit
-  browser-use Ozon POC 已跑通，接下来优先做哪件事？
-→ [1] 稳定商品提取 (Recommended)
+  browser-use Ozon POC works end-to-end. What should we prioritize next?
+→ [1] Stable product extraction (Recommended)
 [2] ...
 ↑↓ select  1-5 / ↵ choose  ←/→/tab switch  esc cancel
 K2.7 Code thinking  [1 task running]"#;

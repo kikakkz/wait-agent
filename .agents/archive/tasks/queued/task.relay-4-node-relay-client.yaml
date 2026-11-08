@@ -6,7 +6,7 @@ status: backlog
 priority: high
 design_ref:
   doc: docs/relay-design.md
-  section: 架构, node 生命周期, 管理通道
+  section: Architecture, node lifecycle, management channel
   why:
     - Phase 1 task split item 4 nodes must keep one persistent outbound
       connection, open streams on demand, and re-register after drops before

@@ -1,7 +1,7 @@
 # WaitAgent
 
-每次会话启动，必须先读取 `.agents/index.yaml`，然后按其中的 `read_order` 加载上下文。
+At the start of every session, you must first read `.agents/index.yaml`, then load context according to the `read_order` in it.
 
-所有执行规则、当前任务、约束、原语、工作流都在 `.agents/` 中定义。这是唯一的机器控制平面。
+All execution rules, current tasks, constraints, primitives, and workflows are defined in `.agents/`. This is the only machine control plane.
 
-不维护人类文档（`docs/`），除非用户明确要求。
+Do not maintain human documentation (`docs/`) unless the user explicitly requests it.

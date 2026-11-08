@@ -6,7 +6,7 @@ status: backlog
 priority: medium
 design_ref:
   doc: docs/relay-design.md
-  section: 错误语义, node 生命周期
+  section: error semantics, node lifecycle
   why:
     - Phase 1 task split item 7 in the design doc quota, key, revocation, and
       capacity failures must surface as error codes plus human-readable

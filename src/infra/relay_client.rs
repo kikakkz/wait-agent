@@ -1,5 +1,5 @@
 //! The node-side relay client: one persistent outbound mTLS link to the
-//! pinned relay (docs/relay-design.md 协议分层). After `relay join` writes
+//! pinned relay (docs/relay-design.md Protocol Layers). After `relay join` writes
 //! `relay.toml`, the node runtime keeps an always-on connection registered
 //! with the relay: dial → TLS (client auth + fingerprint pin) → `Register` →
 //! heartbeat loop, with backoff-reconnect forever — the relay is

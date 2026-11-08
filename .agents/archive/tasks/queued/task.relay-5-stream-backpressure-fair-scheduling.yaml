@@ -6,7 +6,7 @@ status: backlog
 priority: medium
 design_ref:
   doc: docs/relay-design.md
-  section: 协议分层, 容量评估与准入控制
+  section: Protocol Layers, Capacity Modeling and Admission Control
   why:
     - Phase 1 task split item 5 every stream needs independent backpressure
       and fair scheduling so one busy stream cannot starve the rest of a
