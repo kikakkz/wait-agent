@@ -16,6 +16,15 @@ os.environ["PR_WATCH_STATE_DIR"] = tempfile.mkdtemp(prefix="pr-watch-test-")
 import pr_watch
 
 
+class StubApi:
+    def __init__(self):
+        self.comments = []
+
+    def post(self, path, payload):
+        self.comments.append((path, payload))
+        return {}, 201
+
+
 class FakeApi:
     """Scripted API: paths return queued values in order."""
 
@@ -230,6 +239,98 @@ class PrWatchTests(unittest.TestCase):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="x")
         with patch.object(pr_watch.subprocess, "run", return_value=failed):
             self.assertIsNone(pr_watch.worktree_for_branch("feat/1-x"))
+
+    def test_issue_number_from_branch(self):
+        self.assertEqual(pr_watch.issue_number_from_branch("docs/239-x"), 239)
+        self.assertEqual(pr_watch.issue_number_from_branch("feat/12-a-b"), 12)
+        self.assertIsNone(pr_watch.issue_number_from_branch("junk"))
+        self.assertIsNone(pr_watch.issue_number_from_branch(None))
+
+    def _git_responder(self, dirty_worktree=False, push_fails=False):
+        porcelain = ("worktree /home/u/main\nHEAD 1111\n"
+                     "branch refs/heads/main\n\n"
+                     "worktree /tmp/wt\nHEAD 2222\n"
+                     "branch refs/heads/docs/239-x\n\n")
+
+        def fake(args):
+            if args[:1] == ["-C"] and "status" in args:
+                out = " M x" if dirty_worktree else ""
+                return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+            if args[:2] == ["worktree", "list"]:
+                return subprocess.CompletedProcess(args, 0, stdout=porcelain,
+                                                   stderr="")
+            if args[:2] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            if args[:1] == ["branch"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            if args[:1] == ["push"]:
+                code = 1 if push_fails else 0
+                return subprocess.CompletedProcess(args, code, stdout="",
+                                                   stderr="push boom")
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="?")
+        return fake
+
+    def _merged_report(self):
+        return {"pr": 240, "status": "merged", "merge_commit_sha": "abc123def",
+                "cleanup": {"branch": "docs/239-x", "worktree": "/tmp/wt"}}
+
+    def test_cleanup_removes_and_comments(self):
+        api = StubApi()
+        with patch.object(pr_watch, "_git",
+                          side_effect=self._git_responder()):
+            result = pr_watch.post_merge_cleanup(api, self._merged_report())
+        self.assertEqual(result["issue"], 239)
+        self.assertEqual(api.comments[0][0], "/issues/239/comments")
+        body = api.comments[0][1]["body"]
+        self.assertIn("squash `abc123def`", body)
+        self.assertIn("worktree `/tmp/wt`: removed", body)
+        self.assertIn("local branch `docs/239-x`: deleted", body)
+        self.assertIn("remote branch `docs/239-x`: deleted", body)
+        self.assertIn("main @ /home/u/main, clean", body)
+
+    def test_cleanup_keeps_dirty_worktree(self):
+        api = StubApi()
+        with patch.object(pr_watch, "_git",
+                          side_effect=self._git_responder(dirty_worktree=True)):
+            pr_watch.post_merge_cleanup(api, self._merged_report())
+        body = api.comments[0][1]["body"]
+        self.assertIn("kept (uncommitted changes)", body)
+
+    def test_cleanup_tolerates_git_and_push_failures(self):
+        api = StubApi()
+        with patch.object(pr_watch, "_git",
+                          side_effect=self._git_responder(push_fails=True)):
+            pr_watch.post_merge_cleanup(api, self._merged_report())
+        body = api.comments[0][1]["body"]
+        self.assertIn("delete failed", body)
+        self.assertIn("possibly already auto-deleted", body)
+
+    def test_cleanup_no_issue_without_branch_parse(self):
+        api = StubApi()
+        report = self._merged_report()
+        report["cleanup"]["branch"] = "no-issue-here"
+        with patch.object(pr_watch, "_git",
+                          side_effect=self._git_responder()):
+            result = pr_watch.post_merge_cleanup(api, report)
+        self.assertIsNone(result["issue"])
+        self.assertEqual(api.comments, [])
+
+    def test_main_loop_runs_cleanup_on_merged(self):
+        report = self._merged_report()
+        with patch.object(pr_watch, "run_once", return_value=report), \
+             patch.object(pr_watch, "post_merge_cleanup",
+                          return_value={"issue": 239}) as cleanup:
+            code = pr_watch.main(["o/r", "240", "--cleanup", "--interval", "1"])
+        self.assertEqual(code, 0)
+        cleanup.assert_called_once()
+
+    def test_main_once_ignores_cleanup(self):
+        report = self._merged_report()
+        with patch.object(pr_watch, "run_once", return_value=report), \
+             patch.object(pr_watch, "post_merge_cleanup") as cleanup:
+            code = pr_watch.main(["o/r", "240", "--once", "--cleanup"])
+        self.assertEqual(code, 0)
+        cleanup.assert_not_called()
 
 
 if __name__ == "__main__":

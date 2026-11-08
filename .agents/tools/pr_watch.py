@@ -8,17 +8,25 @@ when green and undecided.
 
 Usage:
   pr_watch.py REPO PR_NUMBER [--once] [--interval SECONDS] [--max-rounds N]
+             [--cleanup]
 
 Exit codes: 0 merged; 2 actionable stop (failing checks, changes requested,
 max rounds); 3 user interrupt. Auth: GITHUB_TOKEN env. Stdlib only.
 
 On merged the JSON report carries post-merge cleanup targets: the head
 branch and the path of its local git worktree, when one exists.
+
+With --cleanup (loop mode; ignored with --once) the watcher performs the
+post-merge cleanup itself after the merge: remove the branch's worktree
+when clean, delete the branch locally and on the remote, check
+main-worktree hygiene, and post the result to the issue named by the
+branch (`<type>/<issue>-<slug>`).
 """
 
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -54,6 +62,16 @@ class Api:
 
     def put(self, path, payload):
         req = urllib.request.Request(self.base + path, method="PUT",
+                                     data=json.dumps(payload).encode(),
+                                     headers=self.headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return json.load(r), r.status
+        except urllib.error.HTTPError as e:
+            return {"error": e.read().decode()[:300]}, e.code
+
+    def post(self, path, payload):
+        req = urllib.request.Request(self.base + path, method="POST",
                                      data=json.dumps(payload).encode(),
                                      headers=self.headers)
         try:
@@ -142,6 +160,71 @@ def worktree_for_branch(branch):
     return None
 
 
+def issue_number_from_branch(branch):
+    m = re.match(r"^[a-z]+/(\d+)-", branch or "")
+    return int(m.group(1)) if m else None
+
+
+def _git(args):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        return subprocess.run(["git"] + args, capture_output=True, text=True,
+                              timeout=30, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return subprocess.CompletedProcess(args, 1, "", str(e))
+
+
+def main_worktree_status():
+    out = _git(["worktree", "list", "--porcelain"])
+    if out.returncode != 0 or not out.stdout.startswith("worktree "):
+        return "unknown (not inside a git worktree)"
+    lines = out.stdout.splitlines()
+    first = lines[0][len("worktree "):]
+    ref = next((l for l in lines if l.startswith("branch ")), None)
+    name = ref[len("branch refs/heads/"):] if ref and \
+        ref.startswith("branch refs/heads/") else "detached"
+    dirty = _git(["-C", first, "status", "--porcelain"])
+    state = "clean" if dirty.returncode == 0 and \
+        not dirty.stdout.strip() else "dirty"
+    return f"{name} @ {first}, {state}"
+
+
+def post_merge_cleanup(api, report):
+    cleanup = report.get("cleanup") or {}
+    branch = cleanup.get("branch")
+    worktree = cleanup.get("worktree")
+    lines = []
+    if worktree:
+        dirty = _git(["-C", worktree, "status", "--porcelain"])
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            lines.append(f"- worktree `{worktree}`: kept (uncommitted changes)")
+        else:
+            r = _git(["worktree", "remove", worktree])
+            lines.append(f"- worktree `{worktree}`: removed" if r.returncode == 0
+                         else f"- worktree `{worktree}`: remove failed"
+                              f" ({r.stderr.strip()[:120]})")
+    else:
+        lines.append("- worktree: none found")
+    if branch:
+        r = _git(["branch", "-D", branch])
+        lines.append(f"- local branch `{branch}`: deleted" if r.returncode == 0
+                     else f"- local branch `{branch}`:"
+                          f" {r.stderr.strip()[:120]}")
+        r = _git(["push", "origin", "--delete", branch])
+        tail = (r.stderr.strip() or r.stdout.strip())[:120]
+        lines.append(f"- remote branch `{branch}`: deleted" if r.returncode == 0
+                     else f"- remote branch `{branch}`: delete failed"
+                          f" ({tail}; possibly already auto-deleted)")
+    lines.append(f"- main worktree: {main_worktree_status()}")
+    body = (f"PR #{report['pr']} merged (squash "
+            f"`{str(report.get('merge_commit_sha'))[:12]}`).\n\n"
+            f"Post-merge cleanup:\n" + "\n".join(lines))
+    issue = issue_number_from_branch(branch)
+    if issue:
+        api.post(f"/issues/{issue}/comments", {"body": body})
+    return {"issue": issue, "body": body}
+
+
 def hand_in(api, pr_num, sha):
     return api.put(f"/pulls/{pr_num}/merge",
                    {"merge_method": "squash", "expected_head_sha": sha})
@@ -216,6 +299,8 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true", help="single observation")
     parser.add_argument("--interval", type=int, default=30, help="poll seconds")
     parser.add_argument("--max-rounds", type=int, default=120)
+    parser.add_argument("--cleanup", action="store_true",
+                        help="loop mode: run post-merge cleanup on merge")
     args = parser.parse_args(argv)
 
     token = os.environ.get("GITHUB_TOKEN")
@@ -238,6 +323,10 @@ def main(argv=None):
         print(json.dumps(report, indent=2))
         status = report["status"]
         if status == "merged":
+            if args.cleanup and not args.once:
+                result = post_merge_cleanup(api, report)
+                print(json.dumps({"status": "cleanup", "result": result},
+                                 indent=2))
             return 0
         if status in ("failing_checks", "changes_requested",
                       "closed_unmerged", "hand_in_failed", "api_error"):
