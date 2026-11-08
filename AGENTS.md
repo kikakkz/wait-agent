@@ -20,11 +20,12 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
 2. **CI-first.** Every code change lands in the same PR as the CI that
    checks it. Red CI never merges. Run `make ci-gate` locally before
    pushing.
-3. **Attribution.** Humans sign DCO (`git commit -s`) for everything they
-   commit, including AI-assisted code; AI assistance is disclosed with
-   `Assisted-by:` / `Generated-by:` trailers. `Co-Authored-By:` is banned
-   for AI. AI never signs `Signed-off-by` under its own name. CI enforces
-   `--dco` on every PR's commit range.
+3. **Attribution.** Every commit carries DCO sign-off (`git commit -s`)
+   under the repository's configured identity — including commits made by
+   AI agents, whose sign-off the operating human principal takes
+   responsibility for. AI assistance is disclosed with `Assisted-by:` /
+   `Generated-by:` trailers. `Co-Authored-By:` is banned for AI. CI
+   enforces `--dco` on every PR's commit range.
 4. **Never commit secrets.** Credentials, tokens, and private keys do not
    enter the repository, ever.
 5. **Generated artifacts are read-only.** Anything produced by codegen or
@@ -57,6 +58,12 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
    pointer to the design doc, plus `// SAFETY:` on every `unsafe` block
    and `# Safety` contracts. Concurrency rationale, including lock
    hierarchy, lives in the design doc, not inline (issue #232).
+10. **Worktree-based development.** All development happens in dedicated
+    git worktrees — one per branch/PR, cut from the latest `origin/main`.
+    The main worktree stays checked out on `main` with a clean working
+    tree and is never used for development. Work already in flight before
+    this rule lands is exempt from forced migration; it moves to a
+    worktree as part of its own issue if its owner chooses.
 
 ## Commands
 
@@ -74,6 +81,9 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
 - One-time after clone: `git config core.hooksPath hooks` wires the
   committed `hooks/pre-commit` (governance checks + fmt/clippy/build) into
   every commit.
+- Per branch: `git worktree add ../<slug> -b <type>/<issue>-<slug> origin/main`
+  cuts the branch in its own worktree; develop there, never in the main
+  worktree (constraint 10).
 
 ## Directory map
 
@@ -87,7 +97,8 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
 ## Collaboration protocol
 
 - Work starts at the issue tracker: find or file the issue before writing
-  any code, then cut the branch from it.
+  any code, then cut the branch from it — in a dedicated worktree, never
+  in the main worktree (constraint 10).
 - Work happens in issues; plans are posted as issue comments before
   implementation for anything non-trivial.
 - Acceptance criteria in the issue define "done"; PRs state how each is met.

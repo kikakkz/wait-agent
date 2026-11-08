@@ -40,8 +40,10 @@ name match the current milestone?
 
 - Non-trivial work: post the plan as an issue comment first (AGENTS.md
   collaboration protocol).
-- Branch `<type>/<issue>-<slug>` from the **latest origin/main**, prefix
-  matching the intended PR title type.
+- Create the branch in a dedicated git worktree (`git worktree add`) off
+  the **latest origin/main**, named `<type>/<issue>-<slug>` with the
+  prefix matching the intended PR title type. The main worktree stays on
+  `main` and clean (AGENTS.md hard constraint 10).
 - Turn the acceptance criteria into a TodoList; invoke
   `planning-and-task-breakdown` / `small-step-iteration` when the task is
   bigger than a day of work.
