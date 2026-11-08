@@ -60,13 +60,7 @@ tonic = { version = "0.12", features = ["transport", "tls"] }
 tower = "0.4"
 hyper-util = { version = "0.1", features = ["server", "service"] }
 hyper = "1"
-# Issue #224 slice 0 (spike): iroh mesh data-plane probe. Pinned to 0.92.0:
-# every iroh 1.x and 0.93+ release is either rust-version 1.91 (repo is
-# pinned to 1.88; bump lands with the slice-1 migration) or pulls
-# crypto_box 0.10.0-pre.0, whose curve25519-dalek =5.0.0-pre.1 pin collides
-# with russh 0.61.2's =5.0.0-rc.0 pin. 0.92.0 (MSRV 1.85, crypto_box 0.9.1)
-# is the newest line that resolves on this toolchain.
-iroh = { version = "0.92.0", default-features = false }
+iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
 unicode-width = "0.1.14"
 alacritty_terminal = "0.25"
 # MSYS2 runtime provisioning on Windows (download + sha256 + tar.xz unpack).
