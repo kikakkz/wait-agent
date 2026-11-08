@@ -8442,6 +8442,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn default_key_path_skips_unreadable_keys() {
         let dir = unique_test_dir("default-unreadable");
@@ -8683,7 +8684,11 @@ mod tests {
 
         state.apply_key(KeyEvent::from(KeyCode::Enter));
 
-        assert_eq!(state.key_path, dir.join("id_rsa").to_string_lossy());
+        assert_eq!(
+            std::path::Path::new(&state.key_path),
+            std::path::Path::new(&dir.join("id_rsa")),
+            "the accepted file fills the key path"
+        );
         assert!(state.completions.candidates.is_empty());
         // Enter's existing semantics: leave the field for the next focus.
         assert_eq!(

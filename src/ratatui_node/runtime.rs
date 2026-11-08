@@ -1468,8 +1468,10 @@ fn forward_relay_link_events(
 
 /// Stops the persistent relay link, when one is installed. The slot is a
 /// leaf lock: the guard is dropped before `cancel` joins the client thread,
-/// so no lock is ever held across thread joins (m07). A dial still holding
-/// a clone keeps the handle alive; its drop cancels later.
+/// so no lock is ever held across thread joins (m07). The stop signal fires
+/// even when another clone (the ingress transport, an in-flight dial) keeps
+/// the handle alive: the run loop observes the watch and winds down, and the
+/// last clone's drop joins the finished worker.
 pub(crate) fn stop_relay_link(
     relay_client: &Mutex<Option<Arc<crate::infra::relay_client::RelayClientHandle>>>,
 ) {
@@ -1480,6 +1482,7 @@ pub(crate) fn stop_relay_link(
         slot.take()
     };
     if let Some(arc) = handle {
+        arc.stop_link();
         match Arc::try_unwrap(arc) {
             Ok(handle) => handle.cancel(),
             Err(arc) => drop(arc),
@@ -1680,6 +1683,62 @@ mod forwarder_tests {
         forwarder
             .join()
             .expect("forwarder should exit when the channel closes");
+    }
+
+    /// The ingress transport holds its own clone of the handle (issue #192
+    /// direction 2), so a removal that shares the handle must still bring
+    /// the link down: after `stop_relay_link` the event channel closes
+    /// (the worker exited) instead of retrying forever.
+    #[test]
+    fn stop_relay_link_cancels_link_even_with_live_clones() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let credential_dir = std::env::temp_dir().join(format!(
+            "waitagent-test-relay-stop-creds-{}",
+            std::process::id()
+        ));
+        let config = RelayClientConfig {
+            relay: RelayTomlConfig {
+                address: "127.0.0.1:1".to_string(),
+                relay_fingerprint: "ab".repeat(32),
+                heartbeat_interval_secs: None,
+                use_proxy: false,
+            },
+            credentials: NodeCredentialPaths {
+                key_path: credential_dir.join("node.key"),
+                cert_path: credential_dir.join("node.crt"),
+            },
+            heartbeat_interval: Duration::from_secs(10),
+            retry: crate::infra::relay_client::RelayRetryPolicy::default(),
+            proxy: None,
+        };
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<RelayClientEvent>(16);
+        let slot = Mutex::new(Some(Arc::new(RelayClient::spawn(config, event_tx))));
+        let ingress_clone = slot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .expect("link installed");
+
+        stop_relay_link(&slot);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match event_rx.try_recv() {
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the link kept running after stop_relay_link"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+
+        drop(ingress_clone);
+        drop(slot);
+        crate::infra::best_effort::remove_dir_all(&credential_dir);
     }
 }
 

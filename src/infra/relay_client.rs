@@ -461,6 +461,15 @@ impl RelayClientHandle {
     pub fn cancel(self) {
         // Drop signals the stop watch and joins the worker.
     }
+
+    /// Signals the stop watch so the link winds down even while other
+    /// clones keep this handle alive (the ingress transport, an in-flight
+    /// dial): the run loop observes the watch on its next wakeup and the
+    /// final clone's [`Drop`] joins the finished worker. Sole owners use
+    /// [`cancel`](Self::cancel), which signals and joins in place.
+    pub(crate) fn stop_link(&self) {
+        let _ = self.stop_tx.send(true);
+    }
 }
 
 impl Drop for RelayClientHandle {
