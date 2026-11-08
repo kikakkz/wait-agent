@@ -23,6 +23,7 @@ pub fn run(args: Vec<String>) -> Result<(), AppError> {
 fn run_listen(mut args: Vec<String>) -> Result<(), AppError> {
     let mut key_file: Option<String> = None;
     let mut bind: Option<std::net::SocketAddrV4> = None;
+    let mut relay: Option<String> = None;
     while let Some(flag) = args.first().cloned() {
         match flag.as_str() {
             "--key-file" => {
@@ -35,6 +36,10 @@ fn run_listen(mut args: Vec<String>) -> Result<(), AppError> {
                 bind =
                     Some(crate::infra::mesh_probe::parse_bind_addr(&text).map_err(protocol_error)?);
             }
+            "--relay" => {
+                args.remove(0);
+                relay = Some(value(&mut args, "--relay")?);
+            }
             other if other.starts_with("--") => {
                 return Err(usage(&format!("unknown flag {other:?}")))
             }
@@ -44,7 +49,11 @@ fn run_listen(mut args: Vec<String>) -> Result<(), AppError> {
     let key_path = key_path(key_file);
     let runtime = runtime()?;
     runtime
-        .block_on(crate::infra::mesh_probe::listen(&key_path, bind))
+        .block_on(crate::infra::mesh_probe::listen(
+            &key_path,
+            bind,
+            relay.as_deref(),
+        ))
         .map_err(protocol_error)
 }
 
@@ -53,6 +62,7 @@ fn run_dial(mut args: Vec<String>) -> Result<(), AppError> {
     let mut node_id: Option<String> = None;
     let mut addr: Option<String> = None;
     let mut seconds: u64 = 5;
+    let mut relay: Option<String> = None;
     while let Some(flag) = args.first().cloned() {
         match flag.as_str() {
             "--key-file" => {
@@ -66,6 +76,10 @@ fn run_dial(mut args: Vec<String>) -> Result<(), AppError> {
             "--addr" => {
                 args.remove(0);
                 addr = Some(value(&mut args, "--addr")?);
+            }
+            "--relay" => {
+                args.remove(0);
+                relay = Some(value(&mut args, "--relay")?);
             }
             "--seconds" => {
                 args.remove(0);
@@ -87,7 +101,11 @@ fn run_dial(mut args: Vec<String>) -> Result<(), AppError> {
     let runtime = runtime()?;
     runtime
         .block_on(crate::infra::mesh_probe::dial(
-            &key_path, node_id, addr, seconds,
+            &key_path,
+            node_id,
+            addr,
+            seconds,
+            relay.as_deref(),
         ))
         .map_err(protocol_error)
 }
@@ -119,8 +137,8 @@ fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
 
 fn usage(message: &str) -> AppError {
     AppError::Lifecycle(LifecycleError::Protocol(format!(
-        "{message}\nusage:\n  waitagent mesh-probe listen [--key-file PATH] [--bind ADDR]\n  \
-         waitagent mesh-probe dial --node-id <id> --addr <node-addr-json> [--seconds N]"
+        "{message}\nusage:\n  waitagent mesh-probe listen [--key-file PATH] [--bind ADDR] [--relay URL]\n  \
+         waitagent mesh-probe dial --node-id <id> --addr <node-addr-json> [--relay URL] [--seconds N]"
     )))
 }
 

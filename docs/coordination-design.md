@@ -127,3 +127,48 @@ draft row, and a detail page. Design decisions:
   run inline on the UI thread behind the existing Working modal, like
   the relay join, reusing `round_trip_blocking` with its self-built
   runtime; the 5 s poll is the only background activity.
+
+## Embedded relay, presence, and address distribution (slice 1-3c, issue #253)
+
+- **Relay server shape.** iroh 1.4.1 ships the relay as the `iroh-relay` crate
+  (`server` feature): `iroh_relay::server::Server::spawn` with a
+  `RelayConfig::new(bind_addr)` runs a plaintext-HTTP relay (WebSocket relay
+  protocol v2). TLS terminates on the same HTTP server via `RelayConfig.tls`
+  and is deliberately deferred to the 1-3d dashboard work; local evaluation
+  uses `http://` relay URLs, which iroh clients accept (scheme selects `ws://`
+  vs `wss://`). The QUIC server component (`ServerConfig.quic`) only adds QUIC
+  address discovery and requires TLS certificates, so it stays disabled.
+- **Port convention.** The embedded relay binds TCP on the same port number as
+  the QUIC endpoint (default 7479), satisfying the single-port requirement. A
+  bind/spawn failure is logged and downgraded to "no relay" — coordination
+  stays usable, the relay URL is simply not announced. `coordination.toml`
+  `relay = false` disables it; `relay_url = "…"` overrides the announced URL
+  (needed behind NAT or with a DNS name).
+- **Announcement.** The serve process prints `relay_url:` and every node-ALPN
+  response (enroll-request, join, heartbeat) carries `relay_url`. The node CLI
+  persists it to `~/.waitagent/coordination-relay.json` so `coordination
+  heartbeat` and the future agent runtime can include it in their published
+  address without re-enrolling.
+- **Presence.** The `PresenceStore` is in-memory on purpose: presence is
+  ephemeral and rebuilds from heartbeats after a server restart. A heartbeat is
+  accepted only when the claimed `node_id` equals the connection-authenticated
+  identity (`conn.remote_id()`) and the node is in the registry; the
+  connection-observed direct address is merged into the reported NodeAddr.
+  `presence_timeout_secs` (default 45 s, three missed 15 s heartbeats) bounds
+  the online list; `revoke` drops the presence entry with the registry entry.
+  `coordination heartbeat` sends one shot (for timers) or loops with `--every`.
+- **Resolve.** `resolve <node-id>` requires both the requester and the target
+  to be registered, and returns the target's last-known NodeAddr in the
+  mesh-probe wire format (`node_id`, `relay_url`, `direct_addresses`) plus
+  `last_seen`; callers decide whether a stale address is worth dialing. This is
+  the slice-2 data-plane addressing seam.
+- **mesh-probe relay mode.** `--relay <url>` switches both listen and dial to
+  `RelayMode::Custom` with exactly one relay; without the flag behavior is
+  unchanged. `listen` waits for the relay URL to appear in its published
+  address, and `dial` echoes the active relay URL in its JSON report. Relay
+  URLs are compared normalized (`url::Url` semantics), so a trailing slash is
+  insignificant.
+- **Usage note for slice 2 (hard-won in loopback testing):** an iroh 1.4
+  endpoint answers relayed QUIC handshakes only while `accept()` is actively
+  polled — a listener that has not entered its accept loop silently drops the
+  dial. Accept-first is mandatory, not cosmetic.

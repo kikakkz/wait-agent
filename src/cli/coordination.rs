@@ -17,6 +17,17 @@ pub enum CoordinationSubcommand {
     Requests {
         coordination: String,
     },
+    Presence {
+        coordination: String,
+    },
+    Heartbeat {
+        coordination: Option<String>,
+        every: Option<u64>,
+    },
+    Resolve {
+        node_id: String,
+        coordination: String,
+    },
     Approve {
         request_id: String,
         coordination: String,
@@ -56,6 +67,37 @@ pub fn parse_coordination(mut args: Vec<String>) -> Result<Command, CliError> {
             let coordination = required_flag(&mut args, "--coordination")?;
             ensure_empty(args)?;
             CoordinationSubcommand::Requests { coordination }
+        }
+        "presence" => {
+            let coordination = required_flag(&mut args, "--coordination")?;
+            ensure_empty(args)?;
+            CoordinationSubcommand::Presence { coordination }
+        }
+        "heartbeat" => {
+            let coordination = optional_flag(&mut args, "--coordination")?;
+            let every = optional_flag(&mut args, "--every")?
+                .map(|value| {
+                    value.parse::<u64>().map_err(|_| {
+                        CliError::UnexpectedArgument(format!(
+                            "--every must be a whole number, got {value:?}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            ensure_empty(args)?;
+            CoordinationSubcommand::Heartbeat {
+                coordination,
+                every,
+            }
+        }
+        "resolve" => {
+            let node_id = positional(&mut args, "node id")?;
+            let coordination = required_flag(&mut args, "--coordination")?;
+            ensure_empty(args)?;
+            CoordinationSubcommand::Resolve {
+                node_id,
+                coordination,
+            }
         }
         "approve" => {
             let request_id = positional(&mut args, "request id")?;
@@ -301,6 +343,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_relay_presence_surfaces() {
+        match parse(&[
+            "waitagent",
+            "coordination",
+            "presence",
+            "--coordination",
+            "c",
+        ])
+        .subcommand
+        {
+            CoordinationSubcommand::Presence { coordination } => assert_eq!(coordination, "c"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse(&["waitagent", "coordination", "heartbeat"]).subcommand {
+            CoordinationSubcommand::Heartbeat {
+                coordination: None,
+                every: None,
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse(&[
+            "waitagent",
+            "coordination",
+            "heartbeat",
+            "--coordination",
+            "c",
+            "--every",
+            "15",
+        ])
+        .subcommand
+        {
+            CoordinationSubcommand::Heartbeat {
+                coordination: Some(coordination),
+                every: Some(15),
+            } => assert_eq!(coordination, "c"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse(&[
+            "waitagent",
+            "coordination",
+            "resolve",
+            "node-7",
+            "--coordination",
+            "c",
+        ])
+        .subcommand
+        {
+            CoordinationSubcommand::Resolve {
+                node_id,
+                coordination,
+            } => {
+                assert_eq!(node_id, "node-7");
+                assert_eq!(coordination, "c");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_missing_and_unknown_arguments() {
         let argv = |args: &[&str]| {
             let argv = args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>();
@@ -310,5 +411,14 @@ mod tests {
         assert!(argv(&["waitagent", "coordination", "approve", "req-1"]).is_err());
         assert!(argv(&["waitagent", "coordination", "join", "--coordination", "c"]).is_err());
         assert!(argv(&["waitagent", "coordination", "serve", "--bogus"]).is_err());
+        assert!(argv(&[
+            "waitagent",
+            "coordination",
+            "resolve",
+            "--coordination",
+            "c"
+        ])
+        .is_err());
+        assert!(argv(&["waitagent", "coordination", "heartbeat", "--every", "x"]).is_err());
     }
 }

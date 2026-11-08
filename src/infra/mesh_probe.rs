@@ -118,8 +118,20 @@ fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 }
 
-async fn build_endpoint(key: SecretKey, bind: Option<SocketAddrV4>) -> Result<Endpoint, String> {
-    let mut builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+async fn build_endpoint(
+    key: SecretKey,
+    bind: Option<SocketAddrV4>,
+    relay: Option<&str>,
+) -> Result<Endpoint, String> {
+    let relay_mode = match relay {
+        Some(url) => {
+            let map = iroh::RelayMap::try_from_iter([url])
+                .map_err(|error| format!("invalid relay url {url:?}: {error}"))?;
+            RelayMode::Custom(map)
+        }
+        None => RelayMode::Disabled,
+    };
+    let mut builder = Endpoint::builder(presets::Minimal).relay_mode(relay_mode);
     if let Some(addr) = bind {
         builder = builder
             .bind_addr(SocketAddr::V4(addr))
@@ -133,22 +145,31 @@ async fn build_endpoint(key: SecretKey, bind: Option<SocketAddrV4>) -> Result<En
         .map_err(|error| format!("bind mesh endpoint: {error}"))
 }
 
-pub async fn listen(key_path: &Path, bind: Option<SocketAddrV4>) -> Result<(), String> {
+pub async fn listen(
+    key_path: &Path,
+    bind: Option<SocketAddrV4>,
+    relay: Option<&str>,
+) -> Result<(), String> {
     let key = load_or_generate_secret_key(key_path)
         .map_err(|error| format!("load probe key {}: {error}", key_path.display()))?;
-    let endpoint = build_endpoint(key, bind).await?;
+    let endpoint = build_endpoint(key, bind, relay).await?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let node_addr = loop {
         let addr = endpoint.addr();
-        if addr
+        let has_ip = addr
             .addrs
             .iter()
-            .any(|entry| matches!(entry, TransportAddr::Ip(_)))
-        {
+            .any(|entry| matches!(entry, TransportAddr::Ip(_)));
+        let has_relay = relay.is_none()
+            || addr
+                .addrs
+                .iter()
+                .any(|entry| matches!(entry, TransportAddr::Relay(_)));
+        if has_ip && has_relay {
             break addr;
         }
         if Instant::now() >= deadline {
-            break EndpointAddr::new(endpoint.id());
+            break iroh::EndpointAddr::new(endpoint.id());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
@@ -199,6 +220,7 @@ pub async fn dial(
     node_id: EndpointId,
     addr: EndpointAddr,
     seconds: u64,
+    relay: Option<&str>,
 ) -> Result<(), String> {
     if addr.id != node_id {
         return Err(format!(
@@ -208,7 +230,7 @@ pub async fn dial(
     }
     let key = load_or_generate_secret_key(key_path)
         .map_err(|error| format!("load probe key {}: {error}", key_path.display()))?;
-    let endpoint = build_endpoint(key, None).await?;
+    let endpoint = build_endpoint(key, None, relay).await?;
 
     let started = Instant::now();
     let conn = endpoint
@@ -252,6 +274,7 @@ pub async fn dial(
         serde_json::json!({
             "ok": true,
             "node_id": node_id.to_string(),
+            "relay": relay,
             "connect_ms": (connect_ms * 100.0).round() / 100.0,
             "rtt_ms": (rtt_ms * 100.0).round() / 100.0,
             "echo_mib_per_sec": (echo_mib_per_sec * 100.0).round() / 100.0,
@@ -369,5 +392,104 @@ mod tests {
 
     fn node_id_string() -> String {
         SecretKey::generate().public().to_string()
+    }
+
+    #[tokio::test]
+    async fn relay_mode_connects_through_the_relay_with_no_direct_path() {
+        let mut config = iroh_relay::server::ServerConfig::default();
+        config.relay = Some(iroh_relay::server::RelayConfig::new(
+            "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        ));
+        let relay = iroh_relay::server::Server::spawn(config).await.unwrap();
+        let url = format!("http://{}/", relay.http_addr().unwrap());
+
+        let listener = build_endpoint(SecretKey::generate(), None, Some(&url))
+            .await
+            .unwrap();
+        let mut listener_addr = EndpointAddr::new(listener.id());
+        for _ in 0..100 {
+            let addr = listener.addr();
+            if addr
+                .addrs
+                .iter()
+                .any(|entry| matches!(entry, TransportAddr::Relay(_)))
+            {
+                listener_addr = addr;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            listener_addr
+                .addrs
+                .iter()
+                .any(|entry| matches!(entry, TransportAddr::Relay(found) if found.as_str() == url)),
+            "the listener publishes its relay url"
+        );
+
+        let mut dial_addr = EndpointAddr::new(listener.id());
+        dial_addr
+            .addrs
+            .insert(TransportAddr::Relay(url.parse().expect("relay url parses")));
+        dial_addr
+            .addrs
+            .insert(TransportAddr::Ip("127.0.0.1:9".parse().unwrap()));
+
+        let dialer = build_endpoint(SecretKey::generate(), None, Some(&url))
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if dialer
+                .addr()
+                .addrs
+                .iter()
+                .any(|entry| matches!(entry, TransportAddr::Relay(_)))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let accept = tokio::spawn({
+            let listener = listener.clone();
+            async move {
+                let incoming = listener.accept().await.unwrap();
+                let connecting = incoming.accept().unwrap();
+                assert!(
+                    matches!(
+                        connecting.remote_addr(),
+                        iroh::endpoint::IncomingAddr::Relay { .. }
+                    ),
+                    "the listener observes a relayed connection: {:?}",
+                    connecting.remote_addr()
+                );
+                connecting.await.unwrap()
+            }
+        });
+        let connect = tokio::time::timeout(
+            Duration::from_secs(30),
+            dialer.connect(dial_addr, MESH_PROBE_ALPN),
+        );
+        let conn = connect.await.expect("relay dial timed out").unwrap();
+
+        let server_conn = accept.await.unwrap();
+        let echo = tokio::spawn(echo_session(server_conn));
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"PING").await.unwrap();
+        let mut pong = [0u8; 4];
+        recv.read_exact(&mut pong).await.unwrap();
+        assert_eq!(&pong, b"PING");
+        drop(send);
+        drop(recv);
+        echo.await.unwrap().unwrap();
+        dialer.close().await;
+    }
+
+    #[tokio::test]
+    async fn build_endpoint_rejects_an_invalid_relay_url() {
+        let error = build_endpoint(SecretKey::generate(), None, Some("not a url"))
+            .await
+            .expect_err("an invalid relay url is refused");
+        assert!(error.contains("invalid relay url"));
     }
 }
