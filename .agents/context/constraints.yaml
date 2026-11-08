@@ -13,6 +13,7 @@ constraints:
   - Keep human-readable process guidance in docs and machine-routable execution state in .agents.
   - Every real task must have a GitHub issue; orphan tasks outside the tracker are forbidden.
   - Dirty worktree files may include active user work; understand them before editing and never revert unrelated changes.
+  - All development happens in dedicated git worktrees (one per branch/PR, cut from the latest origin/main); the main worktree stays checked out on main with a clean working tree and is never used for development (AGENTS.md hard constraint 10).
   - Favor small validation slices that update verification state and blockers explicitly.
   - Every `.rs` file must stay at or below 1000 lines; if a Rust file grows beyond that limit, split it into smaller modules before continuing feature work.
   - Vendored tmux must build as part of the default `cargo build` path; do not hide tmux compilation behind opt-in environment-variable gates.
