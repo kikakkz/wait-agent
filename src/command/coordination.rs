@@ -137,6 +137,36 @@ fn run_admin(coordination: &str, body: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Runs a single coordination request on a self-built runtime for sync callers.
+///
+/// Transport and JSON failures are returned as `Err`; a well-formed JSON
+/// response (including `{"ok": false, ...}`) is returned as `Ok` so callers
+/// can treat any reply as liveness.
+pub fn round_trip_blocking(
+    key: SecretKey,
+    node_addr: EndpointAddr,
+    alpn: &[u8],
+    frame: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    runtime()
+        .map_err(|error| format!("build coordination runtime: {error}"))?
+        .block_on(round_trip(key, node_addr, alpn, frame))
+}
+
+/// Returns the server-reported error for an `{"ok": false, ...}` response.
+pub fn response_error(response: &serde_json::Value) -> Option<String> {
+    if response.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        return Some(
+            response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("coordination request failed")
+                .to_string(),
+        );
+    }
+    None
+}
+
 async fn round_trip(
     key: SecretKey,
     node_addr: EndpointAddr,
@@ -220,11 +250,11 @@ fn node_addr_string(addr: &EndpointAddr) -> String {
     crate::infra::mesh_probe::format_node_addr(addr)
 }
 
-fn node_key_path() -> PathBuf {
+pub fn node_key_path() -> PathBuf {
     crate::host::ssh::remote_host_home::waitagent_home().join("coordination-node.key")
 }
 
-fn operator_key_path() -> PathBuf {
+pub fn operator_key_path() -> PathBuf {
     crate::host::ssh::remote_host_home::waitagent_home().join("coordination-operator.key")
 }
 

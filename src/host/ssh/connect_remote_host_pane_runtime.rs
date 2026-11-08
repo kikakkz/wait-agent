@@ -34,6 +34,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Ta
 use ratatui::{Frame, Terminal};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
@@ -138,6 +140,9 @@ impl ConnectRemoteHostPaneRuntime {
             spawn_secret_loader(request, secret_tx.clone());
         }
         let (clipboard_tx, clipboard_rx) = unbounded::<Result<ClipboardReadResult, String>>();
+        let (coordination_tx, coordination_rx) = unbounded::<CoordinationSnapshot>();
+        let coordination_target = Arc::new(Mutex::new(coordination_poll_target(state)));
+        spawn_coordination_poller(coordination_target.clone(), coordination_tx);
         terminal
             .draw(|frame| {
                 render_background(frame);
@@ -327,6 +332,125 @@ impl ConnectRemoteHostPaneRuntime {
                                 }
                             }
                         }
+                        PaneAction::CoordinationEnroll { addr } => {
+                            if matches!(state.status, Status::Working(_)) {
+                                continue;
+                            }
+                            state.status = Status::Working("Requesting enrollment...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match coordination_enroll_request(&addr) {
+                                Ok(request_id) => {
+                                    if state.selected_coordination_server_index().is_none() {
+                                        if let Ok(index) = state.save_coordination_server(&addr) {
+                                            state.selected = state
+                                                .coordination_selection_index()
+                                                .saturating_add(index);
+                                            state.sync_selected_coordination();
+                                        }
+                                    }
+                                    state.coordination_node_id = load_coordination_node_id();
+                                    state.coordination_enrolled = Some(request_id.clone());
+                                    state.status = Status::Hint(format!(
+                                        "Enrollment requested: {request_id}"
+                                    ));
+                                }
+                                Err(message) => {
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
+                        PaneAction::CoordinationApprove { addr, request_id } => {
+                            if matches!(state.status, Status::Working(_)) {
+                                continue;
+                            }
+                            state.status = Status::Working("Approving join request...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match coordination_approve_request(&addr, &request_id) {
+                                Ok(link) => {
+                                    state.coordination_join_link = Some(link);
+                                    state.status =
+                                        Status::Hint("Join request approved.".to_string());
+                                }
+                                Err(message) => {
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
+                        PaneAction::CoordinationCopy { link } => {
+                            match arboard::Clipboard::new()
+                                .and_then(|mut clipboard| clipboard.set_text(link.clone()))
+                            {
+                                Ok(()) => {
+                                    state.status =
+                                        Status::Hint("Join link copied to clipboard.".to_string());
+                                }
+                                Err(error) => {
+                                    state.status =
+                                        Status::Error(format!("clipboard write failed: {error}"));
+                                }
+                            }
+                        }
+                        PaneAction::CoordinationJoin { addr, token } => {
+                            if matches!(state.status, Status::Working(_)) {
+                                continue;
+                            }
+                            state.status = Status::Working("Joining coordination...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match coordination_join_request(&addr, &token) {
+                                Ok(message) => {
+                                    state.coordination_draft_token.clear();
+                                    state.status = Status::Hint(message);
+                                }
+                                Err(message) => {
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
+                        PaneAction::CoordinationRefresh => {
+                            if matches!(state.status, Status::Working(_)) {
+                                continue;
+                            }
+                            match coordination_poll_target(state) {
+                                Some(addr) => {
+                                    state.status =
+                                        Status::Working("Refreshing coordination...".to_string());
+                                    terminal
+                                        .draw(|frame| {
+                                            render_background(frame);
+                                            render(frame, state);
+                                        })
+                                        .map_err(write_error)?;
+                                    let snapshot = poll_coordination_server(&addr);
+                                    if coordination_apply_snapshot(state, snapshot) {
+                                        state.status =
+                                            Status::Hint("New join request arrived.".to_string());
+                                    } else {
+                                        state.status =
+                                            Status::Hint("Coordination refreshed.".to_string());
+                                    }
+                                }
+                                None => {
+                                    state.status = Status::Hint(
+                                        "Add the coordination server to refresh it.".to_string(),
+                                    );
+                                }
+                            }
+                        }
                         PaneAction::Connect => {
                             if matches!(state.status, Status::Working(_)) || state.credentials_loading() {
                                 continue;
@@ -376,6 +500,17 @@ impl ConnectRemoteHostPaneRuntime {
                         Err(_) => {}
                     }
                 }
+                recv(coordination_rx) -> result => {
+                    if let Ok(snapshot) = result {
+                        if coordination_apply_snapshot(state, snapshot) {
+                            state.status =
+                                Status::Hint("New join request arrived.".to_string());
+                        }
+                    }
+                }
+            }
+            if let Ok(mut guard) = coordination_target.lock() {
+                *guard = coordination_poll_target(state);
             }
             terminal
                 .draw(|frame| {
@@ -394,6 +529,28 @@ impl ConnectRemoteHostPaneRuntime {
 struct CompletionState {
     candidates: Vec<PathCompletion>,
     selection: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct CoordinationServerProfile {
+    name: String,
+    node_addr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CoordinationRequestSummary {
+    id: String,
+    node_id: String,
+    created_at: u64,
+    state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CoordinationSnapshot {
+    server: String,
+    online: Option<Result<String, String>>,
+    operator: Option<bool>,
+    requests: Vec<CoordinationRequestSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,6 +608,16 @@ struct ConnectRemoteHostState {
     /// Relay page's half of the Connect-via-proxy toggle).
     relay_draft_via_proxy: bool,
     relay_mismatch: RelayMismatchState,
+    coordination_servers: Vec<CoordinationServerProfile>,
+    coordination_node_id: Option<String>,
+    coordination_draft_addr: String,
+    coordination_draft_token: String,
+    coordination_online: Option<Result<String, String>>,
+    coordination_operator: Option<bool>,
+    coordination_requests: Vec<CoordinationRequestSummary>,
+    coordination_selected_request: usize,
+    coordination_join_link: Option<String>,
+    coordination_enrolled: Option<String>,
     editing: Option<EditField>,
     edit_cursor: usize,
     /// Issue #188: visible key-path completions (empty = no popup).
@@ -507,6 +674,16 @@ impl ConnectRemoteHostState {
             relay_draft_token: String::new(),
             relay_draft_via_proxy: false,
             relay_mismatch: RelayMismatchState::Idle,
+            coordination_servers: load_coordination_servers(),
+            coordination_node_id: load_coordination_node_id(),
+            coordination_draft_addr: String::new(),
+            coordination_draft_token: String::new(),
+            coordination_online: None,
+            coordination_operator: None,
+            coordination_requests: Vec::new(),
+            coordination_selected_request: 0,
+            coordination_join_link: None,
+            coordination_enrolled: None,
             editing: None,
             edit_cursor: 0,
             completions: CompletionState::default(),
@@ -1152,6 +1329,22 @@ impl ConnectRemoteHostState {
             self.sync_selected_relay();
             return PaneAction::None;
         }
+        if point_in_rect(x, y, layout.sidebar.coordination_list) {
+            let row = y.saturating_sub(layout.sidebar.coordination_list.y) as usize;
+            if row < self.coordination_servers.len() {
+                self.selected = self.coordination_selection_index().saturating_add(row);
+                self.set_focus(Focus::Hosts);
+                self.sync_selected_coordination();
+                return PaneAction::None;
+            }
+            return PaneAction::None;
+        }
+        if point_in_rect(x, y, layout.sidebar.new_coordination) {
+            self.selected = self.new_coordination_selection_index();
+            self.set_focus(Focus::Hosts);
+            self.sync_selected_coordination();
+            return PaneAction::None;
+        }
         if !point_in_rect(x, y, layout.details) {
             return PaneAction::None;
         }
@@ -1186,6 +1379,36 @@ impl ConnectRemoteHostState {
                             Focus::RelayJoin => self.relay_join_action(false),
                             Focus::RelayRemove => PaneAction::RelayRemove,
                             Focus::RelayDelete => PaneAction::RelayDelete,
+                            _ => PaneAction::None,
+                        };
+                    }
+                }
+                _ => {}
+            }
+            return PaneAction::None;
+        }
+        if self.selected_coordination_config() {
+            let details = CoordinationDetailsGeometry::from_area(layout.details, self);
+            match row {
+                row if row == details.rows.address => self.set_focus(Focus::CoordinationAddr),
+                row if row == details.rows.token => self.set_focus(Focus::CoordinationToken),
+                row if row >= details.rows.requests_start
+                    && row < details.rows.requests_start + details.rows.requests_count =>
+                {
+                    self.coordination_selected_request =
+                        (row - details.rows.requests_start) as usize;
+                    self.set_focus(Focus::CoordinationRequests);
+                }
+                row if row == details.rows.action => {
+                    if let Some(focus) = coordination_action_from_x(x, details.buttons, self) {
+                        self.set_focus(focus);
+                        return match focus {
+                            Focus::CoordinationAdd => self.coordination_add_action(),
+                            Focus::CoordinationEnroll => self.coordination_enroll_action(),
+                            Focus::CoordinationApprove => self.coordination_approve_action(),
+                            Focus::CoordinationCopy => self.coordination_copy_action(),
+                            Focus::CoordinationJoin => self.coordination_join_action(),
+                            Focus::CoordinationRefresh => PaneAction::CoordinationRefresh,
                             _ => PaneAction::None,
                         };
                     }
@@ -1274,9 +1497,17 @@ impl ConnectRemoteHostState {
                     self.sync_selected_relay();
                     return PaneAction::None;
                 }
+                if self.selected_coordination_config() {
+                    self.sync_selected_coordination();
+                    return PaneAction::None;
+                }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
+            if self.focus == Focus::CoordinationRequests && self.coordination_selected_request > 0 {
+                self.coordination_selected_request -= 1;
+                return PaneAction::None;
+            }
             let next = match self.focus {
                 Focus::ProxySave | Focus::ProxyDelete => Focus::HttpsProxy,
                 Focus::Delete => Focus::RelayRole,
@@ -1296,7 +1527,7 @@ impl ConnectRemoteHostState {
 
     fn move_down(&mut self) -> PaneAction {
         if self.focus == Focus::Hosts {
-            if self.selected < self.new_relay_selection_index() {
+            if self.selected < self.new_coordination_selection_index() {
                 self.selected += 1;
                 if self.selected_proxy_config() {
                     self.sync_selected_proxy();
@@ -1306,15 +1537,27 @@ impl ConnectRemoteHostState {
                     self.sync_selected_relay();
                     return PaneAction::None;
                 }
+                if self.selected_coordination_config() {
+                    self.sync_selected_coordination();
+                    return PaneAction::None;
+                }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
+            if self.focus == Focus::CoordinationRequests
+                && self.coordination_selected_request + 1 < self.coordination_requests.len()
+            {
+                self.coordination_selected_request += 1;
+                return PaneAction::None;
+            }
             let mut next = self.next_focus();
             if next == Focus::Hosts {
                 next = if self.selected_proxy_config() {
                     Focus::ProxySave
                 } else if self.selected_relay_config() {
                     Focus::RelayJoin
+                } else if self.selected_coordination_config() {
+                    self.coordination_default_action_focus()
                 } else {
                     Focus::Connect
                 };
@@ -1324,11 +1567,21 @@ impl ConnectRemoteHostState {
         PaneAction::None
     }
 
+    fn coordination_default_action_focus(&self) -> Focus {
+        if self.selected_coordination_server_index().is_none() {
+            Focus::CoordinationAdd
+        } else {
+            Focus::CoordinationEnroll
+        }
+    }
+
     fn default_detail_focus(&self) -> Focus {
         if self.selected_proxy_config() {
             Focus::ProxyActive
         } else if self.selected_relay_config() {
             Focus::RelayAddress
+        } else if self.selected_coordination_config() {
+            Focus::CoordinationAddr
         } else if self.selected >= self.profiles.len() {
             Focus::Host
         } else {
@@ -1409,7 +1662,9 @@ impl ConnectRemoteHostState {
             | Focus::AllProxy
             | Focus::HttpsProxy
             | Focus::RelayAddress
-            | Focus::RelayToken => PaneAction::None,
+            | Focus::RelayToken
+            | Focus::CoordinationAddr
+            | Focus::CoordinationToken => PaneAction::None,
             Focus::Auth => {
                 self.adjust_choice(1);
                 PaneAction::None
@@ -1460,7 +1715,88 @@ impl ConnectRemoteHostState {
             Focus::RelayJoin => self.relay_join_action(false),
             Focus::RelayRemove => PaneAction::RelayRemove,
             Focus::RelayDelete => PaneAction::RelayDelete,
+            Focus::CoordinationRequests => self.coordination_approve_action(),
+            Focus::CoordinationAdd => self.coordination_add_action(),
+            Focus::CoordinationEnroll => self.coordination_enroll_action(),
+            Focus::CoordinationApprove => self.coordination_approve_action(),
+            Focus::CoordinationCopy => self.coordination_copy_action(),
+            Focus::CoordinationJoin => self.coordination_join_action(),
+            Focus::CoordinationRefresh => PaneAction::CoordinationRefresh,
         }
+    }
+
+    fn coordination_add_action(&mut self) -> PaneAction {
+        if matches!(self.status, Status::Working(_)) {
+            return PaneAction::None;
+        }
+        let addr = self.coordination_draft_addr.trim().to_string();
+        if let Err(message) = crate::command::coordination::parse_coordination_addr(&addr) {
+            self.status = Status::Error(message);
+            return PaneAction::None;
+        }
+        match self.save_coordination_server(&addr) {
+            Ok(index) => {
+                self.selected = self.coordination_selection_index().saturating_add(index);
+                self.sync_selected_coordination();
+                self.status = Status::Hint("Coordination server added.".to_string());
+                PaneAction::None
+            }
+            Err(message) => {
+                self.status = Status::Error(message);
+                PaneAction::None
+            }
+        }
+    }
+
+    fn coordination_enroll_action(&mut self) -> PaneAction {
+        if matches!(self.status, Status::Working(_)) {
+            return PaneAction::None;
+        }
+        let addr = self.coordination_draft_addr.trim().to_string();
+        if let Err(message) = crate::command::coordination::parse_coordination_addr(&addr) {
+            self.status = Status::Error(message);
+            return PaneAction::None;
+        }
+        self.coordination_draft_addr = addr.clone();
+        PaneAction::CoordinationEnroll { addr }
+    }
+
+    fn coordination_approve_action(&mut self) -> PaneAction {
+        if matches!(self.status, Status::Working(_)) {
+            return PaneAction::None;
+        }
+        let Some(request) = self.coordination_pending_request() else {
+            self.status = Status::Error("Select a pending join request.".to_string());
+            return PaneAction::None;
+        };
+        let request_id = request.id.clone();
+        let addr = self.coordination_draft_addr.trim().to_string();
+        PaneAction::CoordinationApprove { addr, request_id }
+    }
+
+    fn coordination_copy_action(&mut self) -> PaneAction {
+        let Some(link) = self.coordination_join_link.clone() else {
+            self.status = Status::Error("Approve a request to mint a join link.".to_string());
+            return PaneAction::None;
+        };
+        PaneAction::CoordinationCopy { link }
+    }
+
+    fn coordination_join_action(&mut self) -> PaneAction {
+        if matches!(self.status, Status::Working(_)) {
+            return PaneAction::None;
+        }
+        let token = self.coordination_draft_token.trim().to_string();
+        if token.is_empty() {
+            self.status = Status::Error("Join token is required.".to_string());
+            return PaneAction::None;
+        }
+        if let Err(message) = crate::command::coordination::extract_join_token(&token) {
+            self.status = Status::Error(message);
+            return PaneAction::None;
+        }
+        let addr = self.coordination_draft_addr.trim().to_string();
+        PaneAction::CoordinationJoin { addr, token }
     }
 
     /// Validates the relay draft and dispatches the join. `force` carries
@@ -1744,12 +2080,18 @@ impl ConnectRemoteHostState {
     }
 
     fn next_focus(&self) -> Focus {
+        let (coordination_page, coordination_new, coordination_approve, coordination_copy) =
+            self.coordination_page_flags();
         let focus = self.focus.next(
             self.has_saved_selection(),
             self.selected_proxy_config(),
             self.selected_relay_config(),
             self.relay_remove_available(),
             self.relay_delete_available(),
+            coordination_page,
+            coordination_new,
+            coordination_approve,
+            coordination_copy,
         );
         if focus == Focus::Sudo && self.selected_profile_is_windows_shell() {
             return focus.next(
@@ -1758,18 +2100,28 @@ impl ConnectRemoteHostState {
                 self.selected_relay_config(),
                 self.relay_remove_available(),
                 self.relay_delete_available(),
+                coordination_page,
+                coordination_new,
+                coordination_approve,
+                coordination_copy,
             );
         }
         focus
     }
 
     fn prev_focus(&self) -> Focus {
+        let (coordination_page, coordination_new, coordination_approve, coordination_copy) =
+            self.coordination_page_flags();
         let focus = self.focus.prev(
             self.has_saved_selection(),
             self.selected_proxy_config(),
             self.selected_relay_config(),
             self.relay_remove_available(),
             self.relay_delete_available(),
+            coordination_page,
+            coordination_new,
+            coordination_approve,
+            coordination_copy,
         );
         if focus == Focus::Sudo && self.selected_profile_is_windows_shell() {
             return focus.prev(
@@ -1778,9 +2130,23 @@ impl ConnectRemoteHostState {
                 self.selected_relay_config(),
                 self.relay_remove_available(),
                 self.relay_delete_available(),
+                coordination_page,
+                coordination_new,
+                coordination_approve,
+                coordination_copy,
             );
         }
         focus
+    }
+
+    fn coordination_page_flags(&self) -> (bool, bool, bool, bool) {
+        (
+            self.selected_coordination_config(),
+            self.selected_coordination_config()
+                && self.selected_coordination_server_index().is_none(),
+            self.coordination_approve_available(),
+            self.coordination_join_link.is_some(),
+        )
     }
 
     fn proxy_selection_index(&self) -> usize {
@@ -1886,6 +2252,79 @@ impl ConnectRemoteHostState {
             self.relay_draft_token.clear();
         }
         self.relay_draft_via_proxy = false;
+    }
+
+    fn coordination_selection_index(&self) -> usize {
+        self.new_relay_selection_index().saturating_add(1)
+    }
+
+    fn new_coordination_selection_index(&self) -> usize {
+        self.coordination_selection_index()
+            .saturating_add(self.coordination_servers.len())
+    }
+
+    fn selected_coordination_config(&self) -> bool {
+        self.selected >= self.coordination_selection_index()
+            && self.selected <= self.new_coordination_selection_index()
+    }
+
+    fn selected_coordination_server_index(&self) -> Option<usize> {
+        if !self.selected_coordination_config()
+            || self.selected >= self.new_coordination_selection_index()
+        {
+            return None;
+        }
+        Some(
+            self.selected
+                .saturating_sub(self.coordination_selection_index()),
+        )
+    }
+
+    fn sync_selected_coordination(&mut self) {
+        if let Some(profile) = self
+            .selected_coordination_server_index()
+            .and_then(|index| self.coordination_servers.get(index).cloned())
+        {
+            self.coordination_draft_addr = profile.node_addr;
+        } else {
+            self.coordination_draft_addr.clear();
+        }
+        self.coordination_draft_token.clear();
+        self.coordination_online = None;
+        self.coordination_operator = None;
+        self.coordination_requests.clear();
+        self.coordination_selected_request = 0;
+        self.coordination_join_link = None;
+        self.coordination_enrolled = None;
+    }
+
+    fn coordination_pending_request(&self) -> Option<&CoordinationRequestSummary> {
+        self.coordination_requests
+            .get(self.coordination_selected_request)
+            .filter(|request| request.state == "pending")
+    }
+
+    fn coordination_approve_available(&self) -> bool {
+        self.coordination_operator == Some(true) && self.coordination_pending_request().is_some()
+    }
+
+    fn save_coordination_server(&mut self, addr: &str) -> Result<usize, String> {
+        let parsed = crate::command::coordination::parse_coordination_addr(addr)?;
+        let node_id = parsed.id.to_string();
+        if let Some(index) = self
+            .coordination_servers
+            .iter()
+            .position(|profile| profile.node_addr == addr.trim())
+        {
+            return Ok(index);
+        }
+        let name = node_id.chars().take(8).collect::<String>();
+        self.coordination_servers.push(CoordinationServerProfile {
+            name,
+            node_addr: addr.trim().to_string(),
+        });
+        save_coordination_servers(&self.coordination_servers)?;
+        Ok(self.coordination_servers.len().saturating_sub(1))
     }
 
     fn selected_proxy_profile_index(&self) -> Option<usize> {
@@ -2096,6 +2535,15 @@ enum Focus {
     RelayJoin,
     RelayRemove,
     RelayDelete,
+    CoordinationAddr,
+    CoordinationToken,
+    CoordinationRequests,
+    CoordinationAdd,
+    CoordinationEnroll,
+    CoordinationApprove,
+    CoordinationCopy,
+    CoordinationJoin,
+    CoordinationRefresh,
 }
 
 impl Focus {
@@ -2116,18 +2564,25 @@ impl Focus {
             Self::HttpsProxy => Some(EditField::HttpsProxy),
             Self::RelayAddress => Some(EditField::RelayAddress),
             Self::RelayToken => Some(EditField::RelayToken),
+            Self::CoordinationAddr => Some(EditField::CoordinationAddr),
+            Self::CoordinationToken => Some(EditField::CoordinationToken),
             Self::Password if auth == AuthChoice::Key => Some(EditField::KeyPath),
             Self::Password if auth == AuthChoice::Password => Some(EditField::SshPassword),
             _ => None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ordered(
         has_saved_selection: bool,
         proxy_page: bool,
         relay_page: bool,
         relay_remove: bool,
         relay_delete: bool,
+        coordination_page: bool,
+        coordination_new: bool,
+        coordination_approve: bool,
+        coordination_copy: bool,
     ) -> Vec<Self> {
         if proxy_page {
             return vec![
@@ -2160,6 +2615,29 @@ impl Focus {
             }
             return ordered;
         }
+        if coordination_page {
+            let mut ordered = vec![
+                Self::Hosts,
+                Self::CoordinationAddr,
+                Self::CoordinationToken,
+                Self::CoordinationRequests,
+            ];
+            if coordination_new {
+                ordered.push(Self::CoordinationAdd);
+                ordered.push(Self::CoordinationEnroll);
+            } else {
+                ordered.push(Self::CoordinationEnroll);
+                if coordination_approve {
+                    ordered.push(Self::CoordinationApprove);
+                }
+                if coordination_copy {
+                    ordered.push(Self::CoordinationCopy);
+                }
+                ordered.push(Self::CoordinationJoin);
+            }
+            ordered.push(Self::CoordinationRefresh);
+            return ordered;
+        }
         let mut ordered = vec![
             Self::Hosts,
             Self::Host,
@@ -2183,6 +2661,7 @@ impl Focus {
         ordered
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn next(
         self,
         has_saved_selection: bool,
@@ -2190,6 +2669,10 @@ impl Focus {
         relay_page: bool,
         relay_remove: bool,
         relay_delete: bool,
+        coordination_page: bool,
+        coordination_new: bool,
+        coordination_approve: bool,
+        coordination_copy: bool,
     ) -> Self {
         let ordered = Self::ordered(
             has_saved_selection,
@@ -2197,11 +2680,16 @@ impl Focus {
             relay_page,
             relay_remove,
             relay_delete,
+            coordination_page,
+            coordination_new,
+            coordination_approve,
+            coordination_copy,
         );
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + 1) % ordered.len()]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prev(
         self,
         has_saved_selection: bool,
@@ -2209,6 +2697,10 @@ impl Focus {
         relay_page: bool,
         relay_remove: bool,
         relay_delete: bool,
+        coordination_page: bool,
+        coordination_new: bool,
+        coordination_approve: bool,
+        coordination_copy: bool,
     ) -> Self {
         let ordered = Self::ordered(
             has_saved_selection,
@@ -2216,6 +2708,10 @@ impl Focus {
             relay_page,
             relay_remove,
             relay_delete,
+            coordination_page,
+            coordination_new,
+            coordination_approve,
+            coordination_copy,
         );
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + ordered.len() - 1) % ordered.len()]
@@ -2235,6 +2731,8 @@ enum EditField {
     HttpsProxy,
     RelayAddress,
     RelayToken,
+    CoordinationAddr,
+    CoordinationToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2343,6 +2841,27 @@ enum PaneAction {
     /// node-side pin never outlives the profile that points at it
     /// (issue #167).
     RelayDelete,
+    /// Save the coordination server `addr` (New page) and request
+    /// enrollment of this node's key (issue #246).
+    CoordinationEnroll {
+        addr: String,
+    },
+    /// Approve the join `request_id` on the coordination server `addr`.
+    CoordinationApprove {
+        addr: String,
+        request_id: String,
+    },
+    /// Copy the minted join `link` to the clipboard.
+    CoordinationCopy {
+        link: String,
+    },
+    /// Redeem the join token (or magic link) against the server `addr`.
+    CoordinationJoin {
+        addr: String,
+        token: String,
+    },
+    /// Re-poll the selected coordination server now.
+    CoordinationRefresh,
 }
 
 /// Pin-mismatch confirmation shown when a join presented a different relay
@@ -2410,6 +2929,9 @@ struct HostSidebarGeometry {
     relay_header: Rect,
     relay_list: Rect,
     new_relay: Rect,
+    coordination_header: Rect,
+    coordination_list: Rect,
+    new_coordination: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2632,21 +3154,28 @@ impl HostSidebarGeometry {
         const HEADER_HEIGHT: u16 = 3;
         const BUTTON_HEIGHT: u16 = 3;
         // Lists sit directly under their headers/buttons; only the
-        // sections (Saved Hosts / Proxy Configuration / Relay) are
-        // separated.
+        // sections (Saved Hosts / Proxy Configuration / Relay /
+        // Coordination) are separated.
         const SECTION_GAP: u16 = 0;
-        // Three section headers plus the New Host / New Proxy /
-        // New Relay buttons take fixed rows; the lists share the rest.
-        const FIXED_ROWS: u16 = HEADER_HEIGHT * 3 + BUTTON_HEIGHT * 3;
+        // Four section headers plus the New Host / New Proxy / New Relay /
+        // New Coordination buttons take fixed rows; the lists share the rest.
+        const FIXED_ROWS: u16 = HEADER_HEIGHT * 4 + BUTTON_HEIGHT * 4;
 
         let saved_content = state.profiles.len() as u16;
         let proxy_content = state.proxy_settings.profiles.len() as u16;
         let relay_content = state.relay_profiles.len() as u16;
+        let coordination_content = state.coordination_servers.len() as u16;
         let available_for_lists = area.height.saturating_sub(FIXED_ROWS);
-        let [saved_list_height, proxy_list_height, relay_list_height] = proportional_list_heights(
-            available_for_lists,
-            [saved_content, proxy_content, relay_content],
-        );
+        let [saved_list_height, proxy_list_height, relay_list_height, coordination_list_height] =
+            proportional_list_heights(
+                available_for_lists,
+                [
+                    saved_content,
+                    proxy_content,
+                    relay_content,
+                    coordination_content,
+                ],
+            );
 
         let bottom = area.y.saturating_add(area.height);
         let saved_header = Rect::new(area.x, area.y, area.width, HEADER_HEIGHT);
@@ -2675,6 +3204,37 @@ impl HostSidebarGeometry {
         let new_relay_y = relay_list.y.saturating_add(relay_list.height);
         let new_relay_height = BUTTON_HEIGHT.min(bottom.saturating_sub(new_relay_y));
         let new_relay = Rect::new(area.x, new_relay_y, area.width, new_relay_height);
+        let coordination_header_y = new_relay
+            .y
+            .saturating_add(new_relay.height)
+            .saturating_add(SECTION_GAP);
+        let coordination_header_height =
+            HEADER_HEIGHT.min(bottom.saturating_sub(coordination_header_y));
+        let coordination_header = Rect::new(
+            area.x,
+            coordination_header_y,
+            area.width,
+            coordination_header_height,
+        );
+        let coordination_list_y = coordination_header
+            .y
+            .saturating_add(coordination_header.height);
+        let coordination_list_height =
+            coordination_list_height.min(bottom.saturating_sub(coordination_list_y));
+        let coordination_list = Rect::new(
+            area.x,
+            coordination_list_y,
+            area.width,
+            coordination_list_height,
+        );
+        let new_coordination_y = coordination_list.y.saturating_add(coordination_list.height);
+        let new_coordination_height = BUTTON_HEIGHT.min(bottom.saturating_sub(new_coordination_y));
+        let new_coordination = Rect::new(
+            area.x,
+            new_coordination_y,
+            area.width,
+            new_coordination_height,
+        );
 
         Self {
             saved_header,
@@ -2686,17 +3246,20 @@ impl HostSidebarGeometry {
             relay_header,
             relay_list,
             new_relay,
+            coordination_header,
+            coordination_list,
+            new_coordination,
         }
     }
 }
 
 /// Divides the rows left over after the fixed sidebar chrome among the
-/// three lists. Natural content heights win when everything fits;
+/// four lists. Natural content heights win when everything fits;
 /// otherwise every non-empty list keeps a minimal height and the rest is
 /// shared proportionally to content, with the last non-empty list absorbing
 /// the rounding remainder so the heights always sum to exactly
 /// `available`.
-fn proportional_list_heights(available: u16, contents: [u16; 3]) -> [u16; 3] {
+fn proportional_list_heights(available: u16, contents: [u16; 4]) -> [u16; 4] {
     let total_content = contents
         .iter()
         .fold(0_u32, |sum, &content| sum + u32::from(content));
@@ -2705,12 +3268,12 @@ fn proportional_list_heights(available: u16, contents: [u16; 3]) -> [u16; 3] {
     }
     let non_empty = contents.iter().filter(|&&content| content > 0).count() as u16;
     if non_empty == 0 || available == 0 {
-        return [0; 3];
+        return [0; 4];
     }
     let min_each = 2_u16.min(available / non_empty);
     if min_each == 0 {
         // Not even one row per list: hand out single rows in order.
-        let mut heights = [0_u16; 3];
+        let mut heights = [0_u16; 4];
         let mut left = available;
         for (index, &content) in contents.iter().enumerate() {
             if content > 0 && left > 0 {
@@ -2720,7 +3283,7 @@ fn proportional_list_heights(available: u16, contents: [u16; 3]) -> [u16; 3] {
         }
         return heights;
     }
-    let mut heights = [0_u16; 3];
+    let mut heights = [0_u16; 4];
     let mut used = 0_u16;
     for (index, &content) in contents.iter().enumerate() {
         if content > 0 {
@@ -2867,6 +3430,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     let new_host_selected = state.selected == state.profiles.len();
     let new_proxy_selected = state.selected == state.new_proxy_selection_index();
     let new_relay_selected = state.selected == state.new_relay_selection_index();
+    let new_coordination_selected = state.selected == state.new_coordination_selection_index();
 
     render_framed_block(
         frame,
@@ -2960,6 +3524,39 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         ),
         Alignment::Left,
         new_relay_selected,
+    );
+
+    render_framed_block(
+        frame,
+        geometry.coordination_header,
+        header_block_content(
+            "✦",
+            "Coordination",
+            state.coordination_servers.len(),
+            geometry.coordination_header.width,
+        ),
+        Alignment::Left,
+        false,
+    );
+    render_host_list(
+        frame,
+        geometry.coordination_list,
+        state,
+        hosts_focused,
+        state.coordination_selection_index(),
+        state.coordination_servers.len(),
+    );
+    render_framed_block(
+        frame,
+        geometry.new_coordination,
+        button_block_content(
+            "+",
+            "New Coordination",
+            geometry.new_coordination.width,
+            new_coordination_selected,
+        ),
+        Alignment::Left,
+        new_coordination_selected,
     );
 }
 
@@ -3101,7 +3698,7 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
             Span::styled(format!(" {prefix}  "), Style::default().fg(color)),
             Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
         ]))
-    } else {
+    } else if selection < state.new_relay_selection_index() {
         // Relay profile rows (issue #167): the pinned relay is the single
         // active entry (★), everything else a plain ● — joining another
         // relay switches the ★, never adds a second one.
@@ -3123,6 +3720,13 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
                 profile.label().to_string(),
                 Style::default().fg(Color::White),
             ),
+        ]))
+    } else {
+        let index = selection.saturating_sub(state.coordination_selection_index());
+        let profile = &state.coordination_servers[index];
+        ListItem::new(Line::from(vec![
+            Span::styled(" ●  ", Style::default().fg(Color::Green)),
+            Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
         ]))
     }
 }
@@ -3163,6 +3767,10 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
     }
     if state.selected_relay_config() {
         render_relay_details(frame, area, state);
+        return;
+    }
+    if state.selected_coordination_config() {
+        render_coordination_details(frame, area, state);
         return;
     }
     let geometry = DetailsGeometry::from_area(area, state);
@@ -3659,6 +4267,329 @@ fn render_relay_actions(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
                 .style(delete_style)
                 .alignment(Alignment::Center),
             delete_area,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoordinationDetailsGeometry {
+    header: Rect,
+    server: Rect,
+    requests: Rect,
+    link: Rect,
+    info: Rect,
+    buttons: Rect,
+    hint: Rect,
+    status: Rect,
+    rows: CoordinationDetailsRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoordinationDetailsRows {
+    address: u16,
+    token: u16,
+    requests_start: u16,
+    requests_count: u16,
+    action: u16,
+}
+
+impl CoordinationDetailsGeometry {
+    fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
+        let requests_visible = state.coordination_requests.len().clamp(1, 6) as u16;
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(6),
+                Constraint::Length(2 + requests_visible),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        let rows = CoordinationDetailsRows {
+            address: sections[1].y.saturating_add(1).saturating_sub(area.y),
+            token: sections[1].y.saturating_add(2).saturating_sub(area.y),
+            requests_start: sections[2].y.saturating_add(1).saturating_sub(area.y),
+            requests_count: requests_visible,
+            action: sections[6].y.saturating_sub(area.y),
+        };
+        Self {
+            header: sections[0],
+            server: sections[1],
+            requests: sections[2],
+            link: sections[3],
+            info: sections[4],
+            buttons: sections[6],
+            hint: sections[7],
+            status: sections[8],
+            rows,
+        }
+    }
+}
+
+fn render_coordination_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let geometry = CoordinationDetailsGeometry::from_area(area, state);
+    render_coordination_header(frame, geometry.header, state);
+
+    let server_block = section_block("Server", "✦", SECTION_COLOR_CONNECTION);
+    let server_inner = server_block.inner(geometry.server);
+    frame.render_widget(server_block, geometry.server);
+    let rows = [
+        icon_detail_row(
+            "●",
+            "Address",
+            &relay_input_display(&state.coordination_draft_addr),
+            state,
+            Focus::CoordinationAddr,
+        ),
+        icon_detail_row(
+            "■",
+            "Join Token",
+            &relay_input_display(&state.coordination_draft_token),
+            state,
+            Focus::CoordinationToken,
+        ),
+        readonly_icon_detail_row("◍", "Status", &coordination_status_text(state)),
+        readonly_icon_detail_row("◇", "Local Node Id", &coordination_node_id_text(state)),
+        readonly_icon_detail_row("⛨", "Operator", &coordination_operator_text(state)),
+    ];
+    render_detail_table(frame, server_inner, rows);
+
+    let requests_block = section_block("Join Requests", "❖", SECTION_COLOR_OPTIONS);
+    let requests_inner = requests_block.inner(geometry.requests);
+    frame.render_widget(requests_block, geometry.requests);
+    render_coordination_requests(frame, requests_inner, state);
+
+    if let Some(link) = &state.coordination_join_link {
+        frame.render_widget(
+            Paragraph::new(format!("⧉  {link}"))
+                .style(Style::default().fg(Color::Cyan))
+                .alignment(Alignment::Left),
+            geometry.link,
+        );
+    }
+
+    render_coordination_info_box(frame, geometry.info);
+    render_coordination_actions(frame, geometry.buttons, state);
+    render_hint(frame, geometry.hint, state);
+    render_status(frame, geometry.status, state);
+}
+
+fn render_coordination_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let saved = state.selected_coordination_server_index().is_some();
+    let name = if let Some(index) = state.selected_coordination_server_index() {
+        state.coordination_servers[index].name.clone()
+    } else {
+        "New Coordination".to_string()
+    };
+    let badge = if saved {
+        Span::styled("Saved", Style::default().bg(Color::Green).fg(Color::Black))
+    } else {
+        Span::styled("Draft", Style::default().bg(Color::Yellow).fg(Color::Black))
+    };
+    let content = vec![
+        Span::styled("✦", Style::default().fg(SECTION_COLOR_CONNECTION)),
+        Span::raw(" "),
+        Span::styled(
+            name,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        badge,
+    ];
+    render_framed_block(frame, area, Line::from(content), Alignment::Left, false);
+}
+
+fn coordination_status_text(state: &ConnectRemoteHostState) -> String {
+    match &state.coordination_online {
+        Some(Ok(node_id)) => {
+            let short = node_id.chars().take(8).collect::<String>();
+            format!("online · {short}")
+        }
+        Some(Err(_)) => "offline".to_string(),
+        None => "…".to_string(),
+    }
+}
+
+fn coordination_node_id_text(state: &ConnectRemoteHostState) -> String {
+    state
+        .coordination_node_id
+        .as_deref()
+        .map(|node_id| {
+            let mut short = node_id.chars().take(8).collect::<String>();
+            short.push('…');
+            short
+        })
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn coordination_operator_text(state: &ConnectRemoteHostState) -> String {
+    match state.coordination_operator {
+        Some(true) => "registered".to_string(),
+        Some(false) => "not registered".to_string(),
+        None => "—".to_string(),
+    }
+}
+
+fn coordination_age_text(created_at: u64, now: u64) -> String {
+    let elapsed = now.saturating_sub(created_at);
+    if elapsed < 60 {
+        "<1m".to_string()
+    } else if elapsed < 3600 {
+        format!("{}m ago", elapsed / 60)
+    } else if elapsed < 86400 {
+        format!("{}h ago", elapsed / 3600)
+    } else {
+        format!("{}d ago", elapsed / 86400)
+    }
+}
+
+fn render_coordination_requests(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    if area.height == 0 {
+        return;
+    }
+    if state.coordination_requests.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no join requests")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Left),
+            area,
+        );
+        return;
+    }
+    let now = crate::infra::coordination::server::now_unix();
+    let items: Vec<ListItem<'static>> = state
+        .coordination_requests
+        .iter()
+        .map(|request| {
+            let (icon, color) = match request.state.as_str() {
+                "pending" => ("◌", Color::Yellow),
+                "approved" => ("✓", Color::Cyan),
+                "joined" => ("●", Color::Green),
+                _ => ("✕", Color::DarkGray),
+            };
+            let short_id = request.node_id.chars().take(8).collect::<String>();
+            let age = coordination_age_text(request.created_at, now);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {icon} "), Style::default().fg(color)),
+                Span::styled(format!("{short_id:<9}"), Style::default().fg(Color::White)),
+                Span::styled(format!("{age:>8}  "), Style::default().fg(Color::Gray)),
+                Span::styled(request.state.clone(), Style::default().fg(color)),
+            ]))
+        })
+        .collect();
+    let selected = (state.coordination_selected_request < items.len())
+        .then_some(state.coordination_selected_request);
+    let visible_height = area.height as usize;
+    let selected_row = selected.unwrap_or(0);
+    let max_offset = items.len().saturating_sub(visible_height);
+    let offset = if selected_row >= visible_height {
+        (selected_row - visible_height + 1).min(max_offset)
+    } else {
+        0
+    };
+    let list = List::new(items).highlight_symbol("").highlight_style(
+        if state.focus == Focus::CoordinationRequests {
+            active_focus_style()
+        } else {
+            selected_host_style()
+        },
+    );
+    let mut list_state = ratatui::widgets::ListState::default()
+        .with_selected(selected)
+        .with_offset(offset);
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn render_coordination_info_box(frame: &mut Frame<'_>, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SECTION_BORDER_UNIFIED))
+        .style(Style::default().bg(SECTION_BG_UNIFIED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text = "ⓘ Enroll requests a join from this node; a registered operator approves the request to mint a one-time join link; the node redeems the link with Join. Approve is offered only while the local operator key is registered on the server.";
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().fg(Color::Gray))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn coordination_buttons(state: &ConnectRemoteHostState) -> Vec<(&'static str, Focus)> {
+    let mut buttons: Vec<(&'static str, Focus)> = Vec::new();
+    if state.selected_coordination_server_index().is_none() {
+        buttons.push((" ＋ Add ", Focus::CoordinationAdd));
+    }
+    buttons.push((" 📨 Enroll ", Focus::CoordinationEnroll));
+    if state.coordination_approve_available() {
+        buttons.push((" ✓ Approve ", Focus::CoordinationApprove));
+    }
+    if state.coordination_join_link.is_some() {
+        buttons.push((" ⧉ Copy ", Focus::CoordinationCopy));
+    }
+    if state.selected_coordination_server_index().is_some() {
+        buttons.push((" 🔗 Join ", Focus::CoordinationJoin));
+    }
+    buttons.push((" ⟳ Refresh ", Focus::CoordinationRefresh));
+    buttons
+}
+
+fn coordination_button_layout(
+    area: Rect,
+    state: &ConnectRemoteHostState,
+) -> Vec<(Rect, &'static str, Focus)> {
+    const GAP: u16 = 2;
+    let buttons = coordination_buttons(state);
+    let total: u16 = buttons
+        .iter()
+        .map(|(text, _)| text.width() as u16 + GAP)
+        .sum();
+    let total = total.saturating_sub(GAP);
+    let mut x = area.x + (area.width.saturating_sub(total)) / 2;
+    buttons
+        .into_iter()
+        .map(|(text, focus)| {
+            let width = text.width() as u16;
+            let rect = Rect::new(x, area.y, width, 1);
+            x = x.saturating_add(width + GAP);
+            (rect, text, focus)
+        })
+        .collect()
+}
+
+fn coordination_action_from_x(x: u16, area: Rect, state: &ConnectRemoteHostState) -> Option<Focus> {
+    coordination_button_layout(area, state)
+        .into_iter()
+        .find(|(rect, _, _)| x >= rect.x && x < rect.x.saturating_add(rect.width))
+        .map(|(_, _, focus)| focus)
+}
+
+fn render_coordination_actions(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    if area.height == 0 {
+        return;
+    }
+    for (rect, text, focus) in coordination_button_layout(area, state) {
+        let style = if state.focus == focus {
+            active_focus_style()
+        } else {
+            Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Gray)
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(style)
+                .alignment(Alignment::Center),
+            rect,
         );
     }
 }
@@ -4175,6 +5106,16 @@ fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
         Focus::RelayJoin => "Enter: join relay · Tab: next".to_string(),
         Focus::RelayRemove => "Enter: unpin relay · Tab: next".to_string(),
         Focus::RelayDelete => "Enter: delete profile · Tab: next".to_string(),
+        Focus::CoordinationAddr | Focus::CoordinationToken => {
+            "Enter: edit · Ctrl-V: paste · Tab: next".to_string()
+        }
+        Focus::CoordinationRequests => "↑/↓: select · Enter: approve · Tab: next".to_string(),
+        Focus::CoordinationAdd => "Enter: add server · Tab: next".to_string(),
+        Focus::CoordinationEnroll => "Enter: request enrollment · Tab: next".to_string(),
+        Focus::CoordinationApprove => "Enter: approve request · Tab: next".to_string(),
+        Focus::CoordinationCopy => "Enter: copy link · Tab: next".to_string(),
+        Focus::CoordinationJoin => "Enter: join · Tab: next".to_string(),
+        Focus::CoordinationRefresh => "Enter: refresh · Tab: next".to_string(),
         _ => {
             let base = "↑/↓ Select · Tab Switch · Enter Connect";
             if state.has_saved_selection() {
@@ -4814,6 +5755,24 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         let max_x = details.x.saturating_add(details.width.saturating_sub(1));
         return Some((desired_x.min(max_x), details.y.saturating_add(row)));
     }
+    if state.selected_coordination_config() {
+        let rows = CoordinationDetailsGeometry::from_area(details, state).rows;
+        let row = match field {
+            EditField::CoordinationAddr => rows.address,
+            EditField::CoordinationToken => rows.token,
+            _ => return None,
+        };
+        let value_area_x = details.x.saturating_add(DETAIL_VALUE_START);
+        let value_area_width = details.width.saturating_sub(DETAIL_VALUE_START);
+        let desired_x = right_aligned_cursor_x(
+            value_area_x,
+            value_area_width,
+            &edit_field_display_text(state, field),
+            state.edit_cursor,
+        );
+        let max_x = details.x.saturating_add(details.width.saturating_sub(1));
+        return Some((desired_x.min(max_x), details.y.saturating_add(row)));
+    }
     let rows = DetailsGeometry::from_area(details, state).rows;
     let row = match field {
         EditField::Host => rows.host,
@@ -4825,7 +5784,9 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         | EditField::AllProxy
         | EditField::HttpsProxy
         | EditField::RelayAddress
-        | EditField::RelayToken => return None,
+        | EditField::RelayToken
+        | EditField::CoordinationAddr
+        | EditField::CoordinationToken => return None,
     };
     let value_area_x = details.x.saturating_add(DETAIL_VALUE_START);
     let value_area_width = details.width.saturating_sub(DETAIL_VALUE_START);
@@ -4851,6 +5812,8 @@ fn edit_field_display_text(state: &ConnectRemoteHostState, field: EditField) -> 
         EditField::HttpsProxy => proxy_input_display(&state.proxy_draft.https_proxy),
         EditField::RelayAddress => relay_input_display(&state.relay_draft_address),
         EditField::RelayToken => relay_input_display(&state.relay_draft_token),
+        EditField::CoordinationAddr => relay_input_display(&state.coordination_draft_addr),
+        EditField::CoordinationToken => relay_input_display(&state.coordination_draft_token),
     }
 }
 
@@ -4938,6 +5901,8 @@ fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut Str
         EditField::HttpsProxy => &mut state.proxy_draft.https_proxy,
         EditField::RelayAddress => &mut state.relay_draft_address,
         EditField::RelayToken => &mut state.relay_draft_token,
+        EditField::CoordinationAddr => &mut state.coordination_draft_addr,
+        EditField::CoordinationToken => &mut state.coordination_draft_token,
     }
 }
 
@@ -4954,6 +5919,8 @@ fn edit_buffer_ref(state: &ConnectRemoteHostState, field: EditField) -> &str {
         EditField::HttpsProxy => &state.proxy_draft.https_proxy,
         EditField::RelayAddress => &state.relay_draft_address,
         EditField::RelayToken => &state.relay_draft_token,
+        EditField::CoordinationAddr => &state.coordination_draft_addr,
+        EditField::CoordinationToken => &state.coordination_draft_token,
     }
 }
 
@@ -4977,6 +5944,8 @@ fn edit_focus(field: EditField) -> Focus {
         EditField::HttpsProxy => Focus::HttpsProxy,
         EditField::RelayAddress => Focus::RelayAddress,
         EditField::RelayToken => Focus::RelayToken,
+        EditField::CoordinationAddr => Focus::CoordinationAddr,
+        EditField::CoordinationToken => Focus::CoordinationToken,
     }
 }
 
@@ -5066,6 +6035,281 @@ fn persist_successful_relay_join(state: &mut ConnectRemoteHostState, address: &s
     {
         state.selected = state.relay_selection_index().saturating_add(index);
     }
+}
+
+fn coordination_servers_path() -> std::path::PathBuf {
+    crate::host::ssh::remote_host_home::waitagent_home().join("coordination-servers.json")
+}
+
+fn load_coordination_servers() -> Vec<CoordinationServerProfile> {
+    let path = coordination_servers_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&text).unwrap_or_else(|error| {
+        crate::infra::error_log::ERROR_LOG.log(format!(
+            "[connect-popup] coordination-servers.json unreadable; treating as empty: {error}"
+        ));
+        Vec::new()
+    })
+}
+
+fn save_coordination_servers(profiles: &[CoordinationServerProfile]) -> Result<(), String> {
+    let path = coordination_servers_path();
+    if let Some(parent) = path.parent() {
+        crate::infra::coordination::enrollment::create_private_dir(parent)
+            .map_err(|error| format!("create coordination home: {error}"))?;
+    }
+    let text = serde_json::to_string_pretty(profiles)
+        .map_err(|error| format!("encode coordination servers: {error}"))?;
+    crate::infra::coordination::enrollment::write_private_file(&path, text.as_bytes())
+        .map_err(|error| format!("save coordination servers: {error}"))
+}
+
+fn load_coordination_node_id() -> Option<String> {
+    let bytes = std::fs::read(crate::command::coordination::node_key_path()).ok()?;
+    let bytes: [u8; 32] = bytes.as_slice().try_into().ok()?;
+    Some(iroh::SecretKey::from_bytes(&bytes).public().to_string())
+}
+
+fn coordination_poll_target(state: &ConnectRemoteHostState) -> Option<String> {
+    state
+        .selected_coordination_server_index()
+        .and_then(|index| state.coordination_servers.get(index))
+        .map(|profile| profile.node_addr.clone())
+}
+
+fn spawn_coordination_poller(
+    target: Arc<Mutex<Option<String>>>,
+    tx: CrossbeamSender<CoordinationSnapshot>,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let server = match target.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return,
+        };
+        let Some(server) = server else {
+            continue;
+        };
+        let snapshot = poll_coordination_server(&server);
+        if tx.send(snapshot).is_err() {
+            return;
+        }
+    });
+}
+
+fn poll_coordination_server(server: &str) -> CoordinationSnapshot {
+    let online = coordination_liveness(server);
+    let (operator, requests) = if online.is_some() {
+        coordination_admin_state(server)
+    } else {
+        (None, Vec::new())
+    };
+    CoordinationSnapshot {
+        server: server.to_string(),
+        online,
+        operator,
+        requests,
+    }
+}
+
+fn coordination_liveness(server: &str) -> Option<Result<String, String>> {
+    let key = iroh::SecretKey::generate();
+    let Ok(node_addr) = crate::command::coordination::parse_coordination_addr(server) else {
+        return Some(Err("invalid server address".to_string()));
+    };
+    let frame = serde_json::json!({"command": "ping"});
+    match crate::command::coordination::round_trip_blocking(
+        key,
+        node_addr,
+        crate::infra::coordination::NODE_ALPN,
+        &frame,
+    ) {
+        Ok(_) => Some(Ok(server.to_string())),
+        Err(message) => Some(Err(message)),
+    }
+}
+
+fn coordination_admin_state(server: &str) -> (Option<bool>, Vec<CoordinationRequestSummary>) {
+    let operator_key_path = crate::command::coordination::operator_key_path();
+    if !operator_key_path.is_file() {
+        return (None, Vec::new());
+    }
+    let Ok(key) = coordination_operator_key() else {
+        return (None, Vec::new());
+    };
+    let Ok(node_addr) = crate::command::coordination::parse_coordination_addr(server) else {
+        return (None, Vec::new());
+    };
+    let body = "{\"command\":\"requests\"}".to_string();
+    let (body, operator, signature) =
+        crate::infra::coordination::server::sign_admin_body(&key, &body);
+    let frame = serde_json::json!({"body": body, "operator": operator, "signature": signature});
+    let response = match crate::command::coordination::round_trip_blocking(
+        key,
+        node_addr,
+        crate::infra::coordination::ADMIN_ALPN,
+        &frame,
+    ) {
+        Ok(response) => response,
+        Err(_) => return (None, Vec::new()),
+    };
+    if let Some(error) = crate::command::coordination::response_error(&response) {
+        let registered = if error.contains("not authorized") {
+            Some(false)
+        } else {
+            Some(true)
+        };
+        return (registered, Vec::new());
+    }
+    let requests = response
+        .get("requests")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(coordination_request_summary)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (Some(true), requests)
+}
+
+fn coordination_request_summary(value: &serde_json::Value) -> Option<CoordinationRequestSummary> {
+    Some(CoordinationRequestSummary {
+        id: value
+            .get("id")
+            .and_then(serde_json::Value::as_str)?
+            .to_string(),
+        node_id: value
+            .get("node_id")
+            .and_then(serde_json::Value::as_str)?
+            .to_string(),
+        created_at: value
+            .get("created_at")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+        state: value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn coordination_apply_snapshot(
+    state: &mut ConnectRemoteHostState,
+    snapshot: CoordinationSnapshot,
+) -> bool {
+    let current = coordination_poll_target(state);
+    if current.as_deref() != Some(snapshot.server.as_str()) {
+        return false;
+    }
+    let known: Vec<&str> = state
+        .coordination_requests
+        .iter()
+        .map(|request| request.id.as_str())
+        .collect();
+    let new_pending = snapshot
+        .requests
+        .iter()
+        .any(|request| request.state == "pending" && !known.contains(&request.id.as_str()));
+    state.coordination_online = snapshot.online;
+    state.coordination_operator = snapshot.operator;
+    state.coordination_requests = snapshot.requests;
+    if state.coordination_selected_request >= state.coordination_requests.len() {
+        state.coordination_selected_request = state.coordination_requests.len().saturating_sub(1);
+    }
+    new_pending
+}
+
+fn coordination_node_key(generate: bool) -> Result<iroh::SecretKey, String> {
+    let path = crate::command::coordination::node_key_path();
+    if !generate && !path.is_file() {
+        return Err("coordination node key not found; request enrollment first".to_string());
+    }
+    crate::infra::coordination::enrollment::load_or_generate_key(&path)
+        .map_err(|error| format!("load coordination node key: {error}"))
+}
+
+fn coordination_operator_key() -> Result<iroh::SecretKey, String> {
+    let path = crate::command::coordination::operator_key_path();
+    if !path.is_file() {
+        return Err(
+            "coordination operator key not found; list its pubkey in coordination.toml operators"
+                .to_string(),
+        );
+    }
+    crate::infra::coordination::enrollment::load_or_generate_key(&path)
+        .map_err(|error| format!("load coordination operator key: {error}"))
+}
+
+fn coordination_enroll_request(addr: &str) -> Result<String, String> {
+    let key = coordination_node_key(true)?;
+    let node_addr = crate::command::coordination::parse_coordination_addr(addr)?;
+    let frame = serde_json::json!({
+        "command": "enroll-request",
+        "node_id": key.public().to_string(),
+    });
+    let response = crate::command::coordination::round_trip_blocking(
+        key,
+        node_addr,
+        crate::infra::coordination::NODE_ALPN,
+        &frame,
+    )?;
+    if let Some(error) = crate::command::coordination::response_error(&response) {
+        return Err(error);
+    }
+    response
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .map(|id| id.to_string())
+        .ok_or_else(|| "enroll-request response missing request_id".to_string())
+}
+
+fn coordination_approve_request(addr: &str, request_id: &str) -> Result<String, String> {
+    let key = coordination_operator_key()?;
+    let node_addr = crate::command::coordination::parse_coordination_addr(addr)?;
+    let body = format!("{{\"command\":\"approve\",\"request_id\":\"{request_id}\"}}");
+    let (body, operator, signature) =
+        crate::infra::coordination::server::sign_admin_body(&key, &body);
+    let frame = serde_json::json!({"body": body, "operator": operator, "signature": signature});
+    let response = crate::command::coordination::round_trip_blocking(
+        key,
+        node_addr,
+        crate::infra::coordination::ADMIN_ALPN,
+        &frame,
+    )?;
+    if let Some(error) = crate::command::coordination::response_error(&response) {
+        return Err(error);
+    }
+    response
+        .get("link")
+        .and_then(serde_json::Value::as_str)
+        .map(|link| link.to_string())
+        .ok_or_else(|| "approve response missing join link".to_string())
+}
+
+fn coordination_join_request(addr: &str, token_or_link: &str) -> Result<String, String> {
+    let token = crate::command::coordination::extract_join_token(token_or_link)?;
+    let key = coordination_node_key(true)?;
+    let node_addr = crate::command::coordination::parse_coordination_addr(addr)?;
+    let frame = serde_json::json!({
+        "command": "join",
+        "node_id": key.public().to_string(),
+        "token": token,
+    });
+    let response = crate::command::coordination::round_trip_blocking(
+        key,
+        node_addr,
+        crate::infra::coordination::NODE_ALPN,
+        &frame,
+    )?;
+    if let Some(error) = crate::command::coordination::response_error(&response) {
+        return Err(error);
+    }
+    Ok("Node joined the coordination server.".to_string())
 }
 
 fn load_profiles() -> Vec<RemoteHostProfile> {
@@ -6985,7 +8229,7 @@ mod tests {
             ],
         };
 
-        let popup = PopupGeometry::from_terminal_size((100, 30), &state);
+        let popup = PopupGeometry::from_terminal_size((100, 34), &state);
         assert!(popup.sidebar.proxy_list.height >= 2);
 
         state.selected = state.proxy_profile_selection_start();
@@ -9100,12 +10344,16 @@ mod tests {
         ];
 
         // Selection space: [0]=host, [1]=new host, [2]=proxy, [3]=new proxy,
-        // [4]=relay profile a, [5]=relay profile b, [6]=new relay.
+        // [4]=relay profile a, [5]=relay profile b, [6]=new relay,
+        // [7]=new coordination (no coordination servers saved).
         assert_eq!(state.relay_selection_index(), 4);
         assert_eq!(state.new_relay_selection_index(), 6);
+        assert_eq!(state.coordination_selection_index(), 7);
+        assert_eq!(state.new_coordination_selection_index(), 7);
         state.selected = 4;
         assert!(state.selected_relay_config());
         assert!(!state.selected_proxy_config());
+        assert!(!state.selected_coordination_config());
         assert_eq!(state.selected_relay_profile_index(), Some(0));
         state.selected = 6;
         assert!(state.selected_relay_config());
@@ -9115,18 +10363,27 @@ mod tests {
             "the New Relay button is not a saved profile"
         );
 
-        // Arrow-down walks every slot and stops at the New Relay button.
+        // Arrow-down walks every slot and stops at the New Coordination
+        // button, the last row of the sidebar.
         state.selected = 0;
         state.focus = Focus::Hosts;
-        for expected in 1..=6 {
+        for expected in 1..=7 {
             let _ = state.move_down();
             assert_eq!(state.selected, expected);
         }
         let _ = state.move_down();
-        assert_eq!(state.selected, 6, "the New Relay button is the last row");
+        assert_eq!(
+            state.selected, 7,
+            "the New Coordination button is the last row"
+        );
 
         // Arrow-up walks back through the relay profiles and re-syncs the
         // draft on every relay row.
+        let _ = state.move_up();
+        assert_eq!(
+            state.selected, 6,
+            "up from New Coordination reaches New Relay"
+        );
         for expected in (4..=5).rev() {
             let _ = state.move_up();
             assert_eq!(state.selected, expected);
@@ -9609,5 +10866,504 @@ mod tests {
             "the draft page is not the pinned relay"
         );
         assert!(!state.selected_relay_profile_is_pinned());
+    }
+
+    fn coordination_profile_fixture(name: &str, addr: &str) -> CoordinationServerProfile {
+        CoordinationServerProfile {
+            name: name.to_string(),
+            node_addr: addr.to_string(),
+        }
+    }
+
+    fn coordination_request_fixture(
+        id: &str,
+        node_id: &str,
+        state: &str,
+    ) -> CoordinationRequestSummary {
+        CoordinationRequestSummary {
+            id: id.to_string(),
+            node_id: node_id.to_string(),
+            created_at: 1_700_000_000,
+            state: state.to_string(),
+        }
+    }
+
+    fn valid_coordination_addr() -> String {
+        let key = iroh::SecretKey::generate();
+        format!("{}@127.0.0.1:7479", key.public())
+    }
+
+    fn select_first_coordination_server(state: &mut ConnectRemoteHostState) {
+        state.selected = state.coordination_selection_index();
+        state.sync_selected_coordination();
+    }
+
+    #[test]
+    fn coordination_selection_spans_servers_and_the_new_button() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.proxy_settings.profiles = vec![blank_proxy_profile()];
+        state.relay_profiles = vec![relay_profile_fixture("relay.example:7475")];
+        state.coordination_servers = vec![
+            coordination_profile_fixture("srv-a", "addr-a"),
+            coordination_profile_fixture("srv-b", "addr-b"),
+        ];
+
+        assert_eq!(state.coordination_selection_index(), 6);
+        assert_eq!(state.new_coordination_selection_index(), 8);
+        state.selected = 6;
+        assert!(state.selected_coordination_config());
+        assert!(!state.selected_relay_config());
+        assert_eq!(state.selected_coordination_server_index(), Some(0));
+        state.selected = 8;
+        assert!(state.selected_coordination_config());
+        assert_eq!(
+            state.selected_coordination_server_index(),
+            None,
+            "the New Coordination button is not a saved server"
+        );
+
+        state.selected = 0;
+        state.focus = Focus::Hosts;
+        for expected in 1..=8 {
+            let _ = state.move_down();
+            assert_eq!(state.selected, expected);
+        }
+        let _ = state.move_down();
+        assert_eq!(state.selected, 8, "New Coordination is the last row");
+
+        let _ = state.move_up();
+        assert_eq!(state.selected, 7);
+        assert_eq!(state.coordination_draft_addr, "addr-b");
+        let _ = state.move_up();
+        assert_eq!(state.selected, 6);
+        assert_eq!(state.coordination_draft_addr, "addr-a");
+    }
+
+    #[test]
+    fn coordination_sync_resets_runtime_snapshot_state() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.coordination_online = Some(Ok("node".to_string()));
+        state.coordination_operator = Some(true);
+        state.coordination_requests = vec![coordination_request_fixture("r1", "node-b", "pending")];
+        state.coordination_selected_request = 3;
+        state.coordination_join_link = Some("waitagent://join?token=ab".to_string());
+        state.coordination_enrolled = Some("r1".to_string());
+
+        state.sync_selected_coordination();
+        assert_eq!(state.coordination_draft_addr, "addr-a");
+        assert!(state.coordination_draft_token.is_empty());
+        assert_eq!(state.coordination_online, None);
+        assert_eq!(state.coordination_operator, None);
+        assert!(state.coordination_requests.is_empty());
+        assert_eq!(state.coordination_selected_request, 0);
+        assert_eq!(state.coordination_join_link, None);
+        assert_eq!(state.coordination_enrolled, None);
+    }
+
+    #[test]
+    fn coordination_page_tab_cycle_covers_available_actions() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.coordination_operator = Some(true);
+        state.coordination_requests = vec![coordination_request_fixture("r1", "node-b", "pending")];
+        state.coordination_join_link = Some("waitagent://join?token=ab".to_string());
+
+        assert_eq!(state.default_detail_focus(), Focus::CoordinationAddr);
+        let cycle = [
+            Focus::CoordinationAddr,
+            Focus::CoordinationToken,
+            Focus::CoordinationRequests,
+            Focus::CoordinationEnroll,
+            Focus::CoordinationApprove,
+            Focus::CoordinationCopy,
+            Focus::CoordinationJoin,
+            Focus::CoordinationRefresh,
+        ];
+        state.set_focus(Focus::Hosts);
+        for expected in cycle {
+            assert_eq!(state.next_focus(), expected);
+            state.set_focus(expected);
+        }
+        assert_eq!(state.next_focus(), Focus::Hosts);
+        state.set_focus(Focus::Hosts);
+        for expected in cycle.iter().rev() {
+            assert_eq!(state.prev_focus(), *expected);
+            state.set_focus(*expected);
+        }
+
+        state.coordination_operator = Some(false);
+        state.coordination_join_link = None;
+        state.set_focus(Focus::CoordinationRequests);
+        assert_eq!(state.next_focus(), Focus::CoordinationEnroll);
+        state.set_focus(Focus::CoordinationEnroll);
+        assert_eq!(state.next_focus(), Focus::CoordinationJoin);
+    }
+
+    #[test]
+    fn coordination_new_page_tab_cycle_offers_add_and_enroll() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![];
+        state.selected = state.new_coordination_selection_index();
+        state.sync_selected_coordination();
+
+        state.set_focus(Focus::Hosts);
+        assert_eq!(state.next_focus(), Focus::CoordinationAddr);
+        state.set_focus(Focus::CoordinationAddr);
+        assert_eq!(state.next_focus(), Focus::CoordinationToken);
+        state.set_focus(Focus::CoordinationToken);
+        assert_eq!(state.next_focus(), Focus::CoordinationRequests);
+        state.set_focus(Focus::CoordinationRequests);
+        assert_eq!(state.next_focus(), Focus::CoordinationAdd);
+        state.set_focus(Focus::CoordinationAdd);
+        assert_eq!(state.next_focus(), Focus::CoordinationEnroll);
+        state.set_focus(Focus::CoordinationEnroll);
+        assert_eq!(state.next_focus(), Focus::CoordinationRefresh);
+        state.set_focus(Focus::CoordinationRefresh);
+        assert_eq!(state.next_focus(), Focus::Hosts);
+    }
+
+    #[test]
+    fn coordination_add_action_validates_the_draft() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![];
+        state.selected = state.new_coordination_selection_index();
+        state.sync_selected_coordination();
+        state.set_focus(Focus::CoordinationAdd);
+
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(message) if message.contains("invalid")));
+
+        state.coordination_draft_addr = "not-a-server".to_string();
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(_)));
+
+        let path = coordination_servers_path();
+        let original = std::fs::read(&path).ok();
+        state.coordination_draft_addr = valid_coordination_addr();
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Hint(message) if message.contains("added")));
+        assert_eq!(state.coordination_servers.len(), 1);
+        assert_eq!(
+            state.selected,
+            state.coordination_selection_index(),
+            "the saved server becomes the selection"
+        );
+        assert_eq!(state.coordination_servers[0].name.len(), 8);
+        match original {
+            Some(bytes) => std::fs::write(&path, bytes).expect("restore coordination servers"),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn coordination_enroll_action_validates_the_draft() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.set_focus(Focus::CoordinationEnroll);
+
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(_)));
+
+        state.coordination_draft_addr = "not-a-server".to_string();
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(_)));
+
+        let addr = valid_coordination_addr();
+        state.coordination_draft_addr = addr.clone();
+        assert_eq!(
+            state.activate_focus(),
+            PaneAction::CoordinationEnroll { addr }
+        );
+    }
+
+    #[test]
+    fn coordination_approve_action_requires_a_pending_request() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.set_focus(Focus::CoordinationApprove);
+
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(message) if message.contains("pending")));
+
+        state.coordination_requests =
+            vec![coordination_request_fixture("r1", "node-b", "approved")];
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(message) if message.contains("pending")));
+
+        state.coordination_requests = vec![coordination_request_fixture("r2", "node-c", "pending")];
+        state.coordination_operator = Some(true);
+        assert!(state.coordination_approve_available());
+        assert_eq!(
+            state.activate_focus(),
+            PaneAction::CoordinationApprove {
+                addr: "addr-a".to_string(),
+                request_id: "r2".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn coordination_join_action_validates_the_token() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.set_focus(Focus::CoordinationJoin);
+
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(message) if message.contains("token")));
+
+        state.coordination_draft_token = "not-a-token".to_string();
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(_)));
+
+        let token = "ab".repeat(32);
+        state.coordination_draft_token = token.clone();
+        assert_eq!(
+            state.activate_focus(),
+            PaneAction::CoordinationJoin {
+                addr: "addr-a".to_string(),
+                token,
+            }
+        );
+    }
+
+    #[test]
+    fn coordination_copy_action_requires_a_link() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.set_focus(Focus::CoordinationCopy);
+
+        let action = state.activate_focus();
+        assert_eq!(action, PaneAction::None);
+        assert!(matches!(&state.status, Status::Error(_)));
+
+        state.coordination_join_link = Some("waitagent://join?token=ab".to_string());
+        assert_eq!(
+            state.activate_focus(),
+            PaneAction::CoordinationCopy {
+                link: "waitagent://join?token=ab".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn coordination_request_list_moves_with_arrows() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.coordination_requests = vec![
+            coordination_request_fixture("r1", "node-b", "pending"),
+            coordination_request_fixture("r2", "node-c", "pending"),
+        ];
+        state.set_focus(Focus::CoordinationRequests);
+
+        let _ = state.move_down();
+        assert_eq!(state.coordination_selected_request, 1);
+        assert_eq!(state.focus, Focus::CoordinationRequests);
+        let _ = state.move_up();
+        assert_eq!(state.coordination_selected_request, 0);
+
+        state.coordination_selected_request = 1;
+        let _ = state.move_down();
+        assert_eq!(state.focus, Focus::CoordinationEnroll);
+
+        state.coordination_selected_request = 0;
+        state.set_focus(Focus::CoordinationRequests);
+        let _ = state.move_up();
+        assert_eq!(state.focus, Focus::CoordinationToken);
+
+        state.set_focus(Focus::CoordinationRequests);
+        let _ = state.apply_key(key_event(KeyCode::Tab));
+        assert_eq!(state.focus, Focus::CoordinationEnroll);
+    }
+
+    #[test]
+    fn coordination_apply_snapshot_updates_state_and_flags_new_pending() {
+        let mut state = ConnectRemoteHostState::load();
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.coordination_selected_request = 5;
+
+        let snapshot = CoordinationSnapshot {
+            server: "addr-a".to_string(),
+            online: Some(Ok("node-z".to_string())),
+            operator: Some(true),
+            requests: vec![coordination_request_fixture("r1", "node-b", "pending")],
+        };
+        assert!(coordination_apply_snapshot(&mut state, snapshot.clone()));
+        assert_eq!(state.coordination_online, Some(Ok("node-z".to_string())));
+        assert_eq!(state.coordination_operator, Some(true));
+        assert_eq!(state.coordination_requests.len(), 1);
+        assert_eq!(
+            state.coordination_selected_request, 0,
+            "the selection clamps into the new list"
+        );
+
+        assert!(
+            !coordination_apply_snapshot(&mut state, snapshot),
+            "unchanged requests are not new again"
+        );
+        let with_new = CoordinationSnapshot {
+            server: "addr-a".to_string(),
+            online: Some(Ok("node-z".to_string())),
+            operator: Some(true),
+            requests: vec![
+                coordination_request_fixture("r1", "node-b", "approved"),
+                coordination_request_fixture("r2", "node-c", "pending"),
+            ],
+        };
+        assert!(
+            coordination_apply_snapshot(&mut state, with_new),
+            "a new pending request is flagged"
+        );
+
+        state.coordination_requests.clear();
+        let other_server = CoordinationSnapshot {
+            server: "addr-b".to_string(),
+            online: Some(Ok("node-y".to_string())),
+            operator: Some(false),
+            requests: vec![coordination_request_fixture("r9", "node-d", "pending")],
+        };
+        assert!(
+            !coordination_apply_snapshot(&mut state, other_server),
+            "a snapshot for another server is ignored"
+        );
+        assert_eq!(state.coordination_operator, Some(true));
+        assert!(state.coordination_requests.is_empty());
+    }
+
+    #[test]
+    fn coordination_age_text_formats_relative_time() {
+        let now = 100_000;
+        assert_eq!(coordination_age_text(99_970, now), "<1m");
+        assert_eq!(coordination_age_text(99_940, now), "1m ago");
+        assert_eq!(coordination_age_text(96_400, now), "1h ago");
+        assert_eq!(coordination_age_text(13_600, now), "1d ago");
+    }
+
+    #[test]
+    fn connect_popup_renders_coordination_section_and_details() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![];
+        state.proxy_settings = RemoteInstallProxySettings::default();
+        state.relay_profiles = vec![];
+        state.coordination_servers = vec![coordination_profile_fixture("srv-a", "addr-a")];
+        select_first_coordination_server(&mut state);
+        state.coordination_online = Some(Ok("node-z".to_string()));
+        state.coordination_operator = Some(true);
+        state.coordination_requests = vec![coordination_request_fixture("r1", "node-b", "pending")];
+        state.coordination_join_link = Some("waitagent://join?token=ab".to_string());
+        state.coordination_node_id = Some("node-local".to_string());
+        state.set_focus(Focus::CoordinationAddr);
+
+        let output = rendered_text(100, 40, &state);
+        assert!(
+            output.contains("Coordination"),
+            "the sidebar section header renders: {output}"
+        );
+        assert!(
+            output.contains("srv-a"),
+            "the saved server renders in the sidebar: {output}"
+        );
+        assert!(
+            output.contains("New Coordination"),
+            "the New Coordination button renders: {output}"
+        );
+        assert!(output.contains("Server"), "server card renders: {output}");
+        assert!(
+            output.contains("Join Requests"),
+            "requests card renders: {output}"
+        );
+        assert!(
+            output.contains("node-b"),
+            "the request node id renders: {output}"
+        );
+        assert!(
+            output.contains(" 📨  Enroll "),
+            "the enroll button renders: {output}"
+        );
+        assert!(
+            output.contains(" ✓ Approve "),
+            "the approve button renders for a pending request: {output}"
+        );
+        assert!(
+            output.contains(" ⧉ Copy "),
+            "the copy button renders with a minted link: {output}"
+        );
+        assert!(
+            output.contains(" 🔗  Join "),
+            "the join button renders: {output}"
+        );
+        assert!(
+            output.contains(" ⟳ Refresh "),
+            "the refresh button renders: {output}"
+        );
+        assert!(
+            output.contains("online"),
+            "the liveness row renders: {output}"
+        );
+        assert!(
+            output.contains("registered"),
+            "the operator row renders: {output}"
+        );
+        assert!(
+            output.contains("Saved"),
+            "the saved badge renders: {output}"
+        );
+        assert!(
+            output.contains("waitagent://join?token=ab"),
+            "the minted join link renders: {output}"
+        );
+    }
+
+    #[test]
+    fn connect_popup_renders_new_coordination_page() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![];
+        state.proxy_settings = RemoteInstallProxySettings::default();
+        state.relay_profiles = vec![];
+        state.coordination_servers = vec![];
+        state.selected = state.new_coordination_selection_index();
+        state.sync_selected_coordination();
+
+        let output = rendered_text(100, 40, &state);
+        assert!(
+            output.contains("New Coordination"),
+            "the empty section still offers the New Coordination button: {output}"
+        );
+        assert!(
+            output.contains("Draft"),
+            "the new page shows the Draft badge: {output}"
+        );
+        assert!(
+            output.contains(" ＋  Add "),
+            "the add button renders on the new page: {output}"
+        );
+        assert!(
+            !output.contains(" ✓ Approve "),
+            "without a pending request there is no approve button: {output}"
+        );
+        assert!(
+            !output.contains(" 🔗  Join "),
+            "without a saved server there is no join button: {output}"
+        );
     }
 }

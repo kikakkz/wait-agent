@@ -79,3 +79,51 @@ mode, or `<node-id>@<host:port>`. The node remembers the coordination
 address from its enroll-request (`coordination-server.json`) so
 `coordination join --link …` needs no further addressing; `--coordination`
 overrides it.
+
+## TUI page (slice 1-3b, issue #246)
+
+The Ctrl+W menu grows a fourth sidebar section, Coordination, mirroring
+the relay page's layout: saved server profiles, a "+ New Coordination"
+draft row, and a detail page. Design decisions:
+
+- **Persistence.** Saved servers live in
+  `~/.waitagent/coordination-servers.json` (0o600 via
+  `write_private_file`), separate from the node's remembered
+  enroll-target `coordination-server.json`: the profile list is
+  operator-managed state, the remembered address is node-side flow
+  state. Adding a server validates the address with
+  `parse_coordination_addr` and refuses invalid input with an inline
+  `Status::Error`; the profile name is the server node id's first 8
+  chars.
+- **New page vs saved page.** The New page offers Add (save only — the
+  operator flow must not spam a self-enroll request) and Enroll (save,
+  then enroll-request from the node key). The saved page offers Enroll,
+  Approve (only while the local operator key is registered and a
+  pending request is selected), Copy (only while a join link is minted),
+  Join, and Refresh. Tab cycles the available actions; Left/Right button
+  walking is not implemented on this page (Tab/Shift-Tab suffice).
+- **Status polling.** A background thread ticks every 5 s while the
+  popup is open and polls the *selected saved server* only: liveness is
+  "any well-formed JSON reply" to a `ping` frame on the node ALPN (the
+  server answers `unknown command`, which still proves a coordination
+  server is there; the poll uses an ephemeral key so merely opening the
+  page never writes key material). When the server is online, the poll
+  also fetches `requests` on the admin ALPN with the operator key when
+  one exists; `operator is not authorized` maps to operator=registered:
+  false. Snapshots are tagged with the server address and applied only
+  while that server is still selected, so a selection change mid-poll
+  never paints another server's state. The serve side logs one error
+  line per poll when the client closes without a stream — accepted
+  noise for a connect-only probe.
+- **New-request notification.** Applying a snapshot compares pending
+  request ids against the previous list; a new id raises
+  `Status::Hint("New join request arrived.")`. The first snapshot after
+  selecting a server therefore surfaces all outstanding pending
+  requests; repeats stay silent.
+- **Join link.** Approve mints the link via the admin round trip and
+  shows it on the page; Copy writes it to the clipboard (arboard). Join
+  redeems a pasted magic link or bare 64-hex token from the Join Token
+  field via the node ALPN `join` command. Approve/Enroll/Join/Refresh
+  run inline on the UI thread behind the existing Working modal, like
+  the relay join, reusing `round_trip_blocking` with its self-built
+  runtime; the 5 s poll is the only background activity.
