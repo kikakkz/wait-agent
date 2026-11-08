@@ -21,7 +21,7 @@
 
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,15 @@ pub fn parse_node_id(text: &str) -> Result<NodeId, String> {
     text.trim()
         .parse::<PublicKey>()
         .map_err(|error| format!("invalid node id {text:?}: {error}"))
+}
+
+/// Parses a fixed UDP bind address for `mesh-probe listen` (issue #226):
+/// cloud security groups and host firewalls pin rules to one port, so the
+/// probe must be able to bind a chosen address instead of an ephemeral one.
+pub fn parse_bind_addr(text: &str) -> Result<SocketAddrV4, String> {
+    text.trim()
+        .parse::<SocketAddrV4>()
+        .map_err(|error| format!("invalid bind address {text:?}: {error}"))
 }
 
 /// Serializes a [`NodeAddr`] as one self-describing JSON line (the spike's
@@ -144,11 +153,17 @@ fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 // --- the probe itself ---
 
 /// `mesh-probe listen`: prints this node's id and address line, then
-/// echoes every inbound bidi stream until interrupted.
-pub async fn listen(key_path: &Path) -> Result<(), String> {
+/// echoes every inbound bidi stream until interrupted. `bind` pins the
+/// UDP socket to one port for firewall/security-group rules; `None` keeps
+/// the ephemeral default.
+pub async fn listen(key_path: &Path, bind: Option<SocketAddrV4>) -> Result<(), String> {
     let key = load_or_generate_secret_key(key_path)
         .map_err(|error| format!("load probe key {}: {error}", key_path.display()))?;
-    let endpoint = Endpoint::builder()
+    let mut builder = Endpoint::builder();
+    if let Some(addr) = bind {
+        builder = builder.bind_addr_v4(addr);
+    }
+    let endpoint = builder
         .relay_mode(RelayMode::Disabled)
         .secret_key(key)
         .alpns(vec![MESH_PROBE_ALPN.to_vec()])
@@ -352,6 +367,24 @@ mod tests {
         assert!(parse_node_id(&node_id_string()).is_ok());
         assert!(parse_node_id("").is_err());
         assert!(parse_node_id("deadbeef").is_err());
+    }
+
+    #[test]
+    fn parse_bind_addr_accepts_v4_socket_addresses() {
+        let addr = parse_bind_addr("0.0.0.0:7479").unwrap();
+        assert_eq!(addr.to_string(), "0.0.0.0:7479");
+        assert_eq!(
+            parse_bind_addr(" 127.0.0.1:9999 \n").unwrap().to_string(),
+            "127.0.0.1:9999"
+        );
+        assert!(parse_bind_addr("").is_err());
+        assert!(parse_bind_addr("nope").is_err());
+        assert!(parse_bind_addr(":::1").is_err());
+        assert!(
+            parse_bind_addr("[::1]:7479").is_err(),
+            "IPv6 literal is not a SocketAddrV4"
+        );
+        assert!(parse_bind_addr("7479").is_err(), "missing host");
     }
 
     #[test]
