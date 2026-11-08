@@ -343,6 +343,9 @@ fn looks_like_status_line(text: &str) -> bool {
         || lowered.contains("/model")
 }
 
+// Kept for the detector's stability policy; no current caller after the
+// state-machine refactor (rust 1.91 dead_code reach).
+#[allow(dead_code)]
 fn kimi_has_stable_input_prompt(pane_text: &str) -> bool {
     let normalized_lines = pane_text
         .lines()

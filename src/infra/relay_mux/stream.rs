@@ -68,10 +68,13 @@ pub struct MuxStream {
 // Compile-time seam assertion: a mux'd stream IS a PeerConnection, so inner
 // TLS and the session protocols run over it without any glue.
 const _: () = {
-    fn assert_peer_connection<T: crate::infra::peer_connection::PeerConnection>() {}
-    fn assert() {
+    const fn assert_peer_connection<T: crate::infra::peer_connection::PeerConnection>() {}
+    const fn assert() {
         assert_peer_connection::<MuxStream>();
     }
+    // Invoke the checks (const fns, so the call is const-legal): 1.91's
+    // dead_code lint flags never-called fns even inside anonymous consts.
+    assert();
 };
 
 impl std::fmt::Debug for MuxStream {

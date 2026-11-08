@@ -94,6 +94,9 @@ impl fmt::Display for RemoteHostSecretStoreError {
 impl std::error::Error for RemoteHostSecretStoreError {}
 
 #[derive(Debug, Clone, Default)]
+// Constructed only from other modules' #[cfg(test)] code; unused in
+// non-test builds (rust 1.91 dead_code reach).
+#[allow(dead_code)]
 pub struct MemoryRemoteHostSecretStore {
     secrets: Arc<Mutex<HashMap<RemoteHostSecretId, RemoteHostSecretValue>>>,
 }

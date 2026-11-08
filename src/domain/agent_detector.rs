@@ -50,7 +50,9 @@ pub fn shell_script_arg(argv: &[String]) -> Option<&str> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputStabilityPolicy {
+    #[allow(dead_code)]
     Immediate,
+    #[allow(dead_code)]
     StableContent,
 }
 

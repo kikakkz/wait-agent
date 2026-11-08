@@ -17,6 +17,7 @@ impl Default for TerminalSize {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSnapshot {
     pub input_is_tty: bool,

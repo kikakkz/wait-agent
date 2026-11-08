@@ -55,6 +55,9 @@ impl fmt::Display for RemotePortProbeError {
 impl std::error::Error for RemotePortProbeError {}
 
 #[derive(Debug, Clone, Default)]
+// Retained as the trivial probe implementation; nothing constructs it
+// yet (rust 1.91 dead_code reach).
+#[allow(dead_code)]
 pub struct StaticRemotePortProbe;
 
 impl RemotePortProbe for StaticRemotePortProbe {

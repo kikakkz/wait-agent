@@ -8,7 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const WAITAGENT_HOOK_TAG: &str = "waitagent-agent-signal";
 
 /// Discriminates the on-disk hook configuration format for an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Equality compares only the variant (Json vs Toml): the payload is a
+/// function pointer, which rustc 1.91 rightly refuses to compare, and no
+/// caller needs to distinguish predicates.
+#[derive(Debug, Clone, Copy)]
 pub enum ConfigFormat {
     /// JSON-based config (Claude, Codex). The predicate decides whether a
     /// single hook object belongs to waitagent and should be replaced.
@@ -19,6 +23,18 @@ pub enum ConfigFormat {
     /// block belongs to waitagent and should be replaced.
     Toml { is_waitagent_hook: fn(&str) -> bool },
 }
+
+impl PartialEq for ConfigFormat {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (ConfigFormat::Json { .. }, ConfigFormat::Json { .. })
+                | (ConfigFormat::Toml { .. }, ConfigFormat::Toml { .. })
+        )
+    }
+}
+
+impl Eq for ConfigFormat {}
 
 /// Generic, agent-parameterized hook configuration service.
 ///
@@ -403,7 +419,8 @@ pub fn kimi_waitagent_hook_predicate(block: &str) -> bool {
 }
 
 pub fn config_text_has_unclosed_multiline_string(content: &str) -> bool {
-    content.matches("\"\"\"").count() % 2 != 0 || content.matches("'''").count() % 2 != 0
+    !content.matches("\"\"\"").count().is_multiple_of(2)
+        || !content.matches("'''").count().is_multiple_of(2)
 }
 
 #[cfg(test)]
