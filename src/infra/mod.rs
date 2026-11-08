@@ -1,4 +1,5 @@
 pub mod best_effort;
+pub mod coordination;
 pub mod error_log;
 pub mod mesh_probe;
 pub mod node_credentials;
