@@ -49,9 +49,28 @@ tool enforces the once-per-head invariant with a local state file; the
 hand-in itself is `PUT /pulls/{n}/merge` (squash) — with a merge queue
 enabled this enqueues, without it merges directly.
 
+## Running the watcher
+
+The watcher is a per-PR lifecycle process, not a scheduler poll: opening
+a PR and starting its watcher are one action. Start it as a background
+task of the agent session (panel-visible, completion-notified):
+
+  PYTHONUNBUFFERED=1 python3 .agents/tools/pr_watch.py <owner/repo> <pr> \
+      --interval 60 --cleanup
+
+It polls until the required checks are green, hands in once per head,
+waits for the merge, then runs the post-merge cleanup (stop condition 1)
+and exits. The background task ends with the watcher: exit 0 means the
+cleanup is done; exit 2 means it stopped at failing checks or
+changes-requested — triage, fix on-branch, push, and relaunch the
+watcher. Watchers are session-scoped by design (cross-session survival
+is not required): when a session starts, list the repo's open PRs and
+relaunch a watcher for any that lack one.
+
 ## Stop conditions
 
-1. PR merged — run the post-merge cleanup, then report to the issue:
+1. PR merged — with `--cleanup` the watcher performs this checklist and
+   reports to the issue automatically; without `--cleanup`, do it by hand:
    - remove the branch's dedicated worktree (`git worktree remove <path>`;
      the merged report's `cleanup.worktree` names it, null when absent);
    - delete the branch locally (`git branch -D <branch>`) and on the
