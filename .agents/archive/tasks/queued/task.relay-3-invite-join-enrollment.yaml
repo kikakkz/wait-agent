@@ -6,7 +6,7 @@ status: backlog
 priority: high
 design_ref:
   doc: docs/relay-design.md
-  section: 身份认证与入网, node 生命周期, 管理通道
+  section: identity authentication and enrollment, node lifecycle, management channel
   why:
     - Phase 1 task split item 3 enrollment must bind both directions in one
       flow without manual fingerprint transcription and without a MitM window.

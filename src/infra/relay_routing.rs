@@ -1,6 +1,6 @@
 //! Relay stream routing: pairs of stream legs across two registered node
 //! links, with header-only forwarding — node-to-node payloads stay inner-TLS
-//! ciphertext end to end (docs/relay-design.md 协议分层: the relay decodes
+//! ciphertext end to end (docs/relay-design.md Protocol Layers: the relay decodes
 //! outer frame headers only).
 //!
 //! A routed stream is a pair of [`RouteLeg`]s, one per direction:
@@ -148,7 +148,7 @@ pub(crate) enum CloseOutcome {
 }
 
 /// The routing table. Two legs per routed stream. Entries are unbounded
-/// until the capacity model lands (docs/relay-design.md 容量评估).
+/// until the capacity model lands (docs/relay-design.md Capacity Modeling and Admission Control).
 #[derive(Default)]
 pub(crate) struct RoutingTable {
     legs: Mutex<HashMap<RouteKey, RouteLeg>>,

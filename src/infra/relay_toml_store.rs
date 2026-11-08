@@ -1,5 +1,5 @@
 //! The node's pinned relay config: `~/.waitagent/relay.toml`
-//! (docs/relay-design.md 身份认证与入网). `relay join` writes the relay
+//! (docs/relay-design.md Authentication and Enrollment). `relay join` writes the relay
 //! address and the certificate fingerprint learned from the token-authenticated
 //! enrollment session; the node runtime reads it to pin the relay's TLS
 //! identity on every subsequent connection (mismatch → drop).

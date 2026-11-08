@@ -586,7 +586,7 @@ where
 
         let endpoint_uri = format!("tls://{}:{}", profile.host, bootstrap_result.remote_port);
 
-        // Issue #197 (方案 B): relay-role connects verify registration by
+        // Issue #197 (Plan B): relay-role connects verify registration by
         // polling the REMOTE relay admin over the SSH exec channel — no
         // authority-side network path (no direct dial, no relay-presence
         // probe, no Cloud back-dial fallback; all three stay untouched for

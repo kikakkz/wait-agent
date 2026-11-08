@@ -185,7 +185,7 @@ pub(crate) fn peer_fingerprint(tls: &ServerTls, peer_addr: SocketAddr) -> Option
 
 /// Registration phase: first frame must be `Register` within the deadline,
 /// and the node id must equal the mTLS fingerprint (self-proving identity,
-/// docs/relay-design.md node_id 策略).
+/// docs/relay-design.md node_id Strategy).
 #[allow(clippy::too_many_arguments)]
 async fn register_link(
     reader: &mut ReadHalf<ServerTls>,
@@ -323,7 +323,7 @@ async fn dispatch_loop(
                         );
                     }
                     Ok(Frame::AdminRequest { seq, command }) => {
-                        // Node-channel admin (docs/relay-design.md 管理通道):
+                        // Node-channel admin (docs/relay-design.md Management Channel):
                         // status reads the shared tables; announce labels the
                         // requesting link's own entry; resolve-node answers
                         // host-label lookups; invite/remove execute the exact
@@ -442,7 +442,7 @@ async fn handle_open_stream(
         .await;
         return true;
     };
-    // Capacity admission (docs/relay-design.md 容量评估与准入控制): refuse
+    // Capacity admission (docs/relay-design.md Capacity Modeling and Admission Control): refuse
     // new streams past max_streams or while the forwarded rate is over the
     // threshold — structured rejection, no route state created.
     match capacity.admit_open(routing.stream_count(), meter) {

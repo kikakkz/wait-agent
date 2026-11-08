@@ -1,5 +1,6 @@
 //! `waitagent relay join <address> <token>`: the node side of the
-//! enrollment session (docs/relay-design.md 身份认证与入网). Opens a TLS
+//! enrollment session (docs/relay-design.md Authentication and Enrollment).
+//! Opens a TLS
 //! connection to the relay's enrollment listener (`address port + 1`),
 //! authenticates with the node's own certificate (the whitelist check is
 //! deliberately absent — the token is the authorization), sends

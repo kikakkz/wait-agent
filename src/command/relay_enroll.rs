@@ -1,5 +1,6 @@
 //! `waitagent relay invite` / `relay remove` / `relay join`: the enrollment
-//! lifecycle commands (docs/relay-design.md 身份认证与入网). invite and
+//! lifecycle commands (docs/relay-design.md identity authentication and
+//! enrollment). invite and
 //! remove speak the relay's local admin socket like status/shutdown; join
 //! runs the token-authenticated enrollment session and pins the relay
 //! identity into `~/.waitagent/relay.toml`.

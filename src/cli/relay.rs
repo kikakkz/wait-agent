@@ -1,6 +1,6 @@
 //! `waitagent relay` subcommands: `serve` starts the relay; `status` /
 //! `shutdown` speak the local admin socket; `invite` / `join` / `remove`
-//! run the enrollment lifecycle (docs/relay-design.md 身份认证与入网).
+//! run the enrollment lifecycle (docs/relay-design.md authentication and enrollment).
 
 use super::{CliError, Command};
 

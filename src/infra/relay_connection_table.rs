@@ -1,7 +1,7 @@
 //! Relay connection table: the in-memory `node_id -> connection` registry
 //! and its liveness bookkeeping.
 //!
-//! Governing design: docs/relay-design.md (node 生命周期, 数据策略). The
+//! Governing design: docs/relay-design.md (Node Lifecycle, data policy). The
 //! table is memory-only — the relay persists no session or traffic data;
 //! on-disk state stays limited to relay.toml, the whitelist directory, and
 //! token parameters. Entries appear on `Register` and disappear on

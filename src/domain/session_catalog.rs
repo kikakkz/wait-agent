@@ -554,9 +554,9 @@ mod tests {
         let command_name = DetectorRegistry::default().detect_command_name("kimi-code", None, "");
         let state = DetectorRegistry::default().infer_task_state(
             Some(&command_name),
-            "✨ 列出当前目录文件\n\
+            "✨ List files in the current directory\n\
              ● Used Bash (ls -la)\n\
-             ● 当前目录 /home/kk/ozon 的文件和目录如下：\n\
+             ● Files and directories under /home/kk/ozon:\n\
              ╭────────────────────────────────────────╮\n\
              │ >                                      │\n\
              ╰────────────────────────────────────────╯\n\

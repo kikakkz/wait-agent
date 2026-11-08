@@ -6,7 +6,7 @@ status: backlog
 priority: medium
 design_ref:
   doc: docs/relay-design.md
-  section: 容量评估与准入控制, 配置面
+  section: Capacity Modeling and Admission Control, Configuration Surface
   why:
     - Phase 1 task split item 6 the single-node capacity model (max_nodes,
       max_streams, throughput threshold) is the future cluster scheduler

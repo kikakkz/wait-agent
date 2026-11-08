@@ -6,7 +6,7 @@ status: backlog
 priority: medium
 design_ref:
   doc: docs/relay-design.md
-  section: 目标与非目标, 管理通道（WebUI / CLI ↔ relay）, Phase 1 任务拆分 10
+  section: Goals and Non-Goals, Management channel (WebUI / CLI ↔ relay), Phase 1 task split item 10
   why:
     - Phase 1 task split item 10 the WebUI is the daily management plane and
       the browser coding surface; the web service enrolls as a special node

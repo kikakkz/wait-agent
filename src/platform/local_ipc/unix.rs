@@ -29,7 +29,7 @@ impl LocalListener {
 
     #[allow(dead_code)]
     pub fn local_addr(&self) -> io::Result<LocalIpcAddr> {
-        // UDS 本地地址不携带 port；返回传入地址更实用，但这里简化处理。
+        // UDS local addresses carry no port; returning the passed-in address would be more useful, but this is simplified.
         Err(io::Error::other("Unix local_addr not supported"))
     }
 }

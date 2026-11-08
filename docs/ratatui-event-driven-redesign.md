@@ -6,91 +6,91 @@ Date: `2026-07-30`
 
 ## 1. Purpose
 
-当前 `waitagent --ratatui` 的 server 进程（`__ratatui-node-server`）内部采用混合模型：
+The current `waitagent --ratatui` server process (`__ratatui-node-server`) uses a hybrid model internally:
 
-- `RatatuiLocalSession` 依赖 `alacritty_terminal::EventLoop`，自包含运行；
-- `RatatuiAuthorityHostSession` 手写 PTY reader / writer / child-waiter，每个 authority-host session 有三个独立 thread；
-- 新增 watcher thread 轮询 `authority_host_sessions` 来检测退出；
-- `SharedState` 被多个 thread 直接修改，authority-host session 的生命周期事件靠 `mpsc::Receiver` 单消费者 channel 传递，导致 output pump 和 watcher 两个消费者竞争退出事件。
+- `RatatuiLocalSession` relies on `alacritty_terminal::EventLoop` and runs self-contained;
+- `RatatuiAuthorityHostSession` hand-rolls PTY reader / writer / child-waiter threads, with three independent threads per authority-host session;
+- a new watcher thread polls `authority_host_sessions` to detect exits;
+- `SharedState` is mutated directly by multiple threads; lifecycle events of authority-host sessions travel over an `mpsc::Receiver` single-consumer channel, so the output pump and the watcher compete as two consumers for exit events.
 
-本文档定义 server 内部的 event-driven 改造方案：
+This document defines the event-driven redesign of the server internals:
 
-- `RatatuiLocalSession` 保持完整，继续由 `alacritty_terminal::EventLoop` 驱动；
-- `RatatuiAuthorityHostSession` 改为由统一的 `AuthorityHostIoLoop` 驱动，不再自己 spawn thread；
-- 新增 `StateEventLoop`，作为 `SharedState` 的唯一写者；
-- 所有生命周期事件（local child exit、authority-host child exit、client 命令、session sync 请求）都 converge 到 `StateEventLoop`；
-- 移除 polling watcher；
-- 数据流与控制流分离。
+- `RatatuiLocalSession` stays intact and remains driven by `alacritty_terminal::EventLoop`;
+- `RatatuiAuthorityHostSession` is instead driven by a unified `AuthorityHostIoLoop` and no longer spawns its own threads;
+- a new `StateEventLoop` is added as the sole writer of `SharedState`;
+- all lifecycle events (local child exit, authority-host child exit, client commands, session sync requests) converge on `StateEventLoop`;
+- the polling watcher is removed;
+- data flow is separated from control flow.
 
 ## 2. Scope
 
-本次 redesign 聚焦 server 进程内部架构。TUI client 侧保持现有事件模型：
+This redesign focuses on the internal architecture of the server process. The TUI client side keeps the existing event model:
 
-- client 通过 Unix socket 与 server 通信；
-- client 有自己的 UI event loop（crossterm + ratatui）；
-- client 接收 server 的 `Snapshot` / `Disconnected` 消息更新 UI。
+- the client talks to the server over a Unix socket;
+- the client has its own UI event loop (crossterm + ratatui);
+- the client updates its UI from the server's `Snapshot` / `Disconnected` messages.
 
-## 3. 非协商原则
+## 3. Non-Negotiable Principles
 
-1. **没有 per-authority-host-session thread**。所有 authority-host PTY I/O 由 `AuthorityHostIoLoop` 统一处理。
-2. **子进程退出不再由 session 内部轮询 `try_wait()`**。local session 由 `alacritty_terminal::EventLoop` 检测；authority-host session 由统一 child waiter 检测。
-3. **`SharedState` 写操作只由 `StateEventLoop` 执行**。其他组件只读或通过事件请求修改。
-4. **数据流不进 `StateEventLoop`**。authority-host 原始 PTY 字节由 `AuthorityHostIoLoop` 直接转发；local session 输出由 `alacritty_terminal::EventLoop` 直接写进 `Term`。
-5. **移除 polling watcher**。退出、resize、title 变化等都通过事件传播。
+1. **No per-authority-host-session thread**. All authority-host PTY I/O is handled uniformly by `AuthorityHostIoLoop`.
+2. **Child exit is no longer polled inside the session with `try_wait()`**. Local sessions are detected by `alacritty_terminal::EventLoop`; authority-host sessions are detected by the unified child waiter.
+3. **All `SharedState` writes are performed only by `StateEventLoop`**. Other components read only, or request changes via events.
+4. **Data flow does not enter `StateEventLoop`**. Raw authority-host PTY bytes are forwarded directly by `AuthorityHostIoLoop`; local session output is written directly into `Term` by `alacritty_terminal::EventLoop`.
+5. **Remove the polling watcher**. Exits, resizes, title changes, etc. are all propagated via events.
 
-## 4. 当前问题根因
+## 4. Root Causes of Current Problems
 
-### 4.1 authority-host session 退出未同步
+### 4.1 authority-host session exit not synchronized
 
-`RatatuiAuthorityHostSession` 手写三个 thread：
+`RatatuiAuthorityHostSession` hand-rolls three threads:
 
-- `spawn_pty_reader`：读 PTY 输出，经 `output_rx` 给 output pump；
-- `spawn_pty_writer`：从 `input_rx` 读输入写 PTY；
-- `spawn_child_waiter`：轮询 `child.try_wait()`，退出后发送一次 `exit_code` 到 `exit_rx`。
+- `spawn_pty_reader`: reads PTY output and hands it to the output pump via `output_rx`;
+- `spawn_pty_writer`: reads input from `input_rx` and writes it to the PTY;
+- `spawn_child_waiter`: polls `child.try_wait()` and, on exit, sends the exit code once to `exit_rx`.
 
-`local_session_sync_backends.rs:1265` 的 output pump 调用 `output_session.try_recv_exit()` 消费了唯一的退出码，导致后续 watcher 的 `try_recv_exit()` 永远返回 `None`，session 无法从 `SharedState` 移除，`TargetExited` 也不会发布给 authority。
+The output pump in `local_session_sync_backends.rs:1265` calls `output_session.try_recv_exit()`, consuming the single exit code. As a result, the watcher's subsequent `try_recv_exit()` always returns `None`; the session is never removed from `SharedState`, and `TargetExited` is never published to the authority.
 
-### 4.2 SharedState 被直接修改
+### 4.2 SharedState mutated directly
 
-`RatatuiLocalTargetFactory::create_local_target` 直接 `insert` 到 `sessions` 和 `authority_host_sessions`；client handler 直接调用 `feed_input`、`resize`；这些写操作分散在各个 thread 中，难以保证一致性。
+`RatatuiLocalTargetFactory::create_local_target` directly `insert`s into `sessions` and `authority_host_sessions`; client handlers call `feed_input` and `resize` directly. These writes are scattered across threads, making consistency hard to guarantee.
 
-## 5. 目标架构
+## 5. Target Architecture
 
 ```text
 Server Process (waitagent __ratatui-node-server)
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Local Sessions                                                     │
-│  - 每个 local session 一个 alacritty_terminal::EventLoop            │
-│  - 内部管理自己的 PTY I/O、Term 更新、child exit                    │
-│  - EventProxy 把 ChildExit / Title 事件发给 StateEventLoop         │
+│  - one alacritty_terminal::EventLoop per local session              │
+│  - internally manages its own PTY I/O, Term updates, child exit     │
+│  - EventProxy sends ChildExit / Title events to StateEventLoop      │
 ├─────────────────────────────────────────────────────────────────────┤
 │  AuthorityHostIoLoop  (single thread, polling::Poller)              │
 │                                                                     │
-│  注册并 poll：                                                       │
-│  - 所有 authority-host PTY master fd                               │
+│  registers and polls:                                               │
+│  - all authority-host PTY master fds                                │
 │                                                                     │
-│  行为：                                                              │
-│  - PTY 可读 → 读取原始字节 → 转发给 remote viewer                   │
-│  - 收到输入请求 → 写 PTY master                                     │
-│  - 收到 resize 请求 → ioctl TIOCSWINSZ                              │
-│  - 把 ChildExited / PtyClosed 发给 StateEventLoop                  │
+│  behavior:                                                          │
+│  - PTY readable → read raw bytes → forward to remote viewer         │
+│  - input request received → write PTY master                        │
+│  - resize request received → ioctl TIOCSWINSZ                       │
+│  - send ChildExited / PtyClosed to StateEventLoop                   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  AuthorityHostIoLoop 内部                                           │
-│  - 用 signal-hook 监听 SIGCHLD                                     │
-│  - SIGCHLD 触发时遍历 authority-host children 调用 try_wait         │
-│  - 发送 StateEvent::AuthorityHostSessionChildExited                │
-│  - local session 子进程仍由 alacritty_terminal::EventLoop 检测      │
+│  AuthorityHostIoLoop internals                                      │
+│  - listen for SIGCHLD with signal-hook                              │
+│  - on SIGCHLD, iterate authority-host children and call try_wait    │
+│  - send StateEvent::AuthorityHostSessionChildExited                 │
+│  - local children still detected by alacritty_terminal::EventLoop   │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Tokio Runtime                                                      │
 │  - client Unix sockets                                              │
-│  - remote gRPC streams (session sync / ingress / remote viewer)    │
-│  - 把 client 命令 / session sync 请求转成事件发给 StateEventLoop   │
+│  - remote gRPC streams (session sync / ingress / remote viewer)     │
+│  - turn client commands / sync requests into StateEventLoop events  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  StateEventLoop  (single thread)                                    │
-│  - 更新 SharedState                                                 │
-│  - 调用 handle_session_exit / activate_target / create_*           │
-│  - 发送 LocalCatalogChangeRequest 给 session sync runtime          │
-│  - broadcast Snapshot 给所有 clients                               │
+│  - update SharedState                                               │
+│  - call handle_session_exit / activate_target / create_*            │
+│  - send LocalCatalogChangeRequest to session sync runtime           │
+│  - broadcast Snapshot to all clients                                │
 └─────────────────────────────────────────────────────────────────────┘
                                     │
                                     │ Unix socket
@@ -98,40 +98,40 @@ Server Process (waitagent __ratatui-node-server)
 ┌─────────────────────────────────────────────────────────────────────┐
 │  TUI Client Process (waitagent --ratatui)                           │
 │  UI Event Loop (crossterm + ratatui)                                │
-│  - 接收 Snapshot → 渲染 sidebar / main pane / footer               │
-│  - 发送 ClientMessage → server                                     │
+│  - receive Snapshot → render sidebar / main pane / footer           │
+│  - send ClientMessage → server                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## 6. 为什么这样分
+## 6. Why This Split
 
-### Local session 保持完整
+### Local sessions stay intact
 
-Local session 就是一个完整 tty：
+A local session is a full tty:
 
-- 需要 terminal emulator 维护 screen buffer；
-- 输出只给本地 TUI 用；
-- `alacritty_terminal::EventLoop` 已经成熟处理这些。
+- it needs a terminal emulator to maintain the screen buffer;
+- its output is only for the local TUI;
+- `alacritty_terminal::EventLoop` already handles all of this, and is mature.
 
-强行拆开成"自己的 I/O Loop + Term"只会增加复杂度，没有明显收益。
+Forcing it apart into "its own I/O Loop + Term" would only add complexity with no clear benefit.
 
-### Authority-host session 必须拆开
+### Authority-host sessions must be split apart
 
-Authority-host session 不是 tty 显示，而是**原始字节转发器**：
+An authority-host session is not a tty display; it is a **raw byte forwarder**:
 
-- 不需要 terminal emulator；
-- 输出要原封不动发给远端 viewer；
-- 当前手写 thread 导致退出检测不可靠。
+- no terminal emulator is needed;
+- output must be forwarded to the remote viewer unaltered;
+- the current hand-rolled threads make exit detection unreliable.
 
-所以需要一个专门的 I/O loop 来统一管理。
+So a dedicated I/O loop is needed to manage them uniformly.
 
-### StateEventLoop 统一状态
+### StateEventLoop unifies state
 
-无论 local 还是 authority-host，session 的 create / exit / activate / resize 最终都要修改同一份 `SharedState`。把这些收敛到一个单线程 event loop，可以避免锁竞争和状态不一致。
+Whether local or authority-host, session create / exit / activate / resize all end up mutating the same `SharedState`. Converging these on a single-threaded event loop avoids lock contention and inconsistent state.
 
-## 7. 事件类型
+## 7. Event Types
 
-### 7.1 进入 StateEventLoop 的事件
+### 7.1 Events entering StateEventLoop
 
 ```rust
 enum StateEvent {
@@ -186,7 +186,7 @@ enum StateEvent {
 }
 ```
 
-### 7.2 AuthorityHostIoLoop 内部消息
+### 7.2 AuthorityHostIoLoop internal messages
 
 ```rust
 enum AuthorityHostIoRequest {
@@ -209,9 +209,9 @@ enum AuthorityHostIoRequest {
 }
 ```
 
-## 8. Local Session 改造
+## 8. Local Session Redesign
 
-### 8.1 保留 `alacritty_terminal::EventLoop`
+### 8.1 Keep `alacritty_terminal::EventLoop`
 
 ```rust
 pub struct RatatuiLocalSession {
@@ -222,7 +222,7 @@ pub struct RatatuiLocalSession {
 }
 ```
 
-### 8.2 EventProxy 改为只发事件给 StateEventLoop
+### 8.2 EventProxy only sends events to StateEventLoop
 
 ```rust
 impl EventListener for EventProxy {
@@ -246,7 +246,7 @@ impl EventListener for EventProxy {
                     title,
                 });
             }
-            // Wakeup 不再用于驱动 snapshot；StateEventLoop 在 output 事件后自动 broadcast
+            // Wakeup no longer drives snapshots; StateEventLoop broadcasts automatically after output events
             _ => {}
         }
     }
@@ -255,13 +255,13 @@ impl EventListener for EventProxy {
 
 ### 8.3 feed_input / resize / shutdown
 
-这些方法仍然通过 `EventLoopSender` 发送 `Msg::Input` / `Msg::Resize` / `Msg::Shutdown` 给 `alacritty_terminal::EventLoop`。不需要改动。
+These methods still send `Msg::Input` / `Msg::Resize` / `Msg::Shutdown` to `alacritty_terminal::EventLoop` via `EventLoopSender`. No changes needed.
 
 ## 9. AuthorityHostIoLoop
 
-### 9.1 注册 PTY fd
+### 9.1 Registering the PTY fd
 
-使用 `polling` crate（已通过 `alacritty_terminal` 引入）：
+Use the `polling` crate (already pulled in via `alacritty_terminal`):
 
 ```rust
 let mut poller = polling::Poller::new()?;
@@ -275,7 +275,7 @@ for (session_id, pty_master) in &authority_host_sessions {
 }
 ```
 
-### 9.2 读取并转发
+### 9.2 Read and forward
 
 ```rust
 loop {
@@ -301,12 +301,12 @@ loop {
 }
 ```
 
-`forward_to_remote_viewer` 通过 session sync 的 active gRPC session 发送 `RawPtyOutput`。
+`forward_to_remote_viewer` sends `RawPtyOutput` over the session sync active gRPC session.
 
-### 9.3 写输入 / Resize
+### 9.3 Writing input / Resize
 
 ```rust
-// 内部 channel 接收 AuthorityHostIoRequest
+// internal channel receives AuthorityHostIoRequest
 while let Ok(req) = io_rx.try_recv() {
     match req {
         AuthorityHostIoRequest::WriteInput { session_id, bytes } => {
@@ -325,13 +325,13 @@ while let Ok(req) = io_rx.try_recv() {
 }
 ```
 
-## 10. Authority-Host Child Exit 检测
+## 10. Authority-Host Child Exit Detection
 
-Authority-host session 的子进程退出由 `AuthorityHostIoLoop` 统一检测，不单独 spawn waiter thread。
+Child exit for authority-host sessions is detected uniformly by `AuthorityHostIoLoop`; no separate waiter thread is spawned.
 
-### 10.1 使用 signal-hook 监听 SIGCHLD
+### 10.1 Listening for SIGCHLD with signal-hook
 
-`signal_hook` crate 已通过 `alacritty_terminal` 引入。注册 SIGCHLD 到一个 pipe：
+The `signal_hook` crate is already available via `alacritty_terminal`. Register SIGCHLD on a pipe:
 
 ```rust
 use signal_hook::consts::signal::SIGCHLD;
@@ -347,7 +347,7 @@ poller.add(
 )?;
 ```
 
-### 10.2 在 AuthorityHostIoLoop 中处理
+### 10.2 Handling it in AuthorityHostIoLoop
 
 ```rust
 loop {
@@ -355,11 +355,11 @@ loop {
 
     for event in events.iter() {
         if event.key == SIGCHLD_TOKEN {
-            // 清空 signal pipe
+            // drain the signal pipe
             let mut buf = [0u8; 1];
             let _ = sig_read.read(&mut buf);
 
-            // 遍历所有 authority-host children，用 WNOHANG 检查退出
+            // iterate all authority-host children, checking exit with WNOHANG
             for (session_id, child) in &mut authority_host_children {
                 match child.try_wait() {
                     Ok(Some(status)) => {
@@ -376,18 +376,18 @@ loop {
             }
         }
 
-        // ... PTY 可读处理
+        // ... PTY readable handling
     }
 }
 ```
 
-### 10.3 与 Local Session 不冲突
+### 10.3 No conflict with local sessions
 
-- Local session 子进程由 `alacritty_terminal::EventLoop` 自己的 SIGCHLD handler 检测；
-- Authority-host session 子进程由 `AuthorityHostIoLoop` 的 SIGCHLD handler 检测；
-- 两者各自调用自己管理的 child 的 `try_wait()`，互不竞争。
+- Local session children are detected by `alacritty_terminal::EventLoop`'s own SIGCHLD handler;
+- authority-host session children are detected by `AuthorityHostIoLoop`'s SIGCHLD handler;
+- each side calls `try_wait()` only on the children it manages, so they do not compete.
 
-这种设计下没有专门的 child waiter thread，child exit 事件完全由 `AuthorityHostIoLoop` 的事件循环驱动。
+Under this design there is no dedicated child waiter thread; child exit events are driven entirely by the `AuthorityHostIoLoop` event loop.
 
 ## 11. StateEventLoop
 
@@ -422,7 +422,7 @@ async fn run_state_event_loop(
 
             StateEvent::ClientDisconnected { client_id } => {
                 shared.remove_client(client_id);
-                // 如果最后一个 client 且没有 session，可选择 shutdown
+                // if this is the last client and there are no sessions, we can optionally shut down
             }
 
             StateEvent::ClientInput { session_id, bytes } => {
@@ -443,7 +443,7 @@ async fn run_state_event_loop(
 
             StateEvent::ClientResized { cols, rows } => {
                 shared.resize_active_sessions(cols, rows);
-                // active authority-host session 需要通知 AuthorityHostIoLoop
+                // the active authority-host session must be notified via AuthorityHostIoLoop
                 if let Some(id) = active_authority_host_session(&shared) {
                     authority_host_io_tx.send(AuthorityHostIoRequest::Resize {
                         session_id: id,
@@ -467,7 +467,7 @@ async fn run_state_event_loop(
                 });
                 notify_catalog_changed(&catalog_tx, LocalCatalogChangeReason::LocalRuntimeChanged);
                 let _ = shared.broadcast_snapshot();
-                // 回复 session sync CreateSessionAccepted
+                // reply to session sync with CreateSessionAccepted
             }
 
             StateEvent::RemoteSessionClosed { target_id } => {
@@ -479,9 +479,9 @@ async fn run_state_event_loop(
 }
 ```
 
-## 12. Session Sync Runtime 交互
+## 12. Session Sync Runtime Interaction
 
-### 12.1 创建 authority-host session
+### 12.1 Creating an authority-host session
 
 ```text
 remote authority
@@ -490,21 +490,21 @@ remote authority
     ▼
 session sync runtime task (tokio)
     │
-    │ 不直接创建，发送 StateEvent::CreateAuthorityHostSession
+    │ does not create directly; sends StateEvent::CreateAuthorityHostSession
     ▼
 StateEventLoop
     │
-    │ 创建 RatatuiAuthorityHostSession，注册到 AuthorityHostIoLoop
-    │ 发送 LocalCatalogChangeRequest
+    │ creates RatatuiAuthorityHostSession, registers it with AuthorityHostIoLoop
+    │ sends LocalCatalogChangeRequest
     ▼
 session sync runtime
     │
-    │ 发布 TargetPublished 给 authority
+    │ publishes TargetPublished to the authority
     ▼
-local server 更新 sidebar
+local server updates the sidebar
 ```
 
-### 12.2 authority-host session 退出
+### 12.2 authority-host session exit
 
 ```text
 shell exit
@@ -513,22 +513,22 @@ shell exit
     ▼
 StateEventLoop
     │
-    │ 从 SharedState 移除，发送 LocalCatalogChangeRequest
+    │ removes it from SharedState, sends LocalCatalogChangeRequest
     ▼
 session sync runtime
     │
-    │ 发布 TargetExited 给 authority
+    │ publishes TargetExited to the authority
     ▼
-local server 收到 TargetExited
+local server receives TargetExited
     │
     │ signal_remote_target_exited -> StateEvent::RemoteSessionClosed
     ▼
-StateEventLoop 更新 local catalog，broadcast snapshot
+StateEventLoop updates local catalog, broadcasts snapshot
 ```
 
-## 13. Client 通信
+## 13. Client Communication
 
-Client Unix socket 由 tokio runtime 处理：
+Client Unix sockets are handled by the tokio runtime:
 
 ```rust
 tokio::spawn(async move {
@@ -540,61 +540,61 @@ tokio::spawn(async move {
 });
 ```
 
-`handle_client`：
+`handle_client`:
 
-- 连接建立 → `StateEvent::ClientConnected`
-- 读取消息 → 转成对应 `StateEvent`
-- 接收 StateEventLoop 发来的 snapshot → 写 socket
-- 断开 → `StateEvent::ClientDisconnected`
+- connection established → `StateEvent::ClientConnected`
+- message read → converted to the corresponding `StateEvent`
+- snapshot received from StateEventLoop → written to the socket
+- disconnect → `StateEvent::ClientDisconnected`
 
-## 14. 实施阶段
+## 14. Implementation Phases
 
-### Phase 1：StateEventLoop + AuthorityHostIoLoop
+### Phase 1: StateEventLoop + AuthorityHostIoLoop
 
-- 新增 `StateEventLoop`；
-- 新增 `AuthorityHostIoLoop`，基于 `polling` crate；
-- 重写 `RatatuiAuthorityHostSession`：只保留 fd + pid，不 spawn thread；
-- 在 `AuthorityHostIoLoop` 中用 signal-hook 监听 SIGCHLD，检测 authority-host child exit；
-- 把 `RatatuiLocalTargetFactory::create_local_target` 改为发送事件给 `StateEventLoop`；
-- 验证 authority-host session exit 正确传播。
+- add `StateEventLoop`;
+- add `AuthorityHostIoLoop`, based on the `polling` crate;
+- rewrite `RatatuiAuthorityHostSession`: keep only fd + pid, spawn no threads;
+- listen for SIGCHLD with signal-hook in `AuthorityHostIoLoop` to detect authority-host child exit;
+- change `RatatuiLocalTargetFactory::create_local_target` to send events to `StateEventLoop`;
+- verify authority-host session exit propagates correctly.
 
-### Phase 2：Local Session 接入 StateEventLoop
+### Phase 2: Local Session integration with StateEventLoop
 
-- `EventProxy` 不再直接 mutate `SharedState`，改为发送 `StateEvent`；
-- `handle_session_exit`  moved into `StateEventLoop`；
-- 移除 `LocalSessionEvent` 和单独 worker thread；
-- 验证 local session exit 行为不变。
+- `EventProxy` no longer mutates `SharedState` directly; it sends `StateEvent`s instead;
+- `handle_session_exit`  moved into `StateEventLoop`;
+- remove `LocalSessionEvent` and the separate worker thread;
+- verify local session exit behavior is unchanged.
 
-### Phase 3：Client Handler 接入 StateEventLoop
+### Phase 3: Client Handler integration with StateEventLoop
 
-- client socket 由 tokio 处理；
-- client 命令转成 `StateEvent`；
-- snapshot broadcast 通过 tokio client task 写 socket；
-- 移除 per-client `std::thread::spawn`。
+- client sockets handled by tokio;
+- client commands converted into `StateEvent`s;
+- snapshot broadcast writes to sockets via tokio client tasks;
+- remove per-client `std::thread::spawn`.
 
-### Phase 4：SharedState 去锁化
+### Phase 4: SharedState lock removal
 
-- 因为所有写都在 `StateEventLoop`，逐步去掉 `SharedState` 内部 Mutex；
-- client 读 snapshot 时获取只读引用或 clone。
+- since all writes happen in `StateEventLoop`, gradually remove the `SharedState` internal Mutex;
+- clients take a read-only reference or a clone when reading snapshots.
 
-## 15. 风险与注意事项
+## 15. Risks and Notes
 
-1. **SIGCHLD 与 `alacritty_terminal` 不冲突**  
-   `alacritty_terminal::EventLoop` 会注册自己的 SIGCHLD handler；`AuthorityHostIoLoop` 也注册一个 SIGCHLD handler。Linux 下多个 signalfd/pipe 可以同时接收 SIGCHLD。收到信号后，各方只遍历自己管理的 children 调用 `try_wait()`，互不竞争。
+1. **SIGCHLD does not conflict with `alacritty_terminal`**  
+   `alacritty_terminal::EventLoop` registers its own SIGCHLD handler; `AuthorityHostIoLoop` also registers a SIGCHLD handler. On Linux, multiple signalfd/pipe registrations can receive SIGCHLD at the same time. After the signal arrives, each side only iterates the children it manages and calls `try_wait()`, so they do not compete.
 
-2. **`polling` crate 与 tokio 共存**  
-   gRPC / session sync 仍是 tokio async。`AuthorityHostIoLoop` 是同步 thread + `polling`。两者通过 channel 通信，边界清晰。
+2. **Coexistence of the `polling` crate with tokio**  
+   gRPC / session sync remain tokio async. `AuthorityHostIoLoop` is a synchronous thread + `polling`. The two communicate via channels, with a clear boundary.
 
-3. **Client socket 写阻塞**  
-   snapshot broadcast 不能直接阻塞 `StateEventLoop`。通过 tokio channel 把 snapshot 发给 client task，由 client task 异步写 socket。
+3. **Client socket write blocking**  
+   Snapshot broadcast must not block `StateEventLoop` directly. Send the snapshot to client tasks over a tokio channel, and let the client tasks write to the socket asynchronously.
 
-4. **PTY 输出批量**  
-   `AuthorityHostIoLoop` 应批量读取 PTY 输出，避免每个字节都触发系统调用。
+4. **PTY output batching**  
+   `AuthorityHostIoLoop` should read PTY output in batches, to avoid a system call for every byte.
 
-## 16. 验收标准
+## 16. Acceptance Criteria
 
-- `waitagent --ratatui` 启动后，authority-host session 不再为每个 session spawn reader/writer/child-waiter thread；
-- 在 remote session 中输入 `exit`，远端节点 100ms 内检测到退出并发布 `TargetExited`；
-- 本地 sidebar item 消失，焦点自动切换；
-- 本地 local session 中输入 `exit`，server 正确 shutdown 或切换到下一个 session；
-- `cargo test --release ratatui session_sync` 全部通过。
+- after `waitagent --ratatui` starts, authority-host sessions no longer spawn a reader/writer/child-waiter thread per session;
+- typing `exit` in a remote session, the remote node detects the exit within 100ms and publishes `TargetExited`;
+- the local sidebar item disappears and focus switches automatically;
+- typing `exit` in a local session, the server shuts down correctly or switches to the next session;
+- `cargo test --release ratatui session_sync` passes fully.

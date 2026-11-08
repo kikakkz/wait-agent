@@ -11,7 +11,7 @@ Closes #
 
 ## How acceptance criteria are met
 
-## Acceptance (验收)
+## Acceptance
 
 <!-- Required when the PR adds a user-reachable surface (CLI flag, config
      key, protocol message/rpc); enforced by .agents/tools/check_surface_e2e.py

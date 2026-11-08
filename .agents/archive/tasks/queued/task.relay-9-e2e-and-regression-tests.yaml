@@ -6,7 +6,7 @@ status: backlog
 priority: high
 design_ref:
   doc: docs/relay-design.md
-  section: Phase 1 任务拆分 9, 兼容性承诺
+  section: Phase 1 task split item 9, compatibility commitment
   why:
     - Phase 1 task split item 8 in the design doc the relay topology must be
       proven under docker network isolation with reconnect, concurrency, and

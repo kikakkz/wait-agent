@@ -36,7 +36,7 @@ body:
     attributes:
       label: Design ref
       description: Governing design document and section (required for implementation tasks).
-      placeholder: "e.g. docs/relay-design.md — 协议分层"
+      placeholder: "e.g. docs/relay-design.md — protocol layering"
   - type: input
     id: depends_on
     attributes:

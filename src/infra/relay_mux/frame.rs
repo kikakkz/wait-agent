@@ -2,7 +2,7 @@
 //!
 //! Every frame is a fixed 10-byte big-endian header followed by a
 //! type-specific payload. Two frame families share the wire format on a
-//! relay link (docs/relay-design.md 协议分层): stream frames and relay
+//! relay link (docs/relay-design.md protocol layering): stream frames and relay
 //! control frames.
 //!
 //! ```text

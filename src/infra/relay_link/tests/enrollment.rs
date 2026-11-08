@@ -1,5 +1,6 @@
 //! Enrollment listener end-to-end tests: the token-authenticated join
-//! session on `port + 1` (docs/relay-design.md 身份认证与入网). invite is
+//! session on `port + 1` (docs/relay-design.md Authentication and Enrollment).
+//! invite is
 //! minted over the real admin socket, the joining node presents any client
 //! certificate, and a valid token gets it whitelisted plus the relay
 //! fingerprint in exchange. These tests share a single-thread runtime with

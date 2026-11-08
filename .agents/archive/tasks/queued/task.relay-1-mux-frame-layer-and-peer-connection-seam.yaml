@@ -6,7 +6,7 @@ status: backlog
 priority: high
 design_ref:
   doc: docs/relay-design.md
-  section: 架构, 协议分层
+  section: Architecture, Protocol Layers
   why:
     - Phase 1 task split item 1 the node-to-node TCP dial must become a
       pluggable ordered reliable duplex byte stream (PeerConnection) so a

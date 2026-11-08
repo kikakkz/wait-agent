@@ -1,68 +1,68 @@
-# WaitAgent Ratatui Agent Sessions 热键设计
+# WaitAgent Ratatui Agent Sessions Hotkey Design
 
 Version: `v2.0`  
 Status: `Implemented`  
 Date: `2026-08-08`
 
-> v2.0 更新：实现已从"统一弹窗"改为"直接发送各 agent 自己的 session 管理 slash command"。本设计文档描述当前实际行为。
+> v2.0 update: the implementation changed from a "unified popup" to "directly sending each agent's own session-management slash command". This design document describes the current actual behavior.
 
-## 1. 目的
+## 1. Purpose
 
-为 `waitagent --ratatui` 增加一个热键，让用户能够快速唤起当前 active session 所属 agent 工具（Kimi、Codex、Claude）自带的 session 管理界面。
+Add a hotkey to `waitagent --ratatui` that lets the user quickly bring up the session-management interface built into the agent tool (Kimi, Codex, Claude) that owns the currently active session.
 
-当前行为：用户需要在另一个终端手动运行 `kimi --session`、`codex /resume` 或 `claude /resume` 来管理历史 session。本次设计在 TUI 内直接发送对应的 slash command 到当前 pane 的输入区，由 agent 自己处理列表、选择和恢复。
+Current behavior: the user has to manually run `kimi --session`, `codex /resume`, or `claude /resume` in another terminal to manage historical sessions. This design sends the corresponding slash command directly into the current pane's input area within the TUI, and the agent itself handles listing, selection, and restore.
 
-## 2. 范围
+## 2. Scope
 
-### 2.1 包含
+### 2.1 Included
 
-- 热键触发并发送 agent 专属的 session 管理命令。
-- 支持 Kimi Code CLI / Kimi Desktop、OpenAI Codex CLI / Codex Desktop、Anthropic Claude Code / Claude Desktop 三者。
-- 支持 **local session** 和 **remote peer session** 两种目标：
-  - local session：命令直接发给本机 local server。
-  - remote peer session：命令经 local server 通过 gRPC 转发到 remote peer node 的 agent。
-- 命令注入后自动追加回车执行。
+- The hotkey triggers and sends an agent-specific session-management command.
+- Supports Kimi Code CLI / Kimi Desktop, OpenAI Codex CLI / Codex Desktop, and Anthropic Claude Code / Claude Desktop.
+- Supports both **local session** and **remote peer session** targets:
+  - local session: the command is sent directly to the local server on this machine.
+  - remote peer session: the command is forwarded by the local server over gRPC to the agent on the remote peer node.
+- After the command is injected, an Enter keypress is appended to execute it.
 
-### 2.2 不包含
+### 2.2 Not included
 
-- 不在 waitagent 内部维护统一的 session 列表弹窗。
-- 不在 waitagent 内部读取或解析各 agent 的 session 数据文件。
-- 不管理 session 的删除、重命名、归档等操作。
-- 不处理 SSH remote host session（`ConnectRemoteHostPaneRuntime` 创建的 shell）的 agent session 管理。
+- No unified session-list popup maintained inside waitagent.
+- No reading or parsing of each agent's session data files inside waitagent.
+- No management of session deletion, renaming, archiving, or similar operations.
+- No agent session management for SSH remote host sessions (shells created by `ConnectRemoteHostPaneRuntime`).
 
-## 3. 术语
+## 3. Terminology
 
-- **Agent**：指 Kimi、Codex、Claude 这类 AI coding agent CLI/Desktop app。
-- **AgentDetector**：现有插件 trait，负责从进程名和 pane 文本识别当前 session 的 agent 类型和状态。
-- **Active session**：当前 TUI main pane 中处于焦点的 session。
+- **Agent**: an AI coding agent CLI/Desktop app such as Kimi, Codex, or Claude.
+- **AgentDetector**: the existing plugin trait responsible for identifying the agent type and state of the current session from the process name and pane text.
+- **Active session**: the session that has focus in the current TUI main pane.
 
-## 4. 命令映射
+## 4. Command mapping
 
-| Agent | 发送的命令 | 说明 |
+| Agent | Command sent | Notes |
 |---|---|---|
-| Kimi | `/sessions` | Kimi Code CLI 内置的 session 列表 slash command |
-| Codex | `/resume` | Codex CLI 内置的 resume slash command |
-| Claude | `/resume` | Claude Code 内置的 resume slash command |
+| Kimi | `/sessions` | Kimi Code CLI's built-in session-list slash command |
+| Codex | `/resume` | Codex CLI's built-in resume slash command |
+| Claude | `/resume` | Claude Code's built-in resume slash command |
 
-实现位于 `src/ratatui_node/client_runtime.rs` 的 `send_agent_session_command`。它根据当前 active session 的 `agent_command_name` 决定发送哪个命令。
+The implementation lives in `send_agent_session_command` in `src/ratatui_node/client_runtime.rs`. It decides which command to send based on the `agent_command_name` of the currently active session.
 
-## 5. 模块设计
+## 5. Module design
 
-### 5.1 关键代码
+### 5.1 Key code
 
 - `src/ratatui_node/client_runtime.rs`
-  - `send_agent_session_command(stream, snapshot, status_message)`：根据 `snapshot.active_target` 找到对应 `SessionView`，按 `agent_command_name` 选择 slash command，通过 `send_paste_text` 注入输入区，再发送一个 `Enter` 键事件执行。
-  - 事件循环中 `Ctrl+H` 绑定时调用上述函数。
+  - `send_agent_session_command(stream, snapshot, status_message)`: finds the corresponding `SessionView` based on `snapshot.active_target`, selects the slash command according to `agent_command_name`, injects it into the input area via `send_paste_text`, and then sends an `Enter` key event to execute it.
+  - The `Ctrl+H` binding in the event loop calls the function above.
 
-### 5.2 与现有 AgentDetector 的关系
+### 5.2 Relationship with the existing AgentDetector
 
-- `AgentDetector` 继续负责运行时识别 agent。
-- `agent_command_name` 字段由 `AgentDetector` 输出决定；只有被识别为 `"kimi"`、`"codex"`、`"claude"` 的 session 才会触发对应命令。
-- 识别为普通 shell 或其他未知命令的 session 会提示 "no session shortcut for ..."。
+- `AgentDetector` continues to be responsible for runtime agent identification.
+- The `agent_command_name` field is determined by the output of `AgentDetector`; only sessions identified as `"kimi"`, `"codex"`, or `"claude"` trigger the corresponding command.
+- Sessions identified as a plain shell or another unknown command show "no session shortcut for ...".
 
-### 5.3 远程 peer session 路径
+### 5.3 Remote peer session path
 
-当 active session 是 `SessionTransport::RemotePeer` 时，命令经以下路径转发：
+When the active session is `SessionTransport::RemotePeer`, the command is forwarded along the following path:
 
 ```
 TUI client
@@ -71,64 +71,64 @@ TUI client
     ▼
 local ratatui node server
     │
-    │ 判断 target_id 是 local 还是 remote peer
-    ├─ local  → 直接注入 local session 的 PTY
-    └─ remote → 通过 NodeSessionService 转发 PASTE_TEXT 到 remote peer node
+    │ decide whether target_id is local or a remote peer
+    ├─ local  → inject directly into the local session's PTY
+    └─ remote → forward PASTE_TEXT to the remote peer node via NodeSessionService
                     │
                     ▼
             remote peer ratatui node
                     │
-                    │ 注入 remote peer 上对应 session 的 PTY
+                    │ inject into the PTY of the corresponding session on the remote peer
                     ▼
-            agent 收到 /sessions 或 /resume
+            agent receives /sessions or /resume
 ```
 
-远程文件粘贴使用独立的 `PASTE_FILE` 协议；session 管理命令复用现有文本输入转发机制。
+Remote file paste uses a separate `PASTE_FILE` protocol; session-management commands reuse the existing text-input forwarding mechanism.
 
-## 6. UI 行为
+## 6. UI behavior
 
-### 6.1 热键
+### 6.1 Hotkey
 
-- 默认热键：`Ctrl+H`（Hotkey / History）。
-- 只在 `Focus::Main` 时触发。
-- 已有 overlay（sidebar focus、error log、help 等）打开时不触发。
+- Default hotkey: `Ctrl+H` (Hotkey / History).
+- Only triggers when in `Focus::Main`.
+- Does not trigger when an overlay is already open (sidebar focus, error log, help, etc.).
 
-### 6.2 触发后的动作
+### 6.2 Action after triggering
 
-1. 按下热键后，TUI client 获取当前 active session 的 `target_id`。
-2. 在 `snapshot.sessions` 中查找对应 `SessionView`。
-3. 如果 `agent_command_name` 为空或不是已知 agent，底部状态栏显示 "no session shortcut for ..."。
-4. 否则把对应 slash command（`/sessions` 或 `/resume`）作为键盘输入发送给目标 session，并追加一个 `Enter` 事件执行。
-5. 后续列表渲染、选择、恢复完全由 agent 自己完成。
+1. After the hotkey is pressed, the TUI client obtains the `target_id` of the currently active session.
+2. Looks up the corresponding `SessionView` in `snapshot.sessions`.
+3. If `agent_command_name` is empty or not a known agent, the bottom status bar shows "no session shortcut for ...".
+4. Otherwise, the corresponding slash command (`/sessions` or `/resume`) is sent to the target session as keyboard input, with an `Enter` event appended to execute it.
+5. Subsequent list rendering, selection, and restore are all completed by the agent itself.
 
-## 7. 错误处理
+## 7. Error handling
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |---|---|
-| 没有 active session | 状态栏提示 "no active session" |
-| active session 不在 snapshot 中 | 状态栏提示 "active session not found" |
-| 当前 session 不是已知 agent | 状态栏提示 "no session shortcut for ..." |
-| 远程 peer 离线 | 命令发送失败由现有远程转发机制处理 |
-| agent 不支持该 slash command | agent 自身报错，waitagent 不干预 |
+| No active session | Status bar shows "no active session" |
+| Active session not in snapshot | Status bar shows "active session not found" |
+| Current session is not a known agent | Status bar shows "no session shortcut for ..." |
+| Remote peer offline | Command-send failure is handled by the existing remote forwarding mechanism |
+| Agent does not support the slash command | The agent reports the error itself; waitagent does not intervene |
 
-## 8. 测试策略
+## 8. Test strategy
 
-### 8.1 单元测试
+### 8.1 Unit tests
 
-- `src/ratatui_node/client_runtime.rs` 中保留对 `send_agent_session_command` 的间接验证：确保 `Ctrl+H` 事件最终写出正确的 `PASTE_TEXT` + `INPUT` 命令序列。
-- `src/domain/agent_detector.rs` 中验证 `accepts_at_reference` 正确包含 `kimi`、`claude`、`codex`，确保 `agent_command_name` 能被正确设置。
+- `src/ratatui_node/client_runtime.rs` retains indirect verification of `send_agent_session_command`: ensures the `Ctrl+H` event ultimately writes the correct `PASTE_TEXT` + `INPUT` command sequence.
+- `src/domain/agent_detector.rs` verifies that `accepts_at_reference` correctly includes `kimi`, `claude`, and `codex`, ensuring `agent_command_name` can be set correctly.
 
-### 8.2 集成测试
+### 8.2 Integration tests
 
-- 在真实 Kimi/Codex/Claude session 中按 `Ctrl+H`，验证输入区出现 `/sessions` 或 `/resume` 并执行。
-- 在 remote peer session 中按 `Ctrl+H`，验证命令经 gRPC 转发到远端并执行。
+- Press `Ctrl+H` in a real Kimi/Codex/Claude session and verify that `/sessions` or `/resume` appears in the input area and executes.
+- Press `Ctrl+H` in a remote peer session and verify the command is forwarded over gRPC to the remote side and executes.
 
-## 9. 限制与后续可能
+## 9. Limitations and possible follow-ups
 
-- 各 agent 的 slash command 行为由 agent 自身决定；waitagent 只负责触发。
-- 如果未来某个 agent 修改或移除了 `/sessions`/`/resume`，需要同步更新 `send_agent_session_command` 中的映射。
-- 未来如需恢复统一弹窗，需要重新引入 `AgentSessionProvider`、协议消息和弹窗渲染代码；当前这些代码已清理。
+- Each agent's slash command behavior is determined by the agent itself; waitagent is only responsible for triggering it.
+- If an agent changes or removes `/sessions`/`/resume` in the future, the mapping in `send_agent_session_command` needs to be updated accordingly.
+- If a unified popup is ever needed again in the future, the `AgentSessionProvider` trait, protocol messages, and popup rendering code would need to be reintroduced; those have been removed in the current code.
 
-## 10. 历史版本
+## 10. Historical versions
 
-- `v1.0`（2026-08-07）：原计划实现统一 session 列表弹窗，含 `AgentSessionProvider` trait、`AgentSessionRegistry`、`LIST_AGENT_SESSIONS` gRPC 协议和远程转发。实现过程中改为更简单的 slash command 方案，v1.0 相关代码已移除。
+- `v1.0` (2026-08-07): the original plan implemented a unified session-list popup, including the `AgentSessionProvider` trait, `AgentSessionRegistry`, the `LIST_AGENT_SESSIONS` gRPC protocol, and remote forwarding. During implementation it was changed to the simpler slash-command approach, and the v1.0 code has been removed.

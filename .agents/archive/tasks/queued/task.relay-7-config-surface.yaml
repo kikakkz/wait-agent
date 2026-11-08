@@ -6,7 +6,7 @@ status: backlog
 priority: medium
 design_ref:
   doc: docs/relay-design.md
-  section: 配置面, 兼容性承诺
+  section: config surface, compatibility commitments
   why:
     - Phase 1 task split item 7 relay mode becomes reachable from the product
       only when remote-hosts entries can explicitly select relay or direct

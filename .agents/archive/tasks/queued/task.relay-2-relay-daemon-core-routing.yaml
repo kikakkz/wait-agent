@@ -6,7 +6,7 @@ status: backlog
 priority: high
 design_ref:
   doc: docs/relay-design.md
-  section: 架构, 协议分层, node 生命周期, 管理通道
+  section: Architecture, protocol layering, node lifecycle, admin channel
   why:
     - Phase 1 task split item 2 the hub owns the connection table, stream
       routing, heartbeat, whitelist auth, and the local admin socket.

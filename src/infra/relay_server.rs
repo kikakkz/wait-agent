@@ -1,10 +1,10 @@
 //! Relay transport gate and connection lifecycle: TLS listener requiring
 //! client certificates whose SHA-256 SPKI fingerprint is whitelisted in an
 //! `authorized_nodes/` directory; authenticated links then speak the framed
-//! relay protocol (docs/relay-design.md 协议分层): the first frame must be
-//! `Register`, after which the link is a connection-table entry kept alive
-//! by heartbeats and removed by unregister, link loss, replacement, or
-//! heartbeat-timeout eviction (node 生命周期).
+//! relay protocol (docs/relay-design.md Protocol Layers): the first frame
+//! must be `Register`, after which the link is a connection-table entry kept
+//! alive by heartbeats and removed by unregister, link loss, replacement, or
+//! heartbeat-timeout eviction (node lifecycle).
 //!
 //! Device identity is the self-signed certificate fingerprint (no CA); the
 //! relay requests a client certificate during the mTLS handshake, and a
@@ -13,13 +13,14 @@
 //! after their whitelist entry is removed.
 //!
 //! Issue #209 demuxes one public port by ALPN (docs/relay-design.md
-//! 身份认证与入网 单端口 ALPN 分流): no ALPN keeps this link handler,
+//! Authentication and Enrollment, single-port ALPN demux): no ALPN
+//! keeps this link handler,
 //! `waitagent-enroll` runs the token-authenticated enrollment session, and
 //! `h2`/`http/1.1` serves the dashboard when `--web` published one. The
 //! legacy enrollment listener on `port + 1` stays for a deprecation
 //! window (`legacy_enroll_listener` / `--no-legacy-enroll`).
 //!
-//! The connection table is memory-only (数据策略): the relay persists no
+//! The connection table is memory-only (data policy): the relay persists no
 //! session or traffic data. Stream routing between registered nodes lives
 //! in `relay_routing` (the leg table) and `relay_link` (the per-link
 //! protocol loop).
@@ -61,7 +62,8 @@ use rustls::client::danger::HandshakeSignatureValid;
 pub const DEFAULT_RELAY_LISTEN_PORT: u16 = 7475;
 
 /// The enrollment listener binds at `listen port + 1` (docs/relay-design.md
-/// 身份认证与入网): the joining node derives the same address in
+/// Authentication and Enrollment): the joining node derives the same
+/// address in
 /// `relay_join`. Issue #209 demuxes enrollment onto the main port via ALPN;
 /// the `+1` listener stays as an opt-out legacy window.
 pub const RELAY_ENROLL_PORT_OFFSET: u16 = 1;
@@ -169,7 +171,8 @@ pub struct RelayServeConfig {
     /// Connection-table lifecycle timing (heartbeat eviction and the
     /// register deadline).
     pub lifecycle: RelayLifecycleConfig,
-    /// Capacity knobs for admission control (容量评估与准入控制).
+    /// Capacity knobs for admission control (capacity assessment and
+    /// admission control).
     pub capacity: RelayCapacityConfig,
     /// Enrollment token store persistence path (invite tokens survive
     /// restarts). Defaults to `waitagent_home()/relay-enroll-tokens.json`.
@@ -195,7 +198,7 @@ pub struct RelayServeConfig {
 impl RelayServeConfig {
     /// Returns the default configuration for `listen`: whitelist under
     /// `~/.waitagent/authorized_nodes/`, credentials at the default paths,
-    /// lifecycle timing per docs/relay-design.md (node 生命周期).
+    /// lifecycle timing per docs/relay-design.md (Node Lifecycle).
     pub fn new(listen: SocketAddr) -> Self {
         Self {
             listen,
@@ -366,8 +369,9 @@ impl rustls::server::danger::ClientCertVerifier for WhitelistedClientCertVerifie
 /// a client certificate and delegates the TLS 1.2/1.3 signature checks to
 /// ring so the client must prove possession of the private key, but performs
 /// NO whitelist check — the token inside the authenticated session is the
-/// authorization (docs/relay-design.md 身份认证与入网: 无 token 者无法建立
-/// 会话, and the whitelist write happens only after token redemption).
+/// authorization (docs/relay-design.md
+/// Authentication and Enrollment: a peer without a token cannot establish a session, and the
+/// whitelist write happens only after token redemption).
 #[derive(Debug)]
 struct AnyClientCertVerifier;
 

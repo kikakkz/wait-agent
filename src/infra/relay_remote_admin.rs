@@ -1,5 +1,5 @@
-//! Node-channel relay administration (docs/relay-design.md 管理通道): the
-//! "远端控制流" — a registered node manages the relay over its authenticated
+//! Node-channel relay administration (docs/relay-design.md Management Channel): the
+//! "remote control flow" — a registered node manages the relay over its authenticated
 //! link. Read paths since slice 2 (`status`) plus the `list-whitelist`
 //! directory listing (issue #147, so the dashboard can resolve a remove
 //! prefix against enrolled-but-offline nodes); the slice-3 fingerprint

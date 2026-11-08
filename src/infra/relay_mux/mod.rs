@@ -1,6 +1,6 @@
 //! Relay mux frame layer.
 //!
-//! Governing design: `docs/relay-design.md` (协议分层). Multiplexes ordered,
+//! Governing design: `docs/relay-design.md` (Protocol Layers). Multiplexes ordered,
 //! reliable, full-duplex byte streams over one connection: every `MuxStream`
 //! satisfies the `PeerConnection` seam from `crate::infra::peer_connection`
 //! through the blanket impl, so the node-to-node inner TLS and session

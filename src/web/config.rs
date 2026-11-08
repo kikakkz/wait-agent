@@ -1,6 +1,6 @@
 //! The WebUI deployment config: `~/.waitagent/webui.toml` (issue #131
 //! slice 3, security design v2/v4). The operator fills in the admin email,
-//! the mailbox app password ("授权码"), and the public base URL at deploy
+//! the mailbox app password, and the public base URL at deploy
 //! time; the SMTP host/port/TLS resolve from a built-in provider table by
 //! the email domain, with `mail_custom_*` keys as the escape hatch for
 //! domains outside the table (the design's `[mail.custom]`, expressed in

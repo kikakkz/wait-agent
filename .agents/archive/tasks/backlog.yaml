@@ -316,19 +316,24 @@ next:
     status: wontfix
   - id: task.bug-fullscreen-scrollback-truncated
     title: >
-      全屏后 scrollback 可看到历史，但未全屏时被换行的行全屏后依然保持折行，
-      需要修复全屏后的行重排
+      After fullscreen, scrollback history is visible, but lines that were soft-wrapped
+      before fullscreen remain wrapped after fullscreen; the post-fullscreen line reflow
+      needs to be fixed
     status: cancelled
   - id: task.bug-sidebar-lag-4-remote-sessions
     title: >
-      连接 4 个 remote session（每个都在跑 claude/codex）时，sidebar item 切换卡顿。
-      可能原因：多路并发输出导致 PaneActivityWatcher + capture-pane 刷新过载。
+      Switching sidebar items lags when 4 remote sessions are connected
+      (each running claude/codex). Possible cause: concurrent output from
+      multiple sessions overloads the PaneActivityWatcher + capture-pane refresh.
     status: wontfix
   - id: task.bug-display-corruption-multi-remote
     title: >
-      多 remote session 下屏幕显示异常：主 pane 出现方块字符，codex/claude 菜单错乱，
-      claude 输出内容错乱，codex 稍好，sidebar 偶尔也乱（切到 sidebar 再切回可恢复）。
-      可能原因：escape sequence 被 capture-pane 截断，或多路 PTY 输出交错导致终端状态机不同步。
+      Screen rendering is corrupted with multiple remote sessions: the main pane
+      shows block glyphs, codex/claude menus are garbled, claude output content is
+      garbled (codex is slightly better), and the sidebar is occasionally garbled
+      too (switching to the sidebar and back recovers it). Possible cause: escape
+      sequences truncated by capture-pane, or interleaved multi-session PTY output
+      desynchronizing the terminal state machine.
     status: wontfix
   - id: task.feature-remote-session-creation-from-sidebar
     title: >
@@ -911,7 +916,7 @@ notes:
   - 2026-05-11 bugs: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` are reported UX bugs. They are independent of the refactor queue and can be investigated in parallel.
   - 2026-05-12 refactor queue update: refactor-1 through refactor-4 are done and committed. refactor-5 and refactor-6 are in_progress. refactor-7 remains ready.
   - 2026-05-12 bug update: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` fixed and committed. `task.bug-remote-session-lost-after-idle` marked wontfix (cannot reproduce). `task.bug-status-recognition-inaccurate` converted to feature and deferred to before workspace snapshot.
-  - 2026-05-12 new bug: `task.bug-fullscreen-scrollback-truncated` recorded. Zoom fullscreen 后 PgUp 只显示当前屏，看不到更早 scrollback。可能在 workspace 布局时 history-limit 设置不足。在 feature-agent-status-recognition 之后处理。
+  - 2026-05-12 new bug: `task.bug-fullscreen-scrollback-truncated` recorded. After zoom fullscreen, PgUp only shows the current screen and earlier scrollback is not visible. The history-limit may be set too low during workspace layout. Handle after feature-agent-status-recognition.
   - 2026-05-18 transport stability batch: comprehensive 5-layer design documented in `docs/remote-transport-stability-design.md` after root-cause analysis of output freeze, input loss, and "authority host already stopped" errors. Implementation order: l4 (read timeout + ping/pong) → l1 (output blocking send) → l2 (input ring buffer) → l5 (reconnect backoff) → l3 (seq gap detection). Each layer has its own queued task file in `.agents/tasks/queued/`. Active task: `task.transport-stability-l4`.
   - 2026-07-19 geometry coordination batch: root cause of garbled remote mirror (Ctrl+R/reverse-i-search) on shared workspace main panes confirmed by live cross-host A/B evidence (server 192.168.31.178, client node 192.168.31.182): the multi-pane resize skip in `resize_pane_on_socket` plus a requested-value `ResizeApplied` echo left panes at mismatched geometry while raw PTY replay requires identical sizes. Accepted design in `docs/remote-geometry-coordination-design.md`: network-wide smallest semantics with per-dimension min, chrome-preserving resize with padding panes, truthful geometry reporting, geometry-change push, per-server persisted sizes, and controlled re-sync. VT-model rendering and read-only degraded modes were evaluated and rejected. Implementation order: `task.geometry-1-truthful-geometry` → `task.geometry-2-protocol-geometry-push` → `task.geometry-3-authority-coordinator` → `task.geometry-4-main-slot-geometry-resync`; `task.geometry-5-per-server-size-store` after geometry-3; `task.geometry-6-docs-and-cross-host-acceptance` closes the batch. Related defects recorded separately: `task.bug-remote-main-slot-reconnect-seq-fatal`, `task.bug-remote-main-slot-snapshot-clobber`.
   - 2026-07-19 geometry-1 done: `task.geometry-1-truthful-geometry` landed. Authority now reads back actual pane geometry before every ResizeApplied (new `RemoteTargetPtyGateway::pane_geometry`), viewer logs geometry mismatches, and a wire-level send_resize_applied diag line reports values. Verified by unit tests plus a one-host two-instance e2e (ports 17474/17475, production untouched): mismatched mirror now reports 47x22 instead of the requested size. Noted for geometry-4: raw fast-path input bypasses the resize-ack gate, and open-time ResizeApplied can be dropped by the slot handler before binding exists. Next: `task.geometry-2-protocol-geometry-push`.

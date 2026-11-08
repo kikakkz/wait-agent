@@ -1,86 +1,86 @@
-# WaitAgent Ratatui 剪贴板粘贴设计
+# WaitAgent Ratatui Clipboard Paste Design
 
 Version: `v1.0`  
 Status: `Draft`  
 Date: `2026-08-05`
 
-## 1. 目的
+## 1. Purpose
 
-为 `waitagent --ratatui` 增加剪贴板粘贴能力：用户通过 `Ctrl+V` / `Shift+P` 把剪贴板内容（文本、文件路径、图片/文件二进制）粘贴到当前 active session 的输入区。
+Add clipboard paste capability to `waitagent --ratatui`: the user presses `Ctrl+V` / `Shift+P` to paste clipboard content (text, file paths, image/file binary) into the input area of the current active session.
 
-当前行为：TUI client 只把单个按键编码成 `LogicalKey` 发给 server，没有剪贴板语义。本次设计新增 `PASTE_TEXT` / `PASTE_FILE` 两个 client→server 命令，分别处理文本/路径和文件二进制，并扩展 remote peer 之间的 gRPC 协议以支持跨节点文件粘贴。
+Current behavior: the TUI client only encodes individual keystrokes into `LogicalKey` and sends them to the server; there is no clipboard semantics. This design adds two client→server commands, `PASTE_TEXT` and `PASTE_FILE`, handling text/paths and file binary respectively, and extends the gRPC protocol between remote peers to support cross-node file paste.
 
-## 2. 范围
+## 2. Scope
 
-### 2.1 包含
+### 2.1 In scope
 
-- 文本粘贴（`Event::Paste` 与系统剪贴板 fallback）。
-- 文件路径/URI 粘贴：解析剪贴板里的文件路径，根据 session 类型决定直接发路径或先把文件内容运到 remote peer。
-- 图片/文件二进制粘贴：把二进制内容缓存到 `<temp>/waitagent/`，再把缓存路径当键盘输入发给 session。
-- 本地 session 与 `SessionTransport::RemotePeer` session 两种目标。
-- 错误降级：读剪贴板失败、读文件失败、remote peer 拒绝/失败时的行为。
+- Text paste (`Event::Paste` and system clipboard fallback).
+- File path/URI paste: parse file paths from the clipboard; depending on the session type, either send the path directly or first transfer the file content to the remote peer.
+- Image/file binary paste: cache the binary content into `<temp>/waitagent/`, then send the cache path to the session as keyboard input.
+- Two target types: local sessions and `SessionTransport::RemotePeer` sessions.
+- Error degradation: behavior on clipboard read failure, file read failure, and remote peer rejection/failure.
 
-### 2.2 不包含
+### 2.2 Out of scope
 
-- 在 terminal 内直接渲染图片或文件内容（sixel / kitty image protocol 等）。
-- 远程 SSH host session（`ConnectRemoteHostPaneRuntime` 创建的 shell）的文件粘贴；本次只覆盖 ratatui node 之间的 `RemotePeer` 会话。
-- 剪贴板内容同步、持久化或跨 client 共享。
+- Rendering images or file content directly in the terminal (sixel / kitty image protocol, etc.).
+- File paste for remote SSH host sessions (shells created by `ConnectRemoteHostPaneRuntime`); this design covers only `RemotePeer` sessions between ratatui nodes.
+- Clipboard content synchronization, persistence, or cross-client sharing.
 
-## 3. 术语
+## 3. Terminology
 
-- **TUI client**：运行 `waitagent --ratatui` 的 UI 进程，直接与用户交互。
-- **local server**：TUI client 通过 Unix socket 连接的 ratatui node server。
-- **remote peer node**：`SessionTransport::RemotePeer` 会话实际运行的远端 ratatui node。
+- **TUI client**: the UI process running `waitagent --ratatui`, interacting with the user directly.
+- **local server**: the ratatui node server that the TUI client connects to via Unix socket.
+- **remote peer node**: the remote ratatui node where a `SessionTransport::RemotePeer` session actually runs.
 
-## 4. 粘贴语义
+## 4. Paste semantics
 
-| 剪贴板内容 | 本地 session | remote peer session |
+| Clipboard content | Local session | Remote peer session |
 |---|---|---|
-| 纯文本 | `PASTE_TEXT` 直接当键盘输入 | `PASTE_TEXT` 经 gRPC 转发给 remote peer，再当键盘输入 |
-| 文件路径/URI | `PASTE_TEXT` 直接发路径字符串 | TUI client 读取本地文件 → `PASTE_FILE` 发字节 → remote peer 落地 → 输入 remote peer 本地路径 |
-| 二进制文件/图片 | `PASTE_FILE` 发字节 → local server 落地 → 输入 server 本地路径 | `PASTE_FILE` 发字节 → local server 转发给 remote peer → remote peer 落地 → 输入 remote peer 本地路径 |
+| Plain text | `PASTE_TEXT` directly as keyboard input | `PASTE_TEXT` forwarded to the remote peer via gRPC, then as keyboard input |
+| File path/URI | `PASTE_TEXT` sends the path string directly | TUI client reads the local file → `PASTE_FILE` sends bytes → remote peer writes to disk → types the remote peer local path |
+| Binary file/image | `PASTE_FILE` sends bytes → local server writes to disk → types the server local path | `PASTE_FILE` sends bytes → local server forwards to the remote peer → remote peer writes to disk → types the remote peer local path |
 
-核心规则：
+Core rules:
 
-1. **文本/路径始终走 `PASTE_TEXT`**，接收方直接当键盘输入。
-2. **二进制始终走 `PASTE_FILE`**，由接收方（local server 或 remote peer）写入 `<temp>/waitagent/`，再把接收方本地的绝对路径当键盘输入。
-3. **remote session 的文件必须落地到 remote peer**：不能把 server/TUI 本机路径发给 remote peer。
+1. **Text/paths always go through `PASTE_TEXT`**; the receiver treats them directly as keyboard input.
+2. **Binary always goes through `PASTE_FILE`**; the receiver (local server or remote peer) writes it into `<temp>/waitagent/` and types the receiver-local absolute path as keyboard input.
+3. **Files for remote sessions must be written on the remote peer**: never send a server/TUI-local path to the remote peer.
 
-## 5. TUI Client 剪贴板处理
+## 5. TUI Client Clipboard Handling
 
 ### 5.1 Bracketed Paste
 
-启用 `crossterm` 的 `bracketed-paste` 特性，初始化 terminal 时执行 `EnableBracketedPaste`，退出时执行 `DisableBracketedPaste`。
+Enable crossterm's `bracketed-paste` feature: execute `EnableBracketedPaste` when initializing the terminal and `DisableBracketedPaste` on exit.
 
-- 终端支持 bracketed paste 时，粘贴文本会触发 `Event::Paste(String)`，直接作为文本处理。
-- 终端不支持或用户按 `Ctrl+V` / `Shift+P` 时，回退到系统剪贴板读取。
+- When the terminal supports bracketed paste, pasted text triggers `Event::Paste(String)` and is handled directly as text.
+- When the terminal does not support it, or the user presses `Ctrl+V` / `Shift+P`, fall back to reading the system clipboard.
 
-### 5.2 系统剪贴板读取
+### 5.2 System Clipboard Reading
 
-引入 `arboard` crate（跨平台）作为默认实现，平台工具作为 fallback：
+Introduce the `arboard` crate (cross-platform) as the default implementation, with platform tools as fallback:
 
-- Linux X11/Wayland：`arboard` 优先，fallback 到 `xclip` / `wl-paste`。
-- macOS：`arboard` 优先，fallback 到 `pbpaste`。
-- Windows：`arboard`。
+- Linux X11/Wayland: `arboard` first, fallback to `xclip` / `wl-paste`.
+- macOS: `arboard` first, fallback to `pbpaste`.
+- Windows: `arboard`.
 
-剪贴板内容类型判断：
+Clipboard content type detection:
 
-1. 如果 clipboard 提供 URI list（`text/uri-list`），解析为文件路径列表。
-2. 如果 clipboard 提供二进制内容（`image/*`、`application/octet-stream` 等），作为文件二进制处理。
-3. 否则作为纯文本。
+1. If the clipboard provides a URI list (`text/uri-list`), parse it as a list of file paths.
+2. If the clipboard provides binary content (`image/*`, `application/octet-stream`, etc.), treat it as file binary.
+3. Otherwise treat it as plain text.
 
-对于文件路径，TUI client 需要把 URI 解码成本地路径（例如 `file:///home/user/foo.txt` → `/home/user/foo.txt`）。
+For file paths, the TUI client needs to decode URIs into local paths (e.g. `file:///home/user/foo.txt` → `/home/user/foo.txt`).
 
-### 5.3 快捷键
+### 5.3 Shortcuts
 
-- `Ctrl+V`：触发粘贴。
-- `Shift+P`：同样触发粘贴（替代原本直接文本粘贴的行为，现在统一走剪贴板解析）。
+- `Ctrl+V`: triggers paste.
+- `Shift+P`: also triggers paste (replaces the previous direct-text-paste behavior; everything now goes through clipboard parsing uniformly).
 
-只在 `Focus::Main` 时触发；sidebar、history、settings、error-log 等 overlay 打开时不触发。
+Triggered only in `Focus::Main`; not triggered while overlays such as sidebar, history, settings, or error-log are open.
 
-## 6. Client → Local Server 协议
+## 6. Client → Local Server Protocol
 
-在现有 Unix socket 行协议上新增两条命令：
+Add two commands to the existing Unix socket line protocol:
 
 ```text
 PASTE_TEXT {target_id} {base64_text}
@@ -89,25 +89,25 @@ PASTE_FILE {target_id} {filename_hint} {base64_bytes}
 
 ### 6.1 PASTE_TEXT
 
-- `target_id`：当前 active target 的 qualified target id。
-- `base64_text`：UTF-8 文本的 base64 编码。
+- `target_id`: the qualified target id of the current active target.
+- `base64_text`: base64-encoded UTF-8 text.
 
-server 收到后直接当键盘输入发给 active session。
+The server treats it directly as keyboard input to the active session after receiving it.
 
 ### 6.2 PASTE_FILE
 
-- `target_id`：当前 active target。
-- `filename_hint`：建议文件名（如剪贴板里的原始文件名，或 `paste-{timestamp}`），仅用于生成缓存路径，不包含路径分隔符。
-- `base64_bytes`：文件二进制内容的 base64 编码。
+- `target_id`: the current active target.
+- `filename_hint`: suggested filename (e.g. the original filename from the clipboard, or `paste-{timestamp}`); used only to generate the cache path and contains no path separators.
+- `base64_bytes`: base64 encoding of the file binary content.
 
-server 收到后：
+After receiving it, the server:
 
-- 本地 session：把字节写入 `<temp>/waitagent/{filename_hint}-{random}`，然后把该绝对路径当键盘输入。
-- remote session：通过 gRPC 把字节转发给 remote peer，remote peer 写入自己的 `<temp>/waitagent/` 后输入路径。
+- Local session: writes the bytes to `<temp>/waitagent/{filename_hint}-{random}`, then types that absolute path as keyboard input.
+- Remote session: forwards the bytes to the remote peer via gRPC; the remote peer writes them into its own `<temp>/waitagent/` and then types the path.
 
-## 7. Server 内部处理
+## 7. Server Internal Handling
 
-### 7.1 新增 ClientCommand 变体
+### 7.1 New ClientCommand Variants
 
 ```rust
 pub(crate) enum ClientCommand {
@@ -124,25 +124,25 @@ pub(crate) enum ClientCommand {
 }
 ```
 
-### 7.2 本地 Session 处理
+### 7.2 Local Session Handling
 
-在 `StateEventLoop` 的 `handle_client_command` 中处理：
+Handled in `StateEventLoop`'s `handle_client_command`:
 
-- `PasteText { target_id, text }`：
-  - 获取 active local session；
-  - 把 `text` 直接 `feed_input` 到 PTY（无需 `translate_key`）。
-- `PasteFile { target_id, filename_hint, bytes }`：
-  - 写入 `<temp>/waitagent/{safe_name}`；
-  - 把生成的绝对路径 `feed_input` 到 PTY。
+- `PasteText { target_id, text }`:
+  - Get the active local session;
+  - `feed_input` the `text` directly to the PTY (no `translate_key` needed).
+- `PasteFile { target_id, filename_hint, bytes }`:
+  - Write to `<temp>/waitagent/{safe_name}`;
+  - `feed_input` the generated absolute path to the PTY.
 
-### 7.3 Remote Peer Session 处理
+### 7.3 Remote Peer Session Handling
 
-- `PasteText`：与现有 `Input` 类似，local server 通过 remote session 的 gRPC 输入通道把文本发给 remote peer。
-- `PasteFile`：local server 把文件字节通过新增的 gRPC message 发给 remote peer；remote peer 收到后写入自己的缓存目录，然后把路径输入它自己的 PTY。
+- `PasteText`: similar to the existing `Input`; the local server sends the text to the remote peer through the remote session's gRPC input channel.
+- `PasteFile`: the local server sends the file bytes to the remote peer via a new gRPC message; after receiving them, the remote peer writes them into its own cache directory and then types the path into its own PTY.
 
-## 8. gRPC 协议扩展
+## 8. gRPC Protocol Extension
 
-在 `proto/waitagent/remote/v1/node_session.proto` 的 `NodeSessionEnvelope.body` oneof 中新增 chunked 文件粘贴消息：
+Add chunked file paste messages to the `NodeSessionEnvelope.body` oneof in `proto/waitagent/remote/v1/node_session.proto`:
 
 ```protobuf
 message FilePasteChunk {
@@ -163,7 +163,7 @@ message FilePasteComplete {
 }
 ```
 
-并加入 `NodeSessionEnvelope.body`：
+And add them to `NodeSessionEnvelope.body`:
 
 ```protobuf
 oneof body {
@@ -173,40 +173,40 @@ oneof body {
 }
 ```
 
-### 8.1 为什么需要分片
+### 8.1 Why Chunking Is Needed
 
-gRPC 默认单条消息大小限制为 4MB。粘贴大文件（如日志、图片、视频）时，必须把文件拆成多个 chunk 传输。建议 chunk 大小为 1MB，既能充分利用带宽，又留有足够头部余量。
+gRPC's default single-message size limit is 4MB. When pasting large files (e.g. logs, images, videos), the file must be split into multiple chunks for transfer. The recommended chunk size is 1MB, which fully utilizes bandwidth while leaving enough header margin.
 
-### 8.2 数据流
+### 8.2 Data Flow
 
 ```text
 TUI client
   │ PASTE_FILE {target_id, filename_hint, bytes}
   ▼
 local server
-  │ 判断 target_id 为 RemotePeer
-  │ 把 bytes 拆成 1MB chunks
-  │ 按顺序发送 FilePasteChunk{chunk_index, total_chunks, ...}
+  │ determine that target_id is a RemotePeer
+  │ split bytes into 1MB chunks
+  │ send FilePasteChunk{chunk_index, total_chunks, ...} in order
   ▼
 remote peer node
-  │ 接收并缓存 chunks，校验完整性
-  │ 全部收齐后写入 /tmp/waitagent/{filename_hint}-{random}
-  │ 把路径输入该 target_id 对应的 PTY
-  │ 回复 FilePasteComplete（cached_path / error）
+  │ receive and buffer chunks, verify integrity
+  │ after all chunks arrive, write to /tmp/waitagent/{filename_hint}-{random}
+  │ type the path into the PTY for that target_id
+  │ reply FilePasteComplete (cached_path / error)
   ▼
 local server
-  │ 可选：把结果记录到 error log；不需要回传给 TUI client
+  │ optional: record the result to the error log; no need to report back to the TUI client
 ```
 
-### 8.3 错误与取消
+### 8.3 Errors and Cancellation
 
-- 任一块传输失败或顺序错乱，receiver 丢弃该 transfer，不写入文件，不输入路径。
-- Sender 在收到 `FilePasteComplete` 前不应开始新的大文件传输到同一 target，避免 receiver buffer 混乱。
-- 文件名 hint 仅用于生成缓存文件名；receiver 最终使用自己的缓存目录和命名规则。
+- If any chunk transfer fails or arrives out of order, the receiver discards the transfer, writes no file, and types no path.
+- The sender should not start a new large file transfer to the same target before receiving `FilePasteComplete`, to avoid receiver buffer confusion.
+- The filename hint is only used to generate the cache filename; the receiver ultimately uses its own cache directory and naming rules.
 
-## 9. 缓存目录与文件名
+## 9. Cache Directory and Filenames
 
-### 9.1 缓存目录
+### 9.1 Cache Directory
 
 ```rust
 fn clipboard_cache_dir() -> PathBuf {
@@ -214,97 +214,97 @@ fn clipboard_cache_dir() -> PathBuf {
 }
 ```
 
-- Linux：`/tmp/waitagent/`
-- macOS：`/var/folders/.../T/waitagent/`
-- Windows：`%TEMP%\waitagent\`
+- Linux: `/tmp/waitagent/`
+- macOS: `/var/folders/.../T/waitagent/`
+- Windows: `%TEMP%\waitagent\`
 
-目录不存在时自动创建。
+The directory is created automatically if it does not exist.
 
-### 9.2 文件名
+### 9.2 Filenames
 
 ```rust
 format!("{}-{}", sanitize(filename_hint), random_token(8))
 ```
 
-- `sanitize`：移除路径分隔符、`..`、控制字符。
-- 如果 `filename_hint` 为空，使用 `paste`。
-- 后缀保留原始扩展名，用于工具识别文件类型。
+- `sanitize`: removes path separators, `..`, and control characters.
+- If `filename_hint` is empty, use `paste`.
+- The suffix keeps the original extension so tools can recognize the file type.
 
-示例：`image-7a3f9e2d.png`。
+Example: `image-7a3f9e2d.png`.
 
-### 9.3 缓存生命周期
+### 9.3 Cache Lifecycle
 
-本次不做自动清理。缓存文件留在 `<temp>/waitagent/` 中，由系统或用户定期清理。后续可补充 LRU 清理策略。
+No automatic cleanup in this iteration. Cache files stay in `<temp>/waitagent/` and are cleaned up periodically by the system or the user. An LRU cleanup strategy can be added later.
 
-## 10. 错误处理
+## 10. Error Handling
 
-| 错误场景 | 行为 |
+| Error scenario | Behavior |
 |---|---|
-| 读系统剪贴板失败 | 在 footer 或 status message 显示简短错误，不阻塞 UI |
-| 剪贴板内容无法识别 | 降级为纯文本粘贴 |
-| 文件路径指向不存在的文件 | 显示错误，不发命令 |
-| 写入 `/tmp/waitagent/` 失败 | 显示错误，不发路径 |
-| remote peer 拒绝/失败 `FilePasteResponse.ok == false` | local server 记录 error log；TUI client 不等待响应 |
-| base64 解码失败 | 按命令解析错误处理，回复 `ControlResponse::err` |
+| System clipboard read failure | Show a short error in the footer or a status message; do not block the UI |
+| Unrecognizable clipboard content | Degrade to plain-text paste |
+| File path points to a nonexistent file | Show an error; do not send a command |
+| Writing to `/tmp/waitagent/` fails | Show an error; do not type the path |
+| Remote peer rejects/fails `FilePasteResponse.ok == false` | Local server records an error log; the TUI client does not wait for a response |
+| Base64 decode failure | Treat as a command parse error; reply `ControlResponse::err` |
 
-所有错误都使用 `thiserror` 类型化，并通过 `ERROR_LOG` 记录。
+All errors are typed with `thiserror` and recorded via `ERROR_LOG`.
 
-## 11. 并发与锁约束
+## 11. Concurrency and Lock Constraints
 
-依据项目 `AGENTS.md` 的并发约束：
+Per the project `AGENTS.md` concurrency constraints:
 
-- 剪贴板读取和文件写入是 I/O，**不能在 `StateEventLoop` 线程中同步执行**。
-- TUI client 中，系统剪贴板读取应放在独立 thread / async task 中，完成后通过 channel 把结果送回主事件循环，再发命令给 server。
-- Local server 中，`PasteFile` 的文件写入如果很小，可以在 `StateEventLoop` 中同步写入（因为只是本地 temp 文件），但建议同样放到独立 task 中，避免大文件阻塞事件循环。
-- Remote session 的文件转发走 gRPC，本身就是异步的，不持有 `SharedState` 锁。
-- `broadcast_snapshot` 仍由 `StateEventLoop` 唯一调用。
+- Clipboard reads and file writes are I/O and **must not execute synchronously on the `StateEventLoop` thread**.
+- In the TUI client, system clipboard reads should run in a separate thread / async task; on completion, the result is sent back to the main event loop via a channel, which then sends the command to the server.
+- In the local server, `PasteFile` file writes may be written synchronously in `StateEventLoop` if they are very small (since it is just a local temp file), but it is recommended to put them in a separate task as well, to avoid blocking the event loop on large files.
+- Remote session file forwarding goes over gRPC, which is asynchronous by nature and does not hold the `SharedState` lock.
+- `broadcast_snapshot` is still called only by `StateEventLoop`.
 
-### 11.1 锁顺序
+### 11.1 Lock Order
 
-本次改动不引入新的共享锁。`StateEventLoop` 处理 `PasteText` / `PasteFile` 时，锁顺序保持现有规则：
+This change introduces no new shared locks. When `StateEventLoop` handles `PasteText` / `PasteFile`, the lock order follows the existing rules:
 
 1. `sessions.sessions`
 2. `sessions.active_target`
 3. `sessions.local_sessions` / `sessions.remote_sessions`
 
-## 12. 实现阶段
+## 12. Implementation Phases
 
-### Phase 1：文本粘贴
+### Phase 1: Text Paste
 
-1. `Cargo.toml` 启用 `crossterm/bracketed-paste`。
-2. TUI client 初始化/清理时启用/禁用 bracketed paste。
-3. 处理 `Event::Paste`，发送 `PASTE_TEXT`。
-4. 绑定 `Ctrl+V` / `Shift+P`，引入 `arboard` 读取系统剪贴板文本。
-5. Server 新增 `ClientCommand::PasteText`，local/remote session 都直接输入文本。
-6. 验证本地和 remote session 文本粘贴。
+1. Enable `crossterm/bracketed-paste` in `Cargo.toml`.
+2. TUI client enables/disables bracketed paste at init/cleanup.
+3. Handle `Event::Paste` and send `PASTE_TEXT`.
+4. Bind `Ctrl+V` / `Shift+P`; introduce `arboard` to read system clipboard text.
+5. Server adds `ClientCommand::PasteText`; both local and remote sessions type the text directly.
+6. Verify text paste in local and remote sessions.
 
-### Phase 2：文件路径粘贴
+### Phase 2: File Path Paste
 
-1. TUI client 解析 `text/uri-list` 等剪贴板格式，得到本地文件路径。
-2. 本地 session：直接 `PASTE_TEXT` 发路径。
-3. Remote session：TUI client 读取文件内容，走 `PASTE_FILE`。
-4. Server 新增 `ClientCommand::PasteFile`，本地 session 落地后输入路径。
+1. TUI client parses clipboard formats such as `text/uri-list` to get local file paths.
+2. Local session: send the path directly via `PASTE_TEXT`.
+3. Remote session: TUI client reads the file content and goes through `PASTE_FILE`.
+4. Server adds `ClientCommand::PasteFile`; the local session writes to disk and then types the path.
 
-### Phase 3：二进制文件/图片粘贴
+### Phase 3: Binary File/Image Paste
 
-1. TUI client 检测二进制剪贴板内容（图片、文件对象）。
-2. 本地 session：走 `PASTE_FILE`，local server 落地后输入路径。
-3. Remote session：走 `PASTE_FILE`，经 gRPC `FilePasteRequest` 转发到 remote peer。
-4. Remote peer 实现 `FilePasteRequest` handler：落地、输入路径、回复 `FilePasteResponse`。
+1. TUI client detects binary clipboard content (images, file objects).
+2. Local session: go through `PASTE_FILE`; the local server writes to disk and then types the path.
+3. Remote session: go through `PASTE_FILE`, forwarded to the remote peer via gRPC `FilePasteRequest`.
+4. The remote peer implements the `FilePasteRequest` handler: write to disk, type the path, and reply `FilePasteResponse`.
 
-### Phase 4：测试与验收
+### Phase 4: Testing and Acceptance
 
-1. 单元测试 `key_translation` 之外的 paste 路径解析。
-2. 本地 session 文本/路径/二进制粘贴手动验收。
-3. Remote peer session 文本/文件粘贴跨主机手动验收。
-4. `cargo fmt --check` 与 `cargo clippy -- -D warnings` 通过。
+1. Unit tests for paste path parsing outside of `key_translation`.
+2. Manual acceptance of text/path/binary paste in the local session.
+3. Manual acceptance of text/file paste in the remote peer session across hosts.
+4. `cargo fmt --check` and `cargo clippy -- -D warnings` pass.
 
-## 13. 验收标准
+## 13. Acceptance Criteria
 
-- `Ctrl+V` / `Shift+P` 在主窗格触发粘贴。
-- 文本粘贴到本地 bash/vim/codex 输入区内容正确，不丢失换行。
-- 本地 session 文件路径粘贴：路径字符串直接出现在 PTY 输入区。
-- 本地 session 图片/文件二进制粘贴：文件存到 `/tmp/waitagent/`，PTY 输入区出现该绝对路径。
-- Remote peer session 文件路径/二进制粘贴：remote peer 的 `/tmp/waitagent/` 出现对应文件，remote PTY 输入区出现 remote peer 本地绝对路径。
-- 剪贴板为空或不可读时，UI 给出可见提示，不 panic。
-- `cargo clippy -- -D warnings` 与 `cargo test --release ratatui session_sync` 通过。
+- `Ctrl+V` / `Shift+P` triggers paste in the main pane.
+- Text pasted into a local bash/vim/codex input area is correct, with no newlines lost.
+- Local session file path paste: the path string appears directly in the PTY input area.
+- Local session image/file binary paste: the file is stored in `/tmp/waitagent/` and the absolute path appears in the PTY input area.
+- Remote peer session file path/binary paste: the corresponding file appears in the remote peer's `/tmp/waitagent/`, and the remote peer's local absolute path appears in the remote PTY input area.
+- When the clipboard is empty or unreadable, the UI shows a visible prompt and does not panic.
+- `cargo clippy -- -D warnings` and `cargo test --release ratatui session_sync` pass.

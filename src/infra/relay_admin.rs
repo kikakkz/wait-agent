@@ -1,5 +1,5 @@
 //! Relay local admin socket: the owner-only local channel for bootstrap
-//! and emergency management (docs/relay-design.md 管理通道). Follows the
+//! and emergency management (docs/relay-design.md: Management Channel). Follows the
 //! owner-control pattern in `platform::remote_ipc`: UDS under the temp dir
 //! on Unix, TCP loopback with a derived port on Windows.
 //!

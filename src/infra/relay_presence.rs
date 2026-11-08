@@ -1,5 +1,5 @@
-//! Presence hub: who watches whom on the relay (docs/relay-design.md node
-//! 生命周期 presence channel). Registered links publish online/offline
+//! Presence hub: who watches whom on the relay (docs/relay-design.md Node
+//! Lifecycle presence channel). Registered links publish online/offline
 //! transitions; nodes subscribe with `Frame::Watch` and receive an immediate
 //! `Frame::Presence` replay plus every later transition for the target.
 //!
