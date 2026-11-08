@@ -3,10 +3,12 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["PR_WATCH_STATE_DIR"] = tempfile.mkdtemp(prefix="pr-watch-test-")
@@ -42,7 +44,8 @@ class FakeApi:
 
 
 SHA = "abc123"
-PR_OPEN = {"merged": False, "state": "open", "head": {"sha": SHA},
+PR_OPEN = {"merged": False, "state": "open",
+           "head": {"sha": SHA, "ref": "feat/1-x"},
            "base": {"ref": "main"}, "html_url": "https://example.test/pr/1"}
 PROTECTION = {"required_status_checks": {"contexts": ["check", "test"]}}
 CHECKS_PENDING = {"check_runs": [
@@ -181,6 +184,52 @@ class PrWatchTests(unittest.TestCase):
         report = pr_watch.run_once(api, "o/r", 1)
         self.assertEqual(report["status"], "merged")
         self.assertEqual(api.puts, [])
+
+    def test_merged_report_names_cleanup_targets(self):
+        pr = json.loads(json.dumps(PR_OPEN))
+        pr["merged"] = True
+        pr["merge_commit_sha"] = "deadbeef"
+        api = FakeApi({"/pulls/1": [pr]})
+        with patch.object(pr_watch, "worktree_for_branch",
+                          return_value="/tmp/wt") as wt:
+            report = pr_watch.run_once(api, "o/r", 1)
+        self.assertEqual(report["cleanup"],
+                         {"branch": "feat/1-x", "worktree": "/tmp/wt"})
+        wt.assert_called_once_with("feat/1-x")
+
+    def test_merged_report_null_worktree(self):
+        pr = json.loads(json.dumps(PR_OPEN))
+        pr["merged"] = True
+        api = FakeApi({"/pulls/1": [pr]})
+        with patch.object(pr_watch, "worktree_for_branch",
+                          return_value=None):
+            report = pr_watch.run_once(api, "o/r", 1)
+        self.assertEqual(report["cleanup"]["worktree"], None)
+
+    def test_worktree_for_branch_parses_porcelain(self):
+        porcelain = (
+            "worktree /home/u/main-wt\n"
+            "HEAD 1111\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /home/u/feat-wt\n"
+            "HEAD 2222\n"
+            "branch refs/heads/feat/1-x\n"
+            "\n"
+        )
+        ok = subprocess.CompletedProcess([], 0, stdout=porcelain, stderr="")
+        with patch.object(pr_watch.subprocess, "run", return_value=ok):
+            self.assertEqual(pr_watch.worktree_for_branch("feat/1-x"),
+                             "/home/u/feat-wt")
+            self.assertIsNone(pr_watch.worktree_for_branch("fix/9-y"))
+
+    def test_worktree_for_branch_git_failure_returns_none(self):
+        with patch.object(pr_watch.subprocess, "run",
+                          side_effect=FileNotFoundError("git")):
+            self.assertIsNone(pr_watch.worktree_for_branch("feat/1-x"))
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr="x")
+        with patch.object(pr_watch.subprocess, "run", return_value=failed):
+            self.assertIsNone(pr_watch.worktree_for_branch("feat/1-x"))
 
 
 if __name__ == "__main__":

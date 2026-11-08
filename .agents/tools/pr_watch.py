@@ -11,12 +11,16 @@ Usage:
 
 Exit codes: 0 merged; 2 actionable stop (failing checks, changes requested,
 max rounds); 3 user interrupt. Auth: GITHUB_TOKEN env. Stdlib only.
+
+On merged the JSON report carries post-merge cleanup targets: the head
+branch and the path of its local git worktree, when one exists.
 """
 
 import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 import urllib.error
@@ -121,6 +125,23 @@ def changes_requested(api, pr_num, head_date):
     return sorted(blockers), sorted(approvers)
 
 
+def worktree_for_branch(branch):
+    try:
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    path = None
+    for line in out.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}":
+            return path
+    return None
+
+
 def hand_in(api, pr_num, sha):
     return api.put(f"/pulls/{pr_num}/merge",
                    {"merge_method": "squash", "expected_head_sha": sha})
@@ -138,6 +159,9 @@ def run_once(api, repo, pr_num):
     if pr.get("merged"):
         report["status"] = "merged"
         report["merge_commit_sha"] = pr.get("merge_commit_sha")
+        head_ref = pr["head"]["ref"]
+        report["cleanup"] = {"branch": head_ref,
+                             "worktree": worktree_for_branch(head_ref)}
         return report
     if pr.get("state") != "open":
         report["status"] = "closed_unmerged"
