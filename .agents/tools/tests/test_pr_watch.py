@@ -332,6 +332,47 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual(code, 0)
         cleanup.assert_not_called()
 
+    def test_handed_in_merged_report_carries_cleanup(self):
+        api = FakeApi({
+            "/pulls/1": [json.loads(json.dumps(PR_OPEN))],
+            "/branches/main/protection": [PROTECTION],
+            f"/commits/{SHA}/check-runs?per_page=100": [CHECKS_GREEN],
+            "/pulls/1/commits?per_page=100": [COMMITS],
+            "/pulls/1/reviews?per_page=100": [NO_REVIEWS],
+            "/pulls/1/merge #PUT": [({"merged": True, "sha": "squash1"}, 200)],
+        })
+        with patch.object(pr_watch, "worktree_for_branch",
+                          return_value="/tmp/wt"):
+            report = pr_watch.run_once(api, "o/r", 1)
+        self.assertEqual(report["status"], "handed_in")
+        self.assertTrue(report["merged"])
+        self.assertEqual(report["merge_commit_sha"], "squash1")
+        self.assertEqual(report["cleanup"],
+                         {"branch": "feat/1-x", "worktree": "/tmp/wt"})
+
+    def test_main_cleanup_on_direct_merge(self):
+        report = {"pr": 240, "status": "handed_in", "merged": True,
+                  "merge_commit_sha": "s1",
+                  "cleanup": {"branch": "docs/239-x", "worktree": "/tmp/wt"}}
+        with patch.object(pr_watch, "run_once", return_value=report), \
+             patch.object(pr_watch, "post_merge_cleanup",
+                          return_value={"issue": 239}) as cleanup:
+            code = pr_watch.main(["o/r", "240", "--cleanup", "--interval", "1"])
+        self.assertEqual(code, 0)
+        cleanup.assert_called_once()
+
+    def test_main_waits_through_enqueue_then_cleans_up(self):
+        enqueued = {"pr": 240, "status": "handed_in", "merged": False}
+        merged = self._merged_report()
+        with patch.object(pr_watch, "run_once",
+                          side_effect=[enqueued, merged]) as once, \
+             patch.object(pr_watch, "post_merge_cleanup",
+                          return_value={"issue": 239}) as cleanup:
+            code = pr_watch.main(["o/r", "240", "--cleanup", "--interval", "1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(once.call_count, 2)
+        cleanup.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -285,6 +285,11 @@ def run_once(api, repo, pr_num):
         save_state(repo, pr_num, state)
         report["status"] = "handed_in"
         report["merged"] = result.get("merged", False)
+        if report["merged"]:
+            report["merge_commit_sha"] = result.get("sha")
+            head_ref = pr["head"]["ref"]
+            report["cleanup"] = {"branch": head_ref,
+                                 "worktree": worktree_for_branch(head_ref)}
         return report
     report["status"] = "hand_in_failed"
     report["http_status"] = code
@@ -331,7 +336,17 @@ def main(argv=None):
         if status in ("failing_checks", "changes_requested",
                       "closed_unmerged", "hand_in_failed", "api_error"):
             return 2
-        if args.once or status == "handed_in":
+        if args.once:
+            return 0
+        if status == "handed_in":
+            if args.cleanup:
+                if report.get("merged"):
+                    result = post_merge_cleanup(api, report)
+                    print(json.dumps({"status": "cleanup", "result": result},
+                                     indent=2))
+                    return 0
+                time.sleep(args.interval)
+                continue
             return 0
         time.sleep(args.interval)
     print(json.dumps({"status": "max_rounds_exceeded",
