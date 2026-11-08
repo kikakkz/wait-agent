@@ -107,7 +107,15 @@ impl AgentDetector for KimiDetector {
         }
 
         if kimi_has_running_background_task(&normalized_lines) {
-            return Some(ManagedSessionTaskState::Running);
+            let has_idle_prompt = normalized_lines
+                .iter()
+                .skip(last_lines_start)
+                .any(|line| kimi_prompt_line(line));
+            return Some(if has_idle_prompt {
+                ManagedSessionTaskState::Background
+            } else {
+                ManagedSessionTaskState::Running
+            });
         }
 
         for line in normalized_lines.iter().skip(last_lines_start) {
@@ -203,8 +211,7 @@ fn kimi_has_active_animation(lines: &[&str]) -> bool {
         let lowered = trimmed.to_ascii_lowercase();
         kimi_moon_spinner(trimmed)
             || kimi_compacting_status_line(line)
-            || (!lowered.starts_with("k2.7 code thinking")
-                && (lowered.contains("thinking") || lowered.contains("working"))
+            || ((lowered.contains("thinking") || lowered.contains("working"))
                 && trimmed
                     .chars()
                     .next()
@@ -457,6 +464,53 @@ K2.7 Code thinking  [1 task running]"#;
         assert_eq!(
             detector.infer_task_state(Some("kimi"), pane_text),
             Some(ManagedSessionTaskState::Confirm)
+        );
+    }
+
+    #[test]
+    fn background_task_with_idle_prompt_is_background() {
+        let pane_text = "Ask When Needed  K2.8 Preview thinking: max  [1 task running]\n\
+                         ~/wait-agent  main\n\
+                         │ >";
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Background)
+        );
+    }
+
+    #[test]
+    fn multiple_background_tasks_with_idle_prompt_is_background() {
+        let pane_text = "Ask When Needed  K2.8 Preview thinking: max  [3 tasks running]\n\
+                         ~/wait-agent  main\n\
+                         │ >";
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Background)
+        );
+    }
+
+    #[test]
+    fn background_task_with_foreground_spinner_is_running() {
+        let pane_text = "⠋ working (K2.8 Preview)\n\
+                         Ask When Needed  K2.8 Preview thinking: max  [1 task running]\n\
+                         │ >";
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Running)
+        );
+    }
+
+    #[test]
+    fn background_task_without_prompt_is_running() {
+        let pane_text = "Ask When Needed  K2.8 Preview thinking: max  [1 task running]\n\
+                         ~/wait-agent  main";
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Running)
         );
     }
 }
