@@ -40,11 +40,23 @@ bulky knowledge lives in `docs/` and is referenced by pointer.
    task status updates ride with the landing PR.
 7. **Process authority.** If an external skill or methodology pack
    disagrees with this file on *process*, this file wins.
-8. **English-only repo content.** Commit messages, PR titles/bodies, issue
-   titles/bodies, source comments, user-facing strings, and docs are written
-   in English. Chinese is allowed only in chat conversations (issue #230).
-   Exemption: test fixtures that intentionally use CJK characters to
-   exercise wide-character handling.
+8. **English-only repo content.** Every text artifact in the repo is written
+   in English: commit messages, PR titles/bodies, issue titles/bodies,
+   source, comments, user-facing strings, docs, templates, and config
+   files. Chinese is allowed only in chat conversations (issues #230,
+   #232). Exemption: test fixtures that intentionally use CJK characters
+   to exercise wide-character handling.
+9. **No explanatory comments.** Comments rot; code says what it does.
+   Prohibited in source: narration comments, choice rationale ("why"),
+   workaround/bypass notes, and temporary markers — if something needs
+   explaining, it goes into a `docs/` design doc (one file per design
+   topic, referenced from the code); if something needs tracking, it
+   goes into an issue. Design docs record design decisions, never
+   hacks or bypasses. The only comments allowed are compliance-critical
+   ones: `///` on public APIs and one-line `//!` module purpose with a
+   pointer to the design doc, plus `// SAFETY:` on every `unsafe` block
+   and `# Safety` contracts. Concurrency rationale, including lock
+   hierarchy, lives in the design doc, not inline (issue #232).
 
 ## Commands
 
@@ -123,7 +135,7 @@ When modifying code that uses threads, mutexes, channels, or event loops in this
 
 - **`SharedState` has a single writer**. All mutations to `SharedState` must go through `StateEventLoop`. Do not mutate `SharedState` directly from `EventProxy`, client handlers, control commands, or any other thread.
 - **`broadcast_snapshot` has a single caller**. Only `StateEventLoop` may call `broadcast_snapshot`. Other threads/loops that need a UI refresh must send a state event (e.g., `LocalSessionOutput`, `RemoteSessionOutput`, `RemoteSessionInputEcho`) and let `StateEventLoop` broadcast.
-- **Lock order is part of the design**. Before adding or reordering locks, document the lock hierarchy in a code comment and verify that every code path acquires locks in the same order.
+- **Lock order is part of the design**. Before adding or reordering locks, document the lock hierarchy in the module's design doc (`docs/`) and verify that every code path acquires locks in the same order.
 - **Never hold a lock while calling a callback, broadcasting, or doing I/O**. In particular:
   - `clients` lock must not be held while calling `build_snapshot` or `broadcast_snapshot`.
   - `sessions` lock must not be held while calling `broadcast_snapshot`.
