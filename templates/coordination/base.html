@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf" content="{{ csrf }}">
+<title>{% block title %}waitagent coordination{% endblock %}</title>
+<style>
+  :root {
+    --bg: #16181e;
+    --panel: #1c1f26;
+    --line: #3c414b;
+    --fg: #e8ecf2;
+    --dim: #8b93a3;
+    --accent: #7dcfff;
+    --green: #9ece6a;
+    --yellow: #e0af68;
+    --red: #f7768e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 16px 20px 32px; }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 8px; margin-bottom: 16px;
+  }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: 1px; }
+  header h1 .mark { color: var(--accent); }
+  nav a { color: var(--dim); text-decoration: none; margin-right: 12px; }
+  nav a.active, nav a:hover { color: var(--fg); }
+  header .uptime { color: var(--dim); margin-left: auto; }
+  section { margin-bottom: 20px; }
+  h2 {
+    font-size: 12px; font-weight: normal; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--dim); margin: 0 0 6px;
+  }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    padding: 10px 14px; min-width: 130px;
+  }
+  .card .num { font-size: 20px; color: var(--accent); }
+  .card .label { color: var(--dim); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td {
+    text-align: left; padding: 3px 10px 3px 0;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 340px;
+  }
+  th { color: var(--dim); font-weight: normal; }
+  tr.empty td { color: var(--dim); border-bottom: none; }
+  td.dot-on { color: var(--green); }
+  td.dot-off { color: var(--dim); }
+  td.state-pending { color: var(--yellow); }
+  td.state-approved { color: var(--accent); }
+  td.state-joined { color: var(--green); }
+  button.act {
+    background: transparent; border: 1px solid var(--dim); color: var(--fg);
+    font: inherit; padding: 1px 10px; cursor: pointer;
+  }
+  button.act:hover { border-color: var(--fg); }
+  button.act.danger { border-color: var(--red); color: var(--red); }
+  button.act.danger:hover { color: var(--fg); }
+  form.inline { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 8px; }
+  form.inline input[type=text], form.inline input[type=email] {
+    background: transparent; border: 1px solid var(--line); color: var(--fg);
+    font: inherit; padding: 3px 8px; width: 24em;
+  }
+  form.inline button { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; padding: 3px 14px; cursor: pointer; }
+  form.inline button:hover { border-color: var(--fg); }
+  p.note { color: var(--dim); }
+  p.banner { border: 1px solid var(--line); padding: 8px 10px; white-space: pre-wrap; }
+  p.banner.error { border-color: var(--red); color: var(--red); }
+  p.banner.ok { border-color: var(--green); color: var(--green); }
+  .linkbox {
+    display: none; margin: 10px 0; padding: 8px 10px;
+    border: 1px solid var(--accent); word-break: break-all; white-space: pre-wrap;
+  }
+  .linkbox .copy { margin-left: 10px; }
+  footer { color: var(--dim); margin-top: 24px; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1><span class="mark">✦</span> waitagent coordination</h1>
+  <nav>
+    <a href="/dashboard/" data-nav="overview">overview</a>
+    <a href="/dashboard/requests" data-nav="requests">requests</a>
+    <a href="/dashboard/nodes" data-nav="nodes">nodes</a>
+  </nav>
+  <span class="uptime" id="uptime"></span>
+</header>
+{% block content %}{% endblock %}
+<footer>coordination dashboard · session-bound, in-memory, restart invalidates</footer>
+</main>
+<script>
+const CSRF = document.querySelector('meta[name=csrf]').content;
+function fingerprint() {
+  return [
+    screen.width + 'x' + screen.height,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    navigator.platform || 'unknown',
+    navigator.language || 'unknown',
+  ].join('|');
+}
+async function api(path, options) {
+  const init = options || {};
+  init.headers = Object.assign({ 'X-CSRF-Token': CSRF }, init.headers || {});
+  const response = await fetch(path, init);
+  if (response.status === 401) { window.location = '/dashboard/login'; throw new Error('session expired'); }
+  return response;
+}
+function ageText(unixSecs) {
+  const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+  if (elapsed < 60) return '<1m';
+  if (elapsed < 3600) return Math.floor(elapsed / 60) + 'm ago';
+  if (elapsed < 86400) return Math.floor(elapsed / 3600) + 'h ago';
+  return Math.floor(elapsed / 86400) + 'd ago';
+}
+setInterval(() => {
+  api('/dashboard/api/heartbeat', { method: 'POST' }).catch(() => {});
+}, 30000);
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

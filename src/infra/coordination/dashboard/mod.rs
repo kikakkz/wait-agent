@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod pages;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -152,6 +153,95 @@ pub struct DashboardState {
     pub login_log: Mutex<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverviewCounts {
+    pub registry_count: usize,
+    pub online_count: usize,
+    pub pending_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// One registry node merged with its presence state.
+pub struct RegistryNode {
+    pub node_id: String,
+    pub online: bool,
+    pub last_seen: Option<u64>,
+    pub relay_url: Option<String>,
+    pub direct_addresses: Vec<String>,
+}
+
+impl DashboardState {
+    pub fn overview_counts(&self, now: u64) -> OverviewCounts {
+        let requests = self.stores.requests.list().unwrap_or_default();
+        let pending = requests
+            .iter()
+            .filter(|request| {
+                request.state == crate::infra::coordination::enrollment::RequestState::Pending
+            })
+            .count();
+        OverviewCounts {
+            registry_count: self
+                .stores
+                .registry
+                .list()
+                .map(|list| list.len())
+                .unwrap_or(0),
+            online_count: self
+                .stores
+                .presence
+                .online(now, self.config.presence_timeout())
+                .len(),
+            pending_count: pending,
+        }
+    }
+
+    /// Registry entries merged with online presence, sorted by node id.
+    pub fn registry_nodes(&self, now: u64) -> Result<Vec<RegistryNode>, std::io::Error> {
+        let online = self
+            .stores
+            .presence
+            .online(now, self.config.presence_timeout());
+        let mut nodes = self
+            .stores
+            .registry
+            .list()
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?
+            .into_iter()
+            .map(|node_id| {
+                let presence = online.iter().find(|entry| entry.node_id == node_id);
+                RegistryNode {
+                    node_id,
+                    online: presence.is_some(),
+                    last_seen: presence.as_ref().map(|entry| entry.last_seen),
+                    relay_url: presence.and_then(|entry| {
+                        entry.addr.addrs.iter().find_map(|addr| match addr {
+                            iroh::TransportAddr::Relay(url) => Some(url.to_string()),
+                            _ => None,
+                        })
+                    }),
+                    direct_addresses: presence
+                        .map(|entry| {
+                            entry
+                                .addr
+                                .addrs
+                                .iter()
+                                .filter_map(|addr| match addr {
+                                    iroh::TransportAddr::Ip(ip) => Some(ip.to_string()),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        Ok(nodes)
+    }
+}
+
 pub fn build_router(state: Arc<DashboardState>) -> Router {
     Router::new()
         .route("/dashboard/api/login-request", post(api::login_request))
@@ -160,6 +250,11 @@ pub fn build_router(state: Arc<DashboardState>) -> Router {
         .route("/dashboard/api/overview", get(api::overview))
         .route("/dashboard/api/requests", get(api::requests))
         .route("/dashboard/api/nodes", get(api::nodes))
+        .route("/dashboard", get(pages::overview_page))
+        .route("/dashboard/", get(pages::overview_page))
+        .route("/dashboard/login", get(pages::login_page))
+        .route("/dashboard/requests", get(pages::requests_page))
+        .route("/dashboard/nodes", get(pages::nodes_page))
         .route(
             "/dashboard/api/requests/{id}/approve",
             post(api::approve_request),

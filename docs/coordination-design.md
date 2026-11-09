@@ -219,3 +219,30 @@ draft row, and a detail page. Design decisions:
   `operators` list auto-registers it (logged, in memory only); a non-empty
   list without the key makes dashboard admin endpoints answer 409 with the
   listing instruction until the admin adds it.
+
+### Frontend (slice 1-3e, issue #261)
+
+- **askama 0.14 SSR** templates in `templates/coordination/` (`base.html`,
+  `login.html`, `overview.html`, `requests.html`, `nodes.html`), extending a
+  shared base that carries the dark console palette, the per-session CSRF
+  token in a `<meta>` tag, the heartbeat loop (30 s), the shared `api()`
+  fetch wrapper (redirects to `/dashboard/login` on 401), and the
+  deterministic coarse fingerprint (screen, timezone, platform, language)
+  used identically by the login request and the redeem.
+- **Pages and routes.** `/dashboard/` (overview: server node id, relay URL,
+  registry/online/pending counters), `/dashboard/requests` (approve with the
+  minted `waitagent://join?token=…` link plus a copy button), `/dashboard/
+  nodes` (presence dots, last-seen ages, merged addresses, confirmed
+  revoke), and `/dashboard/login`. Pages are server-rendered with fixture
+  state on first load and then patched from the JSON API every 5 s; a 401 on
+  any poll redirects to login. Page handlers sit behind the same session
+  gate: unauthenticated page loads get a 303 to `/dashboard/login`.
+- **Login flow.** The emailed link now targets `GET /dashboard/login?token=…`
+  (the page, changed from the raw API path in #260). The page repeats the
+  fingerprint via `X-Login-Fingerprint`, calls `login-redeem`, redirects to
+  `/dashboard/` on success, and renders the failure state inline (expired /
+  used / device-mismatch / unknown are all 403s surfaced from the API error
+  envelope).
+- **Shared queries.** `DashboardState::overview_counts` and
+  `DashboardState::registry_nodes` back both the JSON API and the SSR pages,
+  so the HTML and the polled JSON can never disagree about the numbers.

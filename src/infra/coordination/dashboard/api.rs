@@ -114,7 +114,7 @@ pub async fn login_request(
             .get(header::HOST)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("127.0.0.1");
-        let url = format!("http://{host}/dashboard/api/login-redeem?token={token}");
+        let url = format!("http://{host}/dashboard/login?token={token}");
         state.login_log.lock().expect("poisoned").push(url.clone());
         if state.admin_stdout {
             println!("login_link: {url}");
@@ -199,32 +199,14 @@ pub async fn heartbeat(State(state): SharedState, headers: HeaderMap) -> ApiResu
 pub async fn overview(State(state): SharedState, headers: HeaderMap) -> ApiResult {
     let session =
         authenticate(&state, &headers).map_err(|_| unauthorized("authentication required"))?;
-    let now = now_unix();
-    let requests = state.stores.requests.list().unwrap_or_default();
-    let pending = requests
-        .iter()
-        .filter(|request| {
-            request.state == crate::infra::coordination::enrollment::RequestState::Pending
-        })
-        .count();
-    let registry_count = state
-        .stores
-        .registry
-        .list()
-        .map(|list| list.len())
-        .unwrap_or(0);
-    let online_count = state
-        .stores
-        .presence
-        .online(now, state.config.presence_timeout())
-        .len();
+    let counts = state.overview_counts(now_unix());
     let mut response = ok(serde_json::json!({
         "ok": true,
         "node_id": state.node_id,
         "relay_url": state.relay_url,
-        "registry_count": registry_count,
-        "online_count": online_count,
-        "pending_count": pending,
+        "registry_count": counts.registry_count,
+        "online_count": counts.online_count,
+        "pending_count": counts.pending_count,
         "uptime_secs": state.started.elapsed().as_secs(),
         "version": env!("CARGO_PKG_VERSION"),
     }));
@@ -255,27 +237,19 @@ pub async fn requests(State(state): SharedState, headers: HeaderMap) -> ApiResul
 pub async fn nodes(State(state): SharedState, headers: HeaderMap) -> ApiResult {
     let session =
         authenticate(&state, &headers).map_err(|_| unauthorized("authentication required"))?;
-    let now = now_unix();
-    let online = state
-        .stores
-        .presence
-        .online(now, state.config.presence_timeout());
-    let registry = state
-        .stores
-        .registry
-        .list()
-        .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?;
-    let nodes = registry
-        .iter()
-        .map(|node_id| {
-            let presence = online.iter().find(|entry| entry.node_id == *node_id);
+    let nodes = state
+        .registry_nodes(now_unix())
+        .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?
+        .into_iter()
+        .map(|node| {
             serde_json::json!({
-                "node_id": node_id,
-                "online": presence.is_some(),
-                "last_seen": presence.as_ref().map(|entry| entry.last_seen),
-                "addr": presence
-                    .as_ref()
-                    .map(|entry| serde_json::from_str::<serde_json::Value>(&crate::infra::mesh_probe::format_node_addr(&entry.addr)).unwrap_or_default()),
+                "node_id": node.node_id,
+                "online": node.online,
+                "last_seen": node.last_seen,
+                "addr": {
+                    "relay_url": node.relay_url,
+                    "direct_addresses": node.direct_addresses,
+                },
             })
         })
         .collect::<Vec<_>>();
