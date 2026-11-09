@@ -39,6 +39,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      - name: packaging script tests (stub rpmbuild, issue #258)
+        run: bash scripts/tests/test-package-rpm.sh
+
       - name: DCO + trailer check on PR commits
         # Check the branch commits (base..head), NOT the checked-out merge
         # commit — GitHub's ephemeral test merge never carries trailers.
