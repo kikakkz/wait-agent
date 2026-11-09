@@ -300,6 +300,22 @@ pub async fn send_enroll_magic_link(
         .map_err(|error| error.to_string())
 }
 
+/// Mails the dashboard magic login link to the admin mailbox.
+pub fn dashboard_login_mail(
+    admin_email: &str,
+    login_url: &str,
+    expires_at: u64,
+) -> crate::web::auth::smtp::MailMessage {
+    crate::web::auth::smtp::MailMessage {
+        from: admin_email.to_string(),
+        to: admin_email.to_string(),
+        subject: "[waitagent coordination] dashboard login link".to_string(),
+        body: format!(
+            "Open this link within 15 minutes on the device that requested it:\n\n  {login_url}\n\nThe link expires at {expires_at} and works only from the requesting device.\n"
+        ),
+    }
+}
+
 /// The `waitagent://join?token=…` link for an approved request.
 pub fn magic_link(request: &crate::infra::coordination::enrollment::JoinRequest) -> String {
     format!("waitagent://join?token={}", request.token)

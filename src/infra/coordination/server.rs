@@ -31,7 +31,7 @@ impl CoordinationStores {
 /// Runtime inputs of the coordination serve loop.
 pub struct ServeParams {
     pub config: CoordinationConfig,
-    pub stores: CoordinationStores,
+    pub stores: Arc<CoordinationStores>,
     pub admin_stdout: bool,
     /// Public URL of the embedded relay, announced to joining nodes.
     pub relay_url: Option<String>,
@@ -41,7 +41,7 @@ pub struct ServeParams {
 pub async fn serve(
     key: SecretKey,
     listen: Option<std::net::SocketAddr>,
-    params: ServeParams,
+    mut params: ServeParams,
 ) -> Result<(), String> {
     let default_listen = std::net::SocketAddr::from((
         std::net::Ipv4Addr::UNSPECIFIED,
@@ -60,7 +60,6 @@ pub async fn serve(
         .bind()
         .await
         .map_err(|error| format!("bind coordination endpoint: {error}"))?;
-    let (_relay, relay_http_addr) = start_embedded_relay(&params.config, &endpoint).await;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let node_addr = loop {
         let addr = endpoint.addr();
@@ -76,8 +75,28 @@ pub async fn serve(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
-    let relay_url = params.config.relay_url.clone().or_else(|| {
-        relay_http_addr.and_then(|http_addr| {
+    let bound = endpoint
+        .bound_sockets()
+        .first()
+        .copied()
+        .unwrap_or(default_listen);
+    let http_addr = std::net::SocketAddr::new(bound.ip(), bound.port());
+    let operator = resolve_dashboard_operator(&mut params.config);
+    let mut relay_service = params.config.relay_enabled().then(embedded_relay_service);
+    let listener = match tokio::net::TcpListener::bind(http_addr).await {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!(
+                "dashboard/http bind failed on {http_addr}: {error}; serving coordination without the HTTP surface"
+            );
+            None
+        }
+    };
+    if listener.is_none() {
+        relay_service = None;
+    }
+    let relay_url = if relay_service.is_some() {
+        params.config.relay_url.clone().or_else(|| {
             node_addr.addrs.iter().find_map(|entry| match entry {
                 iroh::TransportAddr::Ip(ip) => {
                     Some(format!("http://{}:{}/", ip.ip(), http_addr.port()))
@@ -85,7 +104,9 @@ pub async fn serve(
                 _ => None,
             })
         })
-    });
+    } else {
+        None
+    };
     println!("node_id: {}", endpoint.id());
     println!(
         "node_addr: {}",
@@ -95,10 +116,37 @@ pub async fn serve(
         println!("relay_url: {url}");
     }
     println!("coordination listening; ctrl-c to stop");
-    let params = Arc::new(ServeParams {
-        relay_url,
-        ..params
+    let stores = params.stores.clone();
+    let dashboard_state = listener.as_ref().map(|_| {
+        std::sync::Arc::new(crate::infra::coordination::dashboard::DashboardState {
+            config: params.config.clone(),
+            stores: stores.clone(),
+            admin_stdout: params.admin_stdout,
+            operator,
+            node_id: endpoint.id().to_string(),
+            relay_url: relay_url.clone(),
+            started: std::time::Instant::now(),
+            sessions: crate::infra::coordination::dashboard::SessionStore::new(),
+            pending_links: crate::infra::coordination::dashboard::PendingLinkStore::new(),
+            login_cooldowns: std::sync::Mutex::new(std::collections::HashMap::new()),
+            login_log: std::sync::Mutex::new(Vec::new()),
+        })
     });
+    let router = dashboard_state
+        .clone()
+        .map(crate::infra::coordination::dashboard::build_router);
+    if let Some(state) = &dashboard_state {
+        crate::infra::coordination::dashboard::spawn_sweep_task(state.clone());
+    }
+    let params = Arc::new(ServeParams {
+        config: params.config,
+        stores,
+        admin_stdout: params.admin_stdout,
+        relay_url,
+    });
+    if let (Some(listener), Some(router)) = (listener, router) {
+        tokio::spawn(async move { http_accept_loop(listener, relay_service, router).await });
+    }
     loop {
         let Some(incoming) = endpoint.accept().await else {
             return Err("coordination endpoint closed".to_string());
@@ -121,39 +169,155 @@ pub async fn serve(
     }
 }
 
-/// Starts the embedded iroh relay on the same port number as the QUIC endpoint.
-///
-/// A bind or spawn failure is logged and downgraded to "no relay": coordination
-/// stays usable and the relay URL is simply not announced.
-async fn start_embedded_relay(
-    config: &CoordinationConfig,
-    endpoint: &Endpoint,
-) -> (
-    Option<iroh_relay::server::Server>,
-    Option<std::net::SocketAddr>,
-) {
-    if !config.relay_enabled() {
-        return (None, None);
-    }
-    let Some(bound) = endpoint.bound_sockets().first().copied() else {
-        return (None, None);
-    };
-    let bind = std::net::SocketAddr::new(bound.ip(), bound.port());
-    let mut server_config = iroh_relay::server::ServerConfig::default();
-    server_config.relay = Some(iroh_relay::server::RelayConfig::new(bind));
-    let spawned = iroh_relay::server::Server::spawn(server_config).await;
-    match spawned {
-        Ok(server) => {
-            let addr = server.http_addr();
-            (Some(server), addr)
-        }
+/// Default operator key shared by the CLI and the dashboard identity.
+pub fn default_operator_key_path() -> std::path::PathBuf {
+    crate::host::ssh::remote_host_home::waitagent_home().join("coordination-operator.key")
+}
+
+/// The serve process acts under its own operator key: an empty operator list
+/// auto-registers it (in memory, logged), a non-empty list without the key
+/// refuses dashboard admin actions until the admin lists it.
+fn resolve_dashboard_operator(
+    config: &mut CoordinationConfig,
+) -> crate::infra::coordination::dashboard::OperatorState {
+    use crate::infra::coordination::dashboard::OperatorState;
+    let key = match crate::infra::coordination::enrollment::load_or_generate_key(
+        &default_operator_key_path(),
+    ) {
+        Ok(key) => key,
         Err(error) => {
-            eprintln!(
-                "embedded relay failed to start on {bind}: {error}; continuing without relay"
-            );
-            (None, None)
+            return OperatorState::Refused(format!("dashboard operator key unavailable: {error}"));
         }
+    };
+    let id = key.public().to_string();
+    if config.operators.is_empty() {
+        config.operators.push(id.clone());
+        println!(
+            "auto-registered the dashboard operator key {id}; list it in coordination.toml operators to persist"
+        );
+        OperatorState::Authorized(id)
+    } else if config.operators.iter().any(|listed| listed == &id) {
+        OperatorState::Authorized(id)
+    } else {
+        OperatorState::Refused(format!(
+            "dashboard admin actions require the server operator key {id} in coordination.toml operators"
+        ))
     }
+}
+
+fn embedded_relay_service() -> iroh_relay::server::http_server::RelayServiceWithNotify {
+    let service = iroh_relay::server::RelayService::new(
+        iroh_relay::server::Handlers::default(),
+        axum::http::HeaderMap::new(),
+        None,
+        iroh_relay::KeyCache::new(iroh_relay::defaults::DEFAULT_KEY_CACHE_CAPACITY),
+        Arc::new(iroh_relay::server::AllowAll),
+        Arc::new(iroh_relay::server::Metrics::default()),
+    );
+    iroh_relay::server::http_server::RelayServiceWithNotify::new(
+        service,
+        Arc::new(tokio::sync::Notify::new()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn embedded_relay_service_for_test(
+) -> iroh_relay::server::http_server::RelayServiceWithNotify {
+    embedded_relay_service()
+}
+
+#[cfg(test)]
+pub(crate) async fn http_accept_loop_for_test(
+    listener: tokio::net::TcpListener,
+    relay: Option<iroh_relay::server::http_server::RelayServiceWithNotify>,
+    router: axum::Router,
+) {
+    http_accept_loop(listener, relay, router).await
+}
+
+/// Accepts HTTP connections and serves the relay/dashboard dispatch on each.
+async fn http_accept_loop(
+    listener: tokio::net::TcpListener,
+    relay: Option<iroh_relay::server::http_server::RelayServiceWithNotify>,
+    router: axum::Router,
+) {
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                eprintln!("dashboard/http accept failed: {error}");
+                continue;
+            }
+        };
+        let service = dispatch_service(relay.clone(), router.clone(), peer);
+        tokio::spawn(async move {
+            let _ =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+        });
+    }
+}
+
+/// One HTTP surface for both arms: the exact relay path goes to the embedded
+/// relay service, everything else to the dashboard router.
+#[derive(Clone)]
+struct DispatchService {
+    relay: Option<iroh_relay::server::http_server::RelayServiceWithNotify>,
+    router: axum::Router,
+    peer: std::net::SocketAddr,
+}
+
+impl tower::Service<hyper::Request<hyper::body::Incoming>> for DispatchService {
+    type Response = hyper::Response<axum::body::Body>;
+    type Error = iroh_relay::server::http_server::HyperError;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, mut request: hyper::Request<hyper::body::Incoming>) -> Self::Future {
+        let relay = self.relay.clone();
+        let mut router = self.router.clone();
+        let peer = self.peer;
+        Box::pin(async move {
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+            if relay.is_some()
+                && request.method() == hyper::Method::GET
+                && request.uri().path() == iroh_relay::http::RELAY_PATH
+            {
+                let response =
+                    hyper::service::Service::call(&relay.expect("checked"), request).await?;
+                let (parts, body) = response.into_parts();
+                return Ok(hyper::Response::from_parts(
+                    parts,
+                    axum::body::Body::new(body),
+                ));
+            }
+            let request = request.map(axum::body::Body::new);
+            router.call(request).await.map_err(|never| match never {})
+        })
+    }
+}
+
+fn dispatch_service(
+    relay: Option<iroh_relay::server::http_server::RelayServiceWithNotify>,
+    router: axum::Router,
+    peer: std::net::SocketAddr,
+) -> hyper_util::service::TowerToHyperService<DispatchService> {
+    hyper_util::service::TowerToHyperService::new(DispatchService {
+        relay,
+        router,
+        peer,
+    })
 }
 
 async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<serde_json::Value, String> {
@@ -501,7 +665,7 @@ mod tests {
     fn params(root: &Path, admin_stdout: bool) -> ServeParams {
         ServeParams {
             config: CoordinationConfig::default(),
-            stores: CoordinationStores::open(root).unwrap(),
+            stores: Arc::new(CoordinationStores::open(root).unwrap()),
             admin_stdout,
             relay_url: None,
         }
@@ -613,7 +777,7 @@ mod tests {
         };
         let params = ServeParams {
             config,
-            stores: CoordinationStores::open(&root).unwrap(),
+            stores: Arc::new(CoordinationStores::open(&root).unwrap()),
             admin_stdout: true,
             relay_url: None,
         };
@@ -769,7 +933,7 @@ mod tests {
                 operators: vec![operator.public().to_string()],
                 ..CoordinationConfig::default()
             },
-            stores: CoordinationStores::open(&root).unwrap(),
+            stores: Arc::new(CoordinationStores::open(&root).unwrap()),
             admin_stdout: true,
             relay_url: None,
         };

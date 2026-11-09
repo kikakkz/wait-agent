@@ -1,5 +1,6 @@
 //! Coordination service: enrollment and operator administration over iroh (issue #236; see docs/coordination-design.md).
 
+pub mod dashboard;
 pub mod enrollment;
 pub mod presence;
 pub mod server;
