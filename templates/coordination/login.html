@@ -1,0 +1,71 @@
+{% extends "coordination/base.html" %}
+{% block title %}sign in · waitagent coordination{% endblock %}
+{% block content %}
+<section>
+  <h2>Operator sign-in</h2>
+  <p class="note">Enter the coordination admin mailbox; a one-time sign-in link is mailed to it and works only on this device.</p>
+  <form class="inline" id="login-form">
+    <input type="email" id="email" placeholder="admin mailbox" autocomplete="username" required>
+    <button type="submit">mail me a link</button>
+  </form>
+  <p class="banner" id="login-banner" style="display:none"></p>
+</section>
+<section id="redeem" style="display:none">
+  <h2>Opening your sign-in link</h2>
+  <p class="banner" id="redeem-banner"></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  const banner = document.getElementById('login-banner');
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+  document.querySelector('meta[name=csrf]').setAttribute('content', '');
+  document.getElementById('uptime').textContent = '';
+
+  if (token) {
+    document.getElementById('redeem').style.display = 'block';
+    const redeemBanner = document.getElementById('redeem-banner');
+    fetch('/dashboard/api/login-redeem?token=' + encodeURIComponent(token), {
+      headers: { 'X-Login-Fingerprint': fingerprint() },
+    }).then(async (response) => {
+      if (response.ok) { window.location = '/dashboard/'; return; }
+      const body = await response.json().catch(() => ({}));
+      redeemBanner.className = 'banner error';
+      redeemBanner.textContent = body.error || ('sign-in failed (' + response.status + ')');
+    }).catch(() => {
+      redeemBanner.className = 'banner error';
+      redeemBanner.textContent = 'network error while signing in';
+    });
+  }
+
+  document.getElementById('login-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    banner.style.display = 'block';
+    banner.className = 'banner';
+    banner.textContent = 'sending…';
+    fetch('/dashboard/api/login-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: document.getElementById('email').value.trim(),
+        fingerprint: fingerprint(),
+      }),
+    }).then(async (response) => {
+      const body = await response.json().catch(() => ({}));
+      if (response.ok) {
+        banner.className = 'banner ok';
+        banner.textContent = 'if that mailbox is the admin mailbox, the link is on its way (15 minutes, this device only).';
+      } else {
+        banner.className = 'banner error';
+        banner.textContent = body.error || ('request failed (' + response.status + ')');
+      }
+    }).catch(() => {
+      banner.className = 'banner error';
+      banner.textContent = 'network error';
+    });
+  });
+})();
+</script>
+{% endblock %}

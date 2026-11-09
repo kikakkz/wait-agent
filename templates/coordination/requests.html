@@ -1,0 +1,92 @@
+{% extends "coordination/base.html" %}
+{% block title %}requests · waitagent coordination{% endblock %}
+{% block content %}
+<section>
+  <h2>Join requests</h2>
+  <table>
+    <thead>
+      <tr><th>request</th><th>node</th><th>state</th><th>created</th><th></th></tr>
+    </thead>
+    <tbody id="request-rows">
+      {% for row in rows %}
+      <tr data-request="{{ row.id }}" data-state="{{ row.state }}">
+        <td>{{ row.id_short }}</td>
+        <td>{{ row.node_id_short }}</td>
+        <td class="state-{{ row.state }}">{{ row.state }}</td>
+        <td class="age" data-created="{{ row.created_at }}">{{ row.age }}</td>
+        <td class="action">{% if row.state == "pending" %}<button class="act" data-approve="{{ row.id }}">approve</button>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      {% if rows.is_empty() %}
+      <tr class="empty"><td colspan="5">no join requests yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  <div class="linkbox" id="linkbox"></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  document.querySelector('[data-nav=requests]').classList.add('active');
+  const rows = document.getElementById('request-rows');
+  const linkbox = document.getElementById('linkbox');
+
+  function render(data) {
+    rows.innerHTML = '';
+    if (!data.requests.length) {
+      rows.innerHTML = '<tr class="empty"><td colspan="5">no join requests yet</td></tr>';
+      return;
+    }
+    for (const request of data.requests) {
+      const tr = document.createElement('tr');
+      tr.dataset.request = request.id;
+      tr.dataset.state = request.state;
+      const action = request.state === 'pending'
+        ? '<button class="act" data-approve="' + request.id + '">approve</button>'
+        : '';
+      tr.innerHTML =
+        '<td>' + request.id.slice(0, 8) + '</td>' +
+        '<td>' + request.node_id.slice(0, 8) + '</td>' +
+        '<td class="state-' + request.state + '">' + request.state + '</td>' +
+        '<td class="age">' + ageText(request.created_at) + '</td>' +
+        '<td class="action">' + action + '</td>';
+      rows.appendChild(tr);
+    }
+  }
+
+  rows.addEventListener('click', (event) => {
+    const id = event.target.dataset && event.target.dataset.approve;
+    if (!id) return;
+    api('/dashboard/api/requests/' + encodeURIComponent(id) + '/approve', { method: 'POST' })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'approve failed');
+        linkbox.style.display = 'block';
+        linkbox.innerHTML = '';
+        linkbox.appendChild(document.createTextNode('join link: ' + data.link));
+        const copy = document.createElement('button');
+        copy.className = 'act copy';
+        copy.textContent = 'copy';
+        copy.addEventListener('click', () => {
+          navigator.clipboard.writeText(data.link).then(() => { copy.textContent = 'copied'; });
+        });
+        linkbox.appendChild(copy);
+        refresh();
+      })
+      .catch((failure) => {
+        linkbox.style.display = 'block';
+        linkbox.textContent = failure.message;
+      });
+  });
+
+  async function refresh() {
+    const response = await api('/dashboard/api/requests');
+    if (!response.ok) return;
+    render(await response.json());
+  }
+  refresh().catch(() => {});
+  setInterval(() => refresh().catch(() => {}), 5000);
+})();
+</script>
+{% endblock %}

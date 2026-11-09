@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use askama::Template;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
@@ -503,6 +504,177 @@ async fn dispatch_serves_relay_and_dashboard_on_one_port() {
     assert!(
         text.starts_with("HTTP/1.1 401"),
         "the dashboard arm answers: {text}"
+    );
+    crate::infra::best_effort::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn pages_render_with_fixture_state() {
+    let root = temp_root("pages-render");
+    let state = test_state(&root, OperatorState::Authorized("op".into()));
+    let node_key = iroh::SecretKey::generate();
+    let node_id = node_key.public().to_string();
+    let request = state
+        .stores
+        .requests
+        .create(&node_id, std::time::Duration::from_secs(900), now_unix())
+        .unwrap();
+    state
+        .stores
+        .registry
+        .register(&node_id, now_unix())
+        .unwrap();
+    state.stores.presence.record(
+        node_id.clone(),
+        iroh::EndpointAddr::new(node_key.public()),
+        None,
+        now_unix(),
+    );
+
+    let overview = super::pages::OverviewTemplate {
+        csrf: "csrf-1".to_string(),
+        node_id: "node-x".to_string(),
+        relay_url: "http://127.0.0.1:7479/".to_string(),
+        registry_count: 1,
+        online_count: 1,
+        pending_count: 1,
+        version: "test".to_string(),
+    }
+    .render()
+    .unwrap();
+    assert!(overview.contains("node-x"), "server identity renders");
+    assert!(overview.contains("csrf-1"), "csrf meta renders");
+    assert!(
+        overview.contains("registry-count"),
+        "counter mount points render"
+    );
+
+    let requests = super::pages::RequestsTemplate {
+        csrf: "csrf-1".to_string(),
+        rows: vec![super::pages::RequestRow {
+            id: request.id.clone(),
+            id_short: request.id.chars().take(8).collect(),
+            node_id_short: node_id.chars().take(8).collect(),
+            state: "pending".to_string(),
+            created_at: request.created_at,
+            age: "<1m".to_string(),
+        }],
+    }
+    .render()
+    .unwrap();
+    assert!(
+        requests.contains("data-approve=\""),
+        "approve button renders"
+    );
+    assert!(requests.contains("pending"));
+
+    let nodes = super::pages::NodesTemplate {
+        csrf: "csrf-1".to_string(),
+        rows: vec![super::pages::NodeRow {
+            node_id: node_id.clone(),
+            node_id_short: node_id.chars().take(8).collect(),
+            online: true,
+            last_seen: "<1m".to_string(),
+            addr: "—".to_string(),
+        }],
+    }
+    .render()
+    .unwrap();
+    assert!(nodes.contains("data-revoke=\""), "revoke button renders");
+    assert!(nodes.contains("dot-on"), "online marker renders");
+
+    let login = super::pages::LoginTemplate {
+        csrf: String::new(),
+    }
+    .render()
+    .unwrap();
+    assert!(
+        login.contains("login-request"),
+        "login form posts to the API"
+    );
+    assert!(
+        login.contains("X-Login-Fingerprint"),
+        "redeem sends the fingerprint header"
+    );
+    assert!(
+        login.contains("/dashboard/"),
+        "success redirects to the dashboard"
+    );
+    crate::infra::best_effort::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn page_routes_sit_behind_the_session_gate() {
+    let root = temp_root("pages-gate");
+    let state = test_state(&root, OperatorState::Authorized("op".into()));
+    let router = build_router(state.clone());
+    let (cookie, csrf) = login(&state, &router, "dev-1").await;
+
+    let anonymous = Request::builder()
+        .uri("/dashboard/")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, headers) = call(&router, anonymous).await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "unauthenticated pages redirect"
+    );
+    assert_eq!(headers.get(header::LOCATION).unwrap(), "/dashboard/login");
+
+    let authed_overview = Request::builder()
+        .uri("/dashboard/")
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, body, headers) = call(&router, authed_overview).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"),
+        "pages render as HTML"
+    );
+    assert!(body.contains("node-x"), "SSR state renders");
+    assert!(
+        body.contains(&csrf),
+        "the page carries the session csrf token"
+    );
+
+    for path in ["/dashboard/requests", "/dashboard/nodes"] {
+        let authed = Request::builder()
+            .uri(path)
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, _) = call(&router, authed).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+
+    let login_page = Request::builder()
+        .uri("/dashboard/login")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = {
+        let (status, body, _) = call(&router, login_page).await;
+        (status, body)
+    };
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Operator sign-in"));
+
+    let emailed = state
+        .login_log
+        .lock()
+        .expect("poisoned")
+        .last()
+        .unwrap()
+        .clone();
+    assert!(
+        emailed.contains("/dashboard/login?token="),
+        "emailed links target the login page: {emailed}"
     );
     crate::infra::best_effort::remove_dir_all(&root);
 }

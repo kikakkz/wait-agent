@@ -1,0 +1,90 @@
+{% extends "coordination/base.html" %}
+{% block title %}nodes · waitagent coordination{% endblock %}
+{% block content %}
+<section>
+  <h2>Registered nodes</h2>
+  <table>
+    <thead>
+      <tr><th></th><th>node</th><th>presence</th><th>last seen</th><th>address</th><th></th></tr>
+    </thead>
+    <tbody id="node-rows">
+      {% for row in rows %}
+      <tr data-node="{{ row.node_id }}">
+        <td class="{% if row.online %}dot-on{% else %}dot-off{% endif %}">●</td>
+        <td>{{ row.node_id_short }}</td>
+        <td>{% if row.online %}online{% else %}offline{% endif %}</td>
+        <td>{{ row.last_seen }}</td>
+        <td>{{ row.addr }}</td>
+        <td><button class="act danger" data-revoke="{{ row.node_id }}">revoke</button></td>
+      </tr>
+      {% endfor %}
+      {% if rows.is_empty() %}
+      <tr class="empty"><td colspan="6">no registered nodes yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  <p class="banner error" id="revoke-banner" style="display:none"></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  document.querySelector('[data-nav=nodes]').classList.add('active');
+  const rows = document.getElementById('node-rows');
+  const banner = document.getElementById('revoke-banner');
+
+  function addrText(node) {
+    if (!node.addr) return '—';
+    const parts = [];
+    if (node.addr.relay_url) parts.push(node.addr.relay_url);
+    for (const direct of node.addr.direct_addresses || []) parts.push(direct);
+    return parts.join(' · ') || '—';
+  }
+
+  function render(data) {
+    rows.innerHTML = '';
+    if (!data.nodes.length) {
+      rows.innerHTML = '<tr class="empty"><td colspan="6">no registered nodes yet</td></tr>';
+      return;
+    }
+    for (const node of data.nodes) {
+      const tr = document.createElement('tr');
+      tr.dataset.node = node.node_id;
+      tr.innerHTML =
+        '<td class="' + (node.online ? 'dot-on' : 'dot-off') + '">●</td>' +
+        '<td>' + node.node_id.slice(0, 8) + '</td>' +
+        '<td>' + (node.online ? 'online' : 'offline') + '</td>' +
+        '<td>' + (node.last_seen ? ageText(node.last_seen) : '—') + '</td>' +
+        '<td>' + addrText(node) + '</td>' +
+        '<td><button class="act danger" data-revoke="' + node.node_id + '">revoke</button></td>';
+      rows.appendChild(tr);
+    }
+  }
+
+  rows.addEventListener('click', (event) => {
+    const id = event.target.dataset && event.target.dataset.revoke;
+    if (!id) return;
+    if (!window.confirm('Revoke node ' + id.slice(0, 8) + '? It must re-enroll to join again.')) return;
+    api('/dashboard/api/nodes/' + encodeURIComponent(id) + '/revoke', { method: 'POST' })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'revoke failed');
+        banner.style.display = 'none';
+        refresh();
+      })
+      .catch((failure) => {
+        banner.style.display = 'block';
+        banner.textContent = failure.message;
+      });
+  });
+
+  async function refresh() {
+    const response = await api('/dashboard/api/nodes');
+    if (!response.ok) return;
+    render(await response.json());
+  }
+  refresh().catch(() => {});
+  setInterval(() => refresh().catch(() => {}), 5000);
+})();
+</script>
+{% endblock %}

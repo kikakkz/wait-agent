@@ -1,0 +1,35 @@
+{% extends "coordination/base.html" %}
+{% block title %}overview · waitagent coordination{% endblock %}
+{% block content %}
+<section>
+  <h2>Server</h2>
+  <p class="note">node <span id="server-node">{{ node_id }}</span> · relay <span id="relay-url">{{ relay_url }}</span> · version <span id="version">{{ version }}</span></p>
+</section>
+<section>
+  <h2>Counts</h2>
+  <div class="cards">
+    <div class="card"><div class="num" id="registry-count">{{ registry_count }}</div><div class="label">registered nodes</div></div>
+    <div class="card"><div class="num" id="online-count">{{ online_count }}</div><div class="label">online now</div></div>
+    <div class="card"><div class="num" id="pending-count">{{ pending_count }}</div><div class="label">pending requests</div></div>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  document.querySelector('[data-nav=overview]').classList.add('active');
+  async function refresh() {
+    const response = await api('/dashboard/api/overview');
+    if (!response.ok) return;
+    const data = await response.json();
+    document.getElementById('registry-count').textContent = data.registry_count;
+    document.getElementById('online-count').textContent = data.online_count;
+    document.getElementById('pending-count').textContent = data.pending_count;
+    document.getElementById('relay-url').textContent = data.relay_url || '—';
+    document.getElementById('uptime').textContent = Math.floor(data.uptime_secs / 60) + 'm up';
+  }
+  refresh().catch(() => {});
+  setInterval(() => refresh().catch(() => {}), 5000);
+})();
+</script>
+{% endblock %}
