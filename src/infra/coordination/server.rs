@@ -289,7 +289,7 @@ impl tower::Service<hyper::Request<hyper::body::Incoming>> for DispatchService {
         Box::pin(async move {
             request
                 .extensions_mut()
-                .insert(axum::extract::ConnectInfo(peer));
+                .insert(axum::extract::ConnectInfo(peer.ip()));
             if relay.is_some()
                 && request.method() == hyper::Method::GET
                 && request.uri().path() == iroh_relay::http::RELAY_PATH

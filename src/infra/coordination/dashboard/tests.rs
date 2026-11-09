@@ -679,6 +679,94 @@ async fn page_routes_sit_behind_the_session_gate() {
     crate::infra::best_effort::remove_dir_all(&root);
 }
 
+#[tokio::test]
+async fn dispatch_injects_the_real_peer_ip_for_device_binding() {
+    let root = temp_root("dispatch-peer");
+    let state = test_state(&root, OperatorState::Authorized("op".into()));
+    let router = build_router(state.clone());
+    let relay = crate::infra::coordination::server::embedded_relay_service_for_test();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        crate::infra::coordination::server::http_accept_loop_for_test(
+            listener,
+            Some(relay),
+            router,
+        )
+        .await;
+    });
+
+    let body = serde_json::json!({"email": "admin@qq.com", "fingerprint": "dev-1"}).to_string();
+    let request = format!(
+        "POST /dashboard/api/login-request HTTP/1.1\r\nHost: dash.example\r\nUser-Agent: test-agent\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let raw = raw_http(addr, request.as_bytes()).await;
+    let head = raw.split("\r\n").next().unwrap_or("");
+    assert!(
+        raw.contains("HTTP/1.1 200") || raw.contains("HTTP/1.0 200"),
+        "login-request through the real dispatch path must succeed, got: {head}"
+    );
+    assert!(raw.contains(r#"{"ok":true}"#), "body: {raw}");
+
+    let url = state
+        .login_log
+        .lock()
+        .expect("poisoned")
+        .last()
+        .unwrap()
+        .clone();
+    let token = url.split("token=").nth(1).unwrap().to_string();
+    let link = state.pending_links.get(&token).expect("link recorded");
+    assert_eq!(
+        link.ip, PEER,
+        "the device binding records the real peer address"
+    );
+    assert_eq!(link.user_agent, "test-agent");
+
+    let redeem = format!(
+        "GET /dashboard/api/login-redeem?token={token} HTTP/1.1\r\nHost: dash.example\r\nUser-Agent: test-agent\r\nX-Login-Fingerprint: dev-1\r\nConnection: close\r\n\r\n"
+    );
+    let raw = raw_http(addr, redeem.as_bytes()).await;
+    assert!(
+        raw.contains("HTTP/1.1 303") || raw.contains("HTTP/1.0 303"),
+        "redeem from the same peer honors the binding: {}",
+        raw.split("\r\n").next().unwrap_or("")
+    );
+
+    let now = now_unix();
+    state.pending_links.insert(
+        "foreign".to_string(),
+        PendingLoginLink {
+            email: "admin@qq.com".to_string(),
+            created_at: now,
+            expires_at: now + 900,
+            ip: IpAddr::V4(Ipv4Addr::new(10, 9, 9, 9)),
+            user_agent: "test-agent".to_string(),
+            fingerprint: "dev-1".to_string(),
+            used: false,
+        },
+    );
+    let mismatch = "GET /dashboard/api/login-redeem?token=foreign HTTP/1.1\r\nHost: dash.example\r\nUser-Agent: test-agent\r\nX-Login-Fingerprint: dev-1\r\nConnection: close\r\n\r\n";
+    let raw = raw_http(addr, mismatch.as_bytes()).await;
+    assert!(
+        raw.contains("HTTP/1.1 403") || raw.contains("HTTP/1.0 403"),
+        "a link bound to another IP fails closed through the dispatch path: {}",
+        raw.split("\r\n").next().unwrap_or("")
+    );
+    crate::infra::best_effort::remove_dir_all(&root);
+}
+
+async fn raw_http(addr: SocketAddr, request: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
 fn session_at(created_at: u64, expires_at: u64, last_heartbeat: u64) -> Session {
     Session {
         created_at,
