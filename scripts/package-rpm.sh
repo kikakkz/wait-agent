@@ -40,7 +40,7 @@ management, remote node aggregation, and a ratatui workspace UI.
 
 %install
 mkdir -p %{buildroot}/usr/bin
-install -m 755 %{_builddir}/waitagent-%{version}/usr/bin/waitagent %{buildroot}/usr/bin/waitagent
+install -m 755 ${RPMBUILD_DIR}/BUILD/waitagent-${VERSION}/usr/bin/waitagent %{buildroot}/usr/bin/waitagent
 
 %files
 /usr/bin/waitagent
