@@ -75,7 +75,7 @@ fn run_serve(listen: Option<String>, admin_stdout: bool) -> Result<(), AppError>
             listen,
             server::ServeParams {
                 config,
-                stores,
+                stores: std::sync::Arc::new(stores),
                 admin_stdout,
                 relay_url: None,
             },
@@ -376,7 +376,7 @@ pub fn node_key_path() -> PathBuf {
 }
 
 pub fn operator_key_path() -> PathBuf {
-    crate::host::ssh::remote_host_home::waitagent_home().join("coordination-operator.key")
+    crate::infra::coordination::server::default_operator_key_path()
 }
 
 fn saved_coordination_path() -> PathBuf {

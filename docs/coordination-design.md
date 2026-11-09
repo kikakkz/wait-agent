@@ -172,3 +172,50 @@ draft row, and a detail page. Design decisions:
   endpoint answers relayed QUIC handshakes only while `accept()` is actively
   polled — a listener that has not entered its accept loop silently drops the
   dial. Accept-first is mandatory, not cosmetic.
+
+## Dashboard backend (slice 1-3d, issue #260; frontend is 1-3e/#261)
+
+- **Single-port dispatch.** `coordination serve` no longer uses
+  `iroh_relay::server::Server::spawn` (which owns its listener and cannot
+  share a port). One hyper server (`hyper-util` auto connection builder with
+  upgrades enabled, mandatory for the relay WebSocket) listens on the same
+  TCP port as the QUIC UDP socket; a `tower` dispatch service routes the
+  exact `GET /relay` path to an embedded `RelayServiceWithNotify` and
+  everything else to an axum 0.8 router served directly over
+  `Request<Incoming>`. `relay = false` drops only the relay arm — the
+  dashboard keeps serving. `/ping` is answered by axum (any 2xx) because
+  net_report measures relay latency with a plain HTTPS GET.
+- **RelayService embedding.** `RelayService::new(Handlers::default(), empty
+  headers, no rate limit, KeyCache::new(DEFAULT_KEY_CACHE_CAPACITY),
+  AllowAll, Metrics::default())` wrapped in `RelayServiceWithNotify`; the
+  relay upgrade is hardcoded on the exact `/relay` path, so an empty handler
+  map loses nothing (the built-in `/healthz` is superseded by dashboard
+  endpoints). No private iroh-relay APIs are used.
+- **No web-auth.key on disk.** Sessions are opaque 256-bit tokens (the same
+  `mint_token` CSPRNG the enrollment tokens use) with every claim kept in a
+  server-side in-memory store; a restart invalidates everything and a fresh
+  magic link is the recovery path. There is nothing to rotate because nothing
+  is persisted.
+- **Magic-link login.** `login-request` accepts only the configured
+  `admin_email` (a non-admin mailbox gets the same response and no link, so
+  nothing is enumerable), enforces a 60 s per-IP cooldown, and mails the
+  15-minute one-time link through the 1-3a SMTP preset flow; `--admin-stdout`
+  prints `login_link:` like the enroll link. Tokens are bound at request time
+  to request IP + User-Agent + a client-collected fingerprint, and redeeming
+  fails closed (403) on any mismatch, expiry, prior use, or unknown token.
+  Success marks the link used, creates a session (absolute TTL 12 h), sets an
+  HttpOnly SameSite=Strict cookie, and redirects to `/dashboard/`.
+- **Heartbeat and expiry.** Clients heartbeat every 30 s; a session idle for
+  more than 90 s is rejected at the auth gate and reaped by a 30 s sweep,
+  alongside the absolute 12 h TTL.
+- **CSRF.** Mutations (`heartbeat`, `approve`, `revoke`) require an
+  `X-CSRF-Token` header matching the per-session token, handed out in the
+  `X-CSRF-Token` response header of authenticated responses.
+- **Admin semantics equivalence.** Approve/revoke/requests go through the same
+  `RequestStore`/`RegistryStore`/`PresenceStore` methods the admin-ALPN
+  handlers call in the same process, so dashboard, TUI page, and CLI agree by
+  construction; approve returns the same `waitagent://join?token=…` format as
+  the CLI. The serve process acts under its own operator key: an empty
+  `operators` list auto-registers it (logged, in memory only); a non-empty
+  list without the key makes dashboard admin endpoints answer 409 with the
+  listing instruction until the admin adds it.
