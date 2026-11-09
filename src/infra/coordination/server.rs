@@ -251,10 +251,11 @@ async fn http_accept_loop(
         };
         let service = dispatch_service(relay.clone(), router.clone(), peer);
         tokio::spawn(async move {
-            let _ =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service)
-                    .await;
+            let stream = iroh_relay::server::streams::MaybeTlsStream::Plain(stream);
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                .with_upgrades()
+                .await;
         });
     }
 }

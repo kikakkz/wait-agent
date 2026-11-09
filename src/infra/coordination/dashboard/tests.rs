@@ -767,6 +767,138 @@ async fn raw_http(addr: SocketAddr, request: &[u8]) -> String {
     String::from_utf8_lossy(&raw).into_owned()
 }
 
+#[tokio::test]
+async fn relay_link_establishes_through_the_dispatch_listener() {
+    use iroh::{Endpoint, RelayMode, SecretKey, TransportAddr};
+    let root = temp_root("dispatch-relay-link");
+    let state = test_state(&root, OperatorState::Authorized("op".into()));
+    let router = build_router(state);
+    let relay = crate::infra::coordination::server::embedded_relay_service_for_test();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        crate::infra::coordination::server::http_accept_loop_for_test(
+            listener,
+            Some(relay),
+            router,
+        )
+        .await;
+    });
+    let url = format!("http://{addr}/");
+
+    let build_endpoint = |key: SecretKey| {
+        let url = url.clone();
+        async move {
+            let map = iroh::RelayMap::try_from_iter([url.as_str()]).unwrap();
+            Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(RelayMode::Custom(map))
+                .secret_key(key)
+                .alpns(vec![crate::infra::mesh_probe::MESH_PROBE_ALPN.to_vec()])
+                .bind()
+                .await
+        }
+    };
+    let mesh_listener = build_endpoint(SecretKey::generate()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut listener_addr = None;
+    while tokio::time::Instant::now() < deadline {
+        let found = mesh_listener.addr();
+        if found
+            .addrs
+            .iter()
+            .any(|entry| matches!(entry, TransportAddr::Relay(_)))
+        {
+            listener_addr = Some(found);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let listener_addr =
+        listener_addr.expect("the relay link establishes through the dispatch path");
+    assert!(listener_addr
+        .addrs
+        .iter()
+        .any(|entry| matches!(entry, TransportAddr::Relay(found) if found.as_str() == url)));
+
+    let mut dial_addr = iroh::EndpointAddr::new(mesh_listener.id());
+    dial_addr
+        .addrs
+        .insert(TransportAddr::Relay(url.parse().expect("relay url parses")));
+    dial_addr
+        .addrs
+        .insert(TransportAddr::Ip("127.0.0.1:9".parse().unwrap()));
+    let dialer = build_endpoint(SecretKey::generate()).await.unwrap();
+    let dialer_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while tokio::time::Instant::now() < dialer_deadline {
+        if dialer
+            .addr()
+            .addrs
+            .iter()
+            .any(|entry| matches!(entry, TransportAddr::Relay(_)))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        dialer
+            .addr()
+            .addrs
+            .iter()
+            .any(|entry| matches!(entry, TransportAddr::Relay(_))),
+        "the dialer registers its home relay through the dispatch path"
+    );
+
+    let accept = tokio::spawn({
+        let mesh_listener = mesh_listener.clone();
+        async move {
+            let incoming = mesh_listener.accept().await.unwrap();
+            let connecting = incoming.accept().unwrap();
+            assert!(
+                matches!(
+                    connecting.remote_addr(),
+                    iroh::endpoint::IncomingAddr::Relay { .. }
+                ),
+                "the accepted side observes a relayed connection"
+            );
+            connecting.await.unwrap()
+        }
+    });
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        dialer.connect(dial_addr, crate::infra::mesh_probe::MESH_PROBE_ALPN),
+    )
+    .await
+    .expect("dial through the embedded relay timed out")
+    .unwrap();
+
+    let server_conn = accept.await.unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut send, mut recv) = server_conn.accept_bi().await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        loop {
+            let read = recv.read(&mut buf).await.unwrap();
+            let Some(len) = read else { break };
+            send.write_all(&buf[..len]).await.unwrap();
+        }
+        let _ = send.finish();
+    });
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut send, b"PING")
+        .await
+        .unwrap();
+    let mut pong = [0u8; 4];
+    tokio::io::AsyncReadExt::read_exact(&mut recv, &mut pong)
+        .await
+        .unwrap();
+    assert_eq!(&pong, b"PING");
+    drop(send);
+    drop(recv);
+    echo.await.unwrap();
+    dialer.close().await;
+    crate::infra::best_effort::remove_dir_all(&root);
+}
+
 fn session_at(created_at: u64, expires_at: u64, last_heartbeat: u64) -> Session {
     Session {
         created_at,
