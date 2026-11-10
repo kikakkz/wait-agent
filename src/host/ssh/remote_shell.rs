@@ -321,6 +321,7 @@ mod tests {
             host_kind: crate::host::ssh::remote_host_history_store::RemoteHostKind::Lan,
             remote_shell: None,
             via: None,
+            mesh_node_id: None,
             last_via_used: None,
             install_source:
                 crate::host::ssh::remote_host_history_store::InstallSource::RemoteDownload,

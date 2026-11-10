@@ -1035,6 +1035,7 @@ fn handle_remote_session_disconnected(
                             tls_pin_sha256: Some(info.tls_pin_sha256.clone())
                                 .filter(|s| !s.is_empty()),
                             via: info.via,
+                            mesh_node_id: info.mesh_node_id.clone(),
                         };
                         let ingress_tx = {
                             let guard = shared
@@ -1257,6 +1258,7 @@ fn handle_remote_node_offline(
                     endpoint_uri: format!("tls://{}:{}", info.host, info.port),
                     tls_pin_sha256: Some(info.tls_pin_sha256.clone()).filter(|s| !s.is_empty()),
                     via: info.via,
+                    mesh_node_id: info.mesh_node_id.clone(),
                 };
                 let ingress_tx = {
                     let guard = shared
@@ -1430,6 +1432,7 @@ fn reset_outbound_dial_retry_worker(
         endpoint_uri: format!("tls://{}:{}", info.host, info.port),
         tls_pin_sha256: Some(info.tls_pin_sha256.clone()).filter(|s| !s.is_empty()),
         via: info.via,
+        mesh_node_id: info.mesh_node_id.clone(),
     };
     let ingress_tx = {
         let guard = shared
@@ -2390,6 +2393,7 @@ fn perform_remote_host_connect(
         // for auto — the path remembered by the last successful connect
         // (issue #156 slice 2).
         via: profile.effective_via(),
+        mesh_node_id: profile.mesh_node_id.clone(),
     });
 
     remote_owner
@@ -2605,6 +2609,7 @@ fn dial_sibling_nodes(
             endpoint_uri,
             tls_pin_sha256: Some(tls_pin_sha256.clone()).filter(|pin| !pin.is_empty()),
             via: resolved_via.to_request_via(),
+            mesh_node_id: profile.mesh_node_id.clone(),
         };
         if ingress_tx
             .send(InternalEvent::InitiateOutboundConnection { request })
@@ -4243,6 +4248,7 @@ mod state_loop_tests {
                 profile_name: "test-profile".to_string(),
                 server_can_reach_peer: false,
                 via: None,
+                mesh_node_id: None,
             },
         );
 

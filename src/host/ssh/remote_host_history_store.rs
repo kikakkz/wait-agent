@@ -142,6 +142,9 @@ pub struct RemoteHostProfile {
     /// slice 2; explicit "direct"/"relay" values are preserved verbatim).
     /// Validated at load.
     pub via: Option<String>,
+    /// The peer's enrolled mesh node id; required when `via` is `"mesh"`
+    /// (issue #268). Validated at load.
+    pub mesh_node_id: Option<String>,
     /// The dial path that actually worked on the most recent successful
     /// connect of an `auto` profile ("direct" or "relay"). Never written
     /// for explicit choices and never "auto" itself: it annotates the
@@ -380,6 +383,9 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         if let Some(via) = &host.via {
             push_string(&mut out, "via", via);
         }
+        if let Some(mesh_node_id) = &host.mesh_node_id {
+            push_string(&mut out, "mesh_node_id", mesh_node_id);
+        }
         if let Some(last_via_used) = &host.last_via_used {
             push_string(&mut out, "last_via_used", last_via_used);
         }
@@ -462,6 +468,7 @@ struct RawProfile {
     host_kind: Option<String>,
     remote_shell: Option<String>,
     via: Option<String>,
+    mesh_node_id: Option<String>,
     last_via_used: Option<String>,
     install_source: Option<String>,
     relay_role: Option<String>,
@@ -488,6 +495,7 @@ impl RawProfile {
             "host_kind" => self.host_kind = Some(value),
             "remote_shell" => self.remote_shell = Some(value),
             "via" => self.via = Some(value),
+            "mesh_node_id" => self.mesh_node_id = Some(value),
             "last_via_used" => self.last_via_used = Some(value),
             "install_source" => self.install_source = Some(value),
             "relay_role" => self.relay_role = Some(value),
@@ -505,6 +513,13 @@ impl RawProfile {
         let auth_kind = self
             .auth_kind
             .ok_or_else(|| RemoteHostHistoryStoreError::new("remote host auth_kind is required"))?;
+        let via = parse_via(self.via)?;
+        let mesh_node_id = parse_mesh_node_id(self.mesh_node_id)?;
+        if via.as_deref() == Some("mesh") && mesh_node_id.is_none() {
+            return Err(RemoteHostHistoryStoreError::new(
+                "remote host profile `mesh_node_id` is required when via = \"mesh\"",
+            ));
+        }
         let auth = match auth_kind.as_str() {
             "password" => RemoteHostAuthProfile::Password {
                 password_secret_id: optional_secret_id(self.ssh_password_secret_id)?,
@@ -534,7 +549,8 @@ impl RawProfile {
                 .unwrap_or(true),
             host_kind: parse_host_kind(self.host_kind)?,
             remote_shell: parse_remote_shell(self.remote_shell)?,
-            via: parse_via(self.via)?,
+            via,
+            mesh_node_id,
             last_via_used: parse_last_via_used(self.last_via_used)?,
             install_source: parse_install_source(self.install_source)?,
             relay_role: parse_relay_role(self.relay_role)?,
@@ -680,6 +696,25 @@ fn parse_via(value: Option<String>) -> Result<Option<String>, RemoteHostHistoryS
         .map_err(RemoteHostHistoryStoreError::new)
 }
 
+/// Validates the `mesh_node_id` field: when present it must parse as an
+/// iroh node id, so a hand-edited file fails at load with a fixable message.
+fn parse_mesh_node_id(
+    value: Option<String>,
+) -> Result<Option<String>, RemoteHostHistoryStoreError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    value
+        .trim()
+        .parse::<iroh::PublicKey>()
+        .map(|_| Some(value.trim().to_string()))
+        .map_err(|error| {
+            RemoteHostHistoryStoreError::new(format!(
+                "remote host profile `mesh_node_id` is not a valid node id: {error}"
+            ))
+        })
+}
+
 /// Validates the `last_via_used` annotation: only the concrete paths a
 /// connect can actually take. `auto` is a choice, not an outcome, so it is
 /// rejected here — the field must never become a silent rewrite of the
@@ -693,7 +728,7 @@ fn parse_last_via_used(
     match crate::infra::remote_grpc_transport::RemoteNodeVia::parse(&value) {
         Ok(crate::infra::remote_grpc_transport::RemoteNodeVia::Auto) => {
             Err(RemoteHostHistoryStoreError::new(
-                "remote host profile `last_via_used` must be \"direct\" or \"relay\"",
+                "remote host profile `last_via_used` must be a concrete path (\"direct\", \"relay\" or \"mesh\")",
             ))
         }
         Ok(concrete) => Ok(Some(concrete.as_str().to_string())),
@@ -889,6 +924,7 @@ mod tests {
                 host_kind: RemoteHostKind::Cloud,
                 remote_shell: None,
                 via: None,
+                mesh_node_id: None,
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
                 relay_role: false,
@@ -914,6 +950,7 @@ mod tests {
                 host_kind: RemoteHostKind::Lan,
                 remote_shell: None,
                 via: None,
+                mesh_node_id: None,
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
                 relay_role: false,
@@ -958,6 +995,7 @@ mod tests {
                 host_kind: RemoteHostKind::Lan,
                 remote_shell: None,
                 via: None,
+                mesh_node_id: None,
                 last_via_used: None,
                 install_source: InstallSource::RemoteDownload,
                 relay_role: false,
@@ -1077,6 +1115,53 @@ host_kind = "lan"
         );
 
         crate::infra::best_effort::remove_file(path);
+    }
+    #[test]
+    fn remote_host_history_validates_mesh_profiles_at_load() {
+        let path = unique_path("remote-hosts-mesh.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+        let node_id = iroh::SecretKey::generate().public().to_string();
+
+        let mut meshed = profile("meshed", "10.1.29.150");
+        meshed.via = Some("mesh".to_string());
+        meshed.mesh_node_id = Some(node_id.clone());
+        store.upsert_profile(meshed).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("via = \"mesh\""));
+        assert!(content.contains(&format!("mesh_node_id = \"{node_id}\"")));
+
+        let loaded = store.load().unwrap();
+        let meshed = loaded.hosts.iter().find(|h| h.name == "meshed").unwrap();
+        assert_eq!(
+            meshed.via(),
+            crate::infra::remote_grpc_transport::RemoteNodeVia::Mesh
+        );
+        assert_eq!(meshed.mesh_node_id.as_deref(), Some(node_id.as_str()));
+        crate::infra::best_effort::remove_file(&path);
+
+        let broken_path = unique_path("remote-hosts-mesh-missing-id.toml");
+        let broken_store = RemoteHostHistoryStore::new(&broken_path);
+        let mut broken = profile("broken", "10.1.29.151");
+        broken.via = Some("mesh".to_string());
+        broken_store.upsert_profile(broken).unwrap();
+        let error = broken_store
+            .load()
+            .expect_err("via = mesh without mesh_node_id must not load");
+        assert!(error.to_string().contains("mesh_node_id"), "{error}");
+        crate::infra::best_effort::remove_file(&broken_path);
+
+        let bad_path = unique_path("remote-hosts-mesh-bad-id.toml");
+        let bad_store = RemoteHostHistoryStore::new(&bad_path);
+        let mut bad = profile("bad", "10.1.29.152");
+        bad.via = Some("mesh".to_string());
+        bad.mesh_node_id = Some("not-a-node-id".to_string());
+        bad_store.upsert_profile(bad).unwrap();
+        let error = bad_store
+            .load()
+            .expect_err("an invalid mesh_node_id must not load");
+        assert!(error.to_string().contains("not a valid node id"), "{error}");
+        crate::infra::best_effort::remove_file(&bad_path);
     }
 
     #[test]

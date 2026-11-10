@@ -105,6 +105,8 @@ pub(crate) struct RemoteNodeConnectionInfo {
     /// Dial path for reconnects: `Some(Relay)` re-dials through the pinned
     /// relay, `None` dials directly. Recorded from the host profile.
     pub via: Option<crate::infra::remote_grpc_transport::RemoteNodeVia>,
+    /// The peer's enrolled mesh node id for `via = "mesh"` reconnects.
+    pub mesh_node_id: Option<String>,
 }
 
 const PEER_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);

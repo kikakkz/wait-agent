@@ -3849,6 +3849,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
 fn via_badge(profile: Option<&RemoteHostProfile>) -> Option<Span<'static>> {
     let profile = profile?;
     let badge = match profile.via() {
+        RemoteNodeVia::Mesh => Span::styled(
+            "via mesh",
+            Style::default().bg(Color::Green).fg(Color::Black),
+        ),
         RemoteNodeVia::Relay => Span::styled(
             "via relay",
             Style::default().bg(Color::Magenta).fg(Color::Black),
@@ -5329,6 +5333,10 @@ fn via_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
             label: RemoteNodeVia::Relay.label(),
             selected: state.via == RemoteNodeVia::Relay,
         },
+        ChoiceSegment {
+            label: RemoteNodeVia::Mesh.label(),
+            selected: state.via == RemoteNodeVia::Mesh,
+        },
     ]
 }
 
@@ -6463,6 +6471,9 @@ where
         // successful auto connect — never rewritten here (issue #156
         // slice 2).
         via: Some(state.via.as_str().to_string()),
+        mesh_node_id: state
+            .selected_profile()
+            .and_then(|profile| profile.mesh_node_id.clone()),
         last_via_used: state
             .selected_profile()
             .and_then(|profile| profile.last_via_used.clone()),
@@ -9824,11 +9835,18 @@ mod tests {
         assert_eq!(state.via, RemoteNodeVia::Auto);
 
         state.via = RemoteNodeVia::Auto;
-        assert_eq!(segmented_for_test(&via_tabs(&state)), "Auto  Direct  Relay");
+        assert_eq!(
+            segmented_for_test(&via_tabs(&state)),
+            "Auto  Direct  Relay  Mesh"
+        );
 
         state.via = RemoteNodeVia::Relay;
         let tabs = via_tabs(&state);
-        assert!(!tabs[0].selected && !tabs[1].selected && tabs[2].selected);
+        assert!(!tabs[0].selected && !tabs[1].selected && tabs[2].selected && !tabs[3].selected);
+
+        state.via = RemoteNodeVia::Mesh;
+        let tabs = via_tabs(&state);
+        assert!(!tabs[0].selected && !tabs[1].selected && !tabs[2].selected && tabs[3].selected);
     }
 
     #[test]
@@ -9845,9 +9863,11 @@ mod tests {
         state.adjust_choice(1);
         assert_eq!(state.via, RemoteNodeVia::Relay);
         state.adjust_choice(1);
+        assert_eq!(state.via, RemoteNodeVia::Mesh);
+        state.adjust_choice(1);
         assert_eq!(state.via, RemoteNodeVia::Auto);
         state.adjust_choice(-1);
-        assert_eq!(state.via, RemoteNodeVia::Relay);
+        assert_eq!(state.via, RemoteNodeVia::Mesh);
 
         state.apply_key(KeyEvent::from(KeyCode::Char(' ')));
         assert_eq!(state.via, RemoteNodeVia::Auto);
@@ -9916,6 +9936,7 @@ mod tests {
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
             via: Some("relay".to_string()),
+            mesh_node_id: None,
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
@@ -9936,6 +9957,7 @@ mod tests {
     fn via_badge_names_explicit_choice_and_auto_effective_path() {
         let mut profile = RemoteHostProfile {
             via: Some("relay".to_string()),
+            mesh_node_id: None,
             ..RemoteHostProfile::default()
         };
         assert_eq!(
@@ -10037,6 +10059,7 @@ mod tests {
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
             via: Some("relay".to_string()),
+            mesh_node_id: None,
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
@@ -10222,6 +10245,7 @@ mod tests {
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
             via: None,
+            mesh_node_id: None,
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,
@@ -10273,6 +10297,7 @@ mod tests {
             host_kind: RemoteHostKind::Lan,
             remote_shell: None,
             via: None,
+            mesh_node_id: None,
             last_via_used: None,
             install_source: InstallSource::RemoteDownload,
             relay_role: false,

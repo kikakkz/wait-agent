@@ -550,6 +550,7 @@ mod snapshot_tests {
                 profile_name: "profile".to_string(),
                 server_can_reach_peer: false,
                 via: None,
+                mesh_node_id: None,
             },
         );
         shared

@@ -131,6 +131,7 @@ mod tests {
             endpoint_uri: "tls://127.0.0.1:7474".to_string(),
             tls_pin_sha256: Some("deadbeef".to_string()),
             via: Some(crate::infra::remote_grpc_transport::RemoteNodeVia::Relay),
+            mesh_node_id: None,
         }
     }
 

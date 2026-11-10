@@ -517,6 +517,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                 tls_pin_sha256: None,
                 // Authority publication dials stay direct in this slice.
                 via: None,
+                mesh_node_id: None,
             },
             transport_event_tx,
         ) {
