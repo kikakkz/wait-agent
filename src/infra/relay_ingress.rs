@@ -36,6 +36,7 @@ use crate::infra::relay_client::RelayClientHandle;
 pub(crate) enum NodeIngressIo {
     Tcp(tokio::net::TcpStream),
     Relay(Box<dyn PeerConnection>),
+    Mesh(Box<dyn PeerConnection>),
 }
 
 /// Connection metadata tonic stores in request extensions. Relay-routed
@@ -56,7 +57,7 @@ impl Connected for NodeIngressIo {
             Self::Tcp(stream) => NodeIngressConnectInfo {
                 peer_addr: stream.peer_addr().ok(),
             },
-            Self::Relay(_) => NodeIngressConnectInfo { peer_addr: None },
+            Self::Relay(_) | Self::Mesh(_) => NodeIngressConnectInfo { peer_addr: None },
         }
     }
 }
@@ -69,7 +70,9 @@ impl AsyncRead for NodeIngressIo {
     ) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
-            Self::Relay(connection) => Pin::new(&mut **connection).poll_read(cx, buf),
+            Self::Relay(connection) | Self::Mesh(connection) => {
+                Pin::new(&mut **connection).poll_read(cx, buf)
+            }
         }
     }
 }
@@ -82,21 +85,27 @@ impl AsyncWrite for NodeIngressIo {
     ) -> Poll<io::Result<usize>> {
         match &mut *self {
             Self::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
-            Self::Relay(connection) => Pin::new(&mut **connection).poll_write(cx, buf),
+            Self::Relay(connection) | Self::Mesh(connection) => {
+                Pin::new(&mut **connection).poll_write(cx, buf)
+            }
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Tcp(stream) => Pin::new(stream).poll_flush(cx),
-            Self::Relay(connection) => Pin::new(&mut **connection).poll_flush(cx),
+            Self::Relay(connection) | Self::Mesh(connection) => {
+                Pin::new(&mut **connection).poll_flush(cx)
+            }
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
-            Self::Relay(connection) => Pin::new(&mut **connection).poll_shutdown(cx),
+            Self::Relay(connection) | Self::Mesh(connection) => {
+                Pin::new(&mut **connection).poll_shutdown(cx)
+            }
         }
     }
 }

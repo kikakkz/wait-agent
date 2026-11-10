@@ -64,6 +64,9 @@ pub enum RemoteNodeVia {
     Direct,
     /// Reach the peer through the pinned relay's routed streams.
     Relay,
+    /// Reach the peer over the iroh mesh: coordination resolve for the
+    /// target's NodeAddr, QUIC stream session (issue #268).
+    Mesh,
 }
 
 impl RemoteNodeVia {
@@ -74,8 +77,9 @@ impl RemoteNodeVia {
             "auto" => Ok(Self::Auto),
             "direct" => Ok(Self::Direct),
             "relay" => Ok(Self::Relay),
+            "mesh" => Ok(Self::Mesh),
             other => Err(format!(
-                "unknown via value {other:?}; expected \"auto\", \"relay\" or \"direct\""
+                "unknown via value {other:?}; expected \"auto\", \"relay\", \"direct\" or \"mesh\""
             )),
         }
     }
@@ -86,6 +90,7 @@ impl RemoteNodeVia {
             Self::Auto => "auto",
             Self::Direct => "direct",
             Self::Relay => "relay",
+            Self::Mesh => "mesh",
         }
     }
 
@@ -95,13 +100,14 @@ impl RemoteNodeVia {
             Self::Auto => "Auto",
             Self::Direct => "Direct",
             Self::Relay => "Relay",
+            Self::Mesh => "Mesh",
         }
     }
 
-    /// Cycles Auto -> Direct -> Relay (and back), matching the two-value
-    /// `RemoteHostKind::shift` interaction used by the choice rows.
+    /// Cycles Auto -> Direct -> Relay -> Mesh (and back), matching the
+    /// two-value `RemoteHostKind::shift` interaction used by the choice rows.
     pub fn shift(self, step: i32) -> Self {
-        let values = [Self::Auto, Self::Direct, Self::Relay];
+        let values = [Self::Auto, Self::Direct, Self::Relay, Self::Mesh];
         let index = values.iter().position(|value| *value == self).unwrap_or(0) as i32;
         let len = values.len() as i32;
         values[((index + step).rem_euclid(len)) as usize]
@@ -130,11 +136,16 @@ pub(crate) enum PeerDialer {
     /// The blocking handle call is driven via `spawn_blocking` inside the
     /// connector future (tonic polls it in async context).
     Relay(std::sync::Arc<crate::infra::relay_client::RelayClientHandle>),
+    /// Dial the peer's enrolled mesh node id over iroh (coordination resolve
+    /// for the NodeAddr, QUIC session stream; issue #268). The blocking
+    /// resolve-and-dial runs on the blocking thread pool.
+    Mesh(String),
 }
 
 /// Error message for a relay-via dial when this node never enrolled a relay
 /// (kept verbatim: the connect UI surfaces it to the operator).
 const NO_RELAY_CONFIGURED: &str = "via = \"relay\" but no relay is configured — run waitagent relay join <address> <token> or set via = \"direct\"";
+const NO_MESH_NODE_ID: &str = "via = \"mesh\" but the profile has no mesh node id — set mesh_node_id to the peer's enrolled node id (waitagent coordination resolve <node-id>)";
 
 /// Default cap on the `via = "auto"` direct probe (issue #156 slice 2). A
 /// reachable peer's TCP connect plus pinned TLS handshake lands well under a
@@ -274,6 +285,9 @@ pub struct OutboundNodeSessionRequest {
     /// Dial path for the inner-TLS connection; `None` means direct. Carried
     /// through reconnects so a relay-via peer never falls back silently.
     pub via: Option<RemoteNodeVia>,
+    /// The peer's enrolled mesh node id; required when `via` is `Mesh`
+    /// (issue #268).
+    pub mesh_node_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -537,6 +551,19 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 // SetRelayClient lands, and the retry must carry it.
                 None => {
                     return emit_transport_failed_and_err(&event_tx, &request, NO_RELAY_CONFIGURED);
+                }
+            },
+            Some(RemoteNodeVia::Mesh) => match &request.mesh_node_id {
+                Some(target) if !target.trim().is_empty() => PeerDialer::Mesh(target.clone()),
+                None => {
+                    return emit_transport_failed_and_err(&event_tx, &request, NO_MESH_NODE_ID);
+                }
+                Some(_) => {
+                    return emit_transport_failed_and_err(
+                        &event_tx,
+                        &request,
+                        "via = \"mesh\" needs a non-empty mesh node id in the profile",
+                    );
                 }
             },
             Some(RemoteNodeVia::Direct) | None => PeerDialer::Direct,
@@ -928,6 +955,17 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     }
                 }
             });
+        let mesh_accept = match crate::infra::mesh_session::start_mesh_ingress(relay_stop.clone()) {
+            Ok(mesh_rx) => Some(mesh_rx),
+            Err(error) => {
+                let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                    node_id: None,
+                    session_instance_id: None,
+                    message: format!("mesh ingress unavailable: {error}"),
+                });
+                None
+            }
+        };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let relay_stop_worker = relay_stop.clone();
         let worker = thread::Builder::new()
@@ -962,19 +1000,22 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     };
                     let tcp_incoming = TcpListenerStream::new(listener)
                         .map(|result| result.map(NodeIngressIo::Tcp));
-                    let incoming: Pin<
+                    let mut incoming: Pin<
                         Box<dyn Stream<Item = Result<NodeIngressIo, std::io::Error>> + Send>,
-                    > = match relay_accept {
-                        Some((relay_worker, relay_conn_rx)) => {
-                            // Held until the server stops; detached afterwards,
-                            // like the listener worker itself.
-                            let _relay_worker = relay_worker;
-                            let relay_incoming = UnboundedReceiverStream::new(relay_conn_rx)
-                                .map(Result::<_, std::io::Error>::Ok);
-                            Box::pin(tcp_incoming.merge(relay_incoming))
-                        }
-                        None => Box::pin(tcp_incoming),
-                    };
+                    > = Box::pin(tcp_incoming);
+                    if let Some((relay_worker, relay_conn_rx)) = relay_accept {
+                        // Held until the server stops; detached afterwards,
+                        // like the listener worker itself.
+                        let _relay_worker = relay_worker;
+                        let relay_incoming = UnboundedReceiverStream::new(relay_conn_rx)
+                            .map(Result::<_, std::io::Error>::Ok);
+                        incoming = Box::pin(incoming.merge(relay_incoming));
+                    }
+                    if let Some(mesh_conn_rx) = mesh_accept {
+                        let mesh_incoming = UnboundedReceiverStream::new(mesh_conn_rx)
+                            .map(Result::<_, std::io::Error>::Ok);
+                        incoming = Box::pin(incoming.merge(mesh_incoming));
+                    }
                     let session_shutdowns = Arc::new(Mutex::new(Vec::new()));
                     let shutdown_registry = session_shutdowns.clone();
                     let service = TransportNodeSessionService {
@@ -1596,6 +1637,17 @@ impl Service<tonic::transport::Uri> for TlsPinConnector {
                     })?;
                     stream
                 }
+                PeerDialer::Mesh(target) => {
+                    let target = target.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::infra::mesh_session::dial_mesh_peer_connection(&target)
+                    })
+                    .await
+                    .map_err(|error| {
+                        std::io::Error::other(format!("mesh dial task failed: {error}"))
+                    })?
+                    .map_err(|error| std::io::Error::other(format!("mesh dial failed: {error}")))?
+                }
             };
             let tls_stream =
                 match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, stream))
@@ -1791,6 +1843,7 @@ mod tests {
                 endpoint_uri: "tls://127.0.0.1:7474".to_string(),
                 tls_pin_sha256: Some("deadbeef".to_string()),
                 via: Some(super::RemoteNodeVia::Relay),
+                mesh_node_id: None,
             },
             event_tx,
         );
@@ -2161,6 +2214,7 @@ mod tests {
                     endpoint_uri: format!("http://{bind_addr}"),
                     tls_pin_sha256: None,
                     via: None,
+                    mesh_node_id: None,
                 },
                 event_tx,
             )
@@ -2203,6 +2257,7 @@ mod tests {
                 endpoint_uri: format!("http://{bind_addr}"),
                 tls_pin_sha256: None,
                 via: None,
+                mesh_node_id: None,
             },
             event_tx,
         );
@@ -2430,14 +2485,29 @@ mod tests {
         let via = super::RemoteNodeVia::Auto;
         assert_eq!(via.shift(1), super::RemoteNodeVia::Direct);
         assert_eq!(via.shift(2), super::RemoteNodeVia::Relay);
-        assert_eq!(via.shift(3), super::RemoteNodeVia::Auto);
+        assert_eq!(via.shift(3), super::RemoteNodeVia::Mesh);
+        assert_eq!(via.shift(4), super::RemoteNodeVia::Auto);
         assert_eq!(
             super::RemoteNodeVia::Relay.shift(1),
+            super::RemoteNodeVia::Mesh
+        );
+        assert_eq!(
+            super::RemoteNodeVia::Mesh.shift(1),
             super::RemoteNodeVia::Auto
         );
         assert_eq!(
             super::RemoteNodeVia::Direct.shift(-1),
             super::RemoteNodeVia::Auto
+        );
+        assert_eq!(
+            super::RemoteNodeVia::Mesh.shift(-1),
+            super::RemoteNodeVia::Relay
+        );
+        assert_eq!(super::RemoteNodeVia::Mesh.as_str(), "mesh");
+        assert_eq!(super::RemoteNodeVia::Mesh.label(), "Mesh");
+        assert_eq!(
+            super::RemoteNodeVia::parse("mesh"),
+            Ok(super::RemoteNodeVia::Mesh)
         );
         assert_eq!(super::RemoteNodeVia::Auto.as_str(), "auto");
         assert_eq!(super::RemoteNodeVia::Auto.label(), "Auto");
@@ -2453,6 +2523,7 @@ mod tests {
                 endpoint_uri: "tls://127.0.0.1:7474".to_string(),
                 tls_pin_sha256: Some("deadbeef".to_string()),
                 via: Some(super::RemoteNodeVia::Auto),
+                mesh_node_id: None,
             },
             event_tx,
         ) {

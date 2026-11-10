@@ -246,3 +246,43 @@ draft row, and a detail page. Design decisions:
 - **Shared queries.** `DashboardState::overview_counts` and
   `DashboardState::registry_nodes` back both the JSON API and the SSR pages,
   so the HTML and the polled JSON can never disagree about the numbers.
+
+## Session data plane over mesh (slice 2, issue #268)
+
+- **Session ALPN.** Mesh sessions run as one iroh QUIC bi-stream per session
+  on `waitagent/mesh-session/0`, accepted by the node's mesh endpoint — an
+  iroh Endpoint on the enrolled ed25519 node key (`coordination-node.key`)
+  whose relay mode follows the announced URL saved at enrollment
+  (`coordination-relay.json`, Custom single-relay map; Disabled before any
+  enrollment). Accepted streams feed the ingress tonic server through a new
+  `NodeIngressIo::Mesh` variant, so the server pipeline (node TLS, h2,
+  operator auth) and its events are byte-identical to the TCP and legacy
+  relay arms. Accept-first applies: the mesh accept worker polls
+  `endpoint.accept()` from listener start.
+- **Addressing flow.** The profile stores the peer's mesh node id
+  (`mesh_node_id`, validated at load; required when `via = "mesh"`). A mesh
+  dial resolves that id through the remembered coordination server
+  (`coordination-server.json`): the resolve round trip returns the target's
+  last-known NodeAddr (direct addresses plus the announced relay URL), then
+  the dialer endpoint — same node key, `RelayMode::Custom` with exactly the
+  resolved relay URL — connects with direct paths first and the embedded
+  relay as fallback (iroh path selection). An unregistered or never-seen
+  target fails the resolve with the server's error verbatim. One endpoint
+  per session dial; the stream owns an `Arc` of it so the transport lives
+  exactly as long as the session.
+- **Auth layering (chosen).** The QUIC layer authenticates the peer's
+  enrolled node id at the transport. The session protocol nevertheless keeps
+  the existing inner stack unchanged — node TLS with the certificate
+  fingerprint pin, then operator auth — exactly as it runs over TCP and the
+  legacy relay. Rationale: the fingerprint↔certificate mapping and the
+  operator-authorization semantics are session-level properties the mesh
+  transport does not re-prove; carrying them untouched keeps direct, legacy
+  relay, and mesh dials behaviorally identical and leaves room to later
+  require node-id equality as an additional check without a protocol change.
+- **Integration shape.** Outbound adds `PeerDialer::Mesh(target node id)`:
+  the pinned connector runs the blocking resolve-and-dial on the blocking
+  thread pool (mirroring the legacy relay arm) and receives a
+  `PeerConnection` implemented over the QUIC stream pair, so every layer
+  above the dialer is unaware of mesh. Inbound mirrors the relay accept
+  worker one-for-one. The mux relay stack is untouched (slice 4 retires
+  it).

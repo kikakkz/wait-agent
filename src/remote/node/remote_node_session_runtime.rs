@@ -662,6 +662,7 @@ fn connect_grpc_node_session(
                 // Legacy helper: the relay handle is not threaded here; the
                 // modern ingress path carries via from the host profile.
                 via: None,
+                mesh_node_id: None,
             },
             event_tx,
         )

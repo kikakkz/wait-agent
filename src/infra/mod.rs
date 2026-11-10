@@ -2,6 +2,7 @@ pub mod best_effort;
 pub mod coordination;
 pub mod error_log;
 pub mod mesh_probe;
+pub mod mesh_session;
 pub mod node_credentials;
 pub mod operator_auth;
 pub mod peer_connection;

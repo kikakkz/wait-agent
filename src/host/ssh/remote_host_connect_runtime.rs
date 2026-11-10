@@ -597,7 +597,31 @@ where
         // relay-via dial's retry worker keeps its cadence while the join
         // lands, so a cold node (no pin, no link) still comes up within the
         // publish-wait budget.
-        let (default_target, resolved_via) = if profile.relay_role {
+        let (default_target, resolved_via) = if profile.relay_role
+            && profile.via() == RemoteNodeVia::Mesh
+        {
+            // Relay-role deploy with the mesh data plane: the remote still
+            // bootstraps as a relay node, but the session itself rides the
+            // mesh (issue #268).
+            let mesh_request = OutboundNodeSessionRequest {
+                node_id: authority_node_id.clone(),
+                endpoint_uri: endpoint_uri.clone(),
+                tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
+                via: Some(RemoteNodeVia::Mesh),
+                mesh_node_id: profile.mesh_node_id.clone(),
+            };
+            initiate_outbound_dial(mesh_request)
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+            let target = self.wait_for_first_online_target(
+                &authority_node_id,
+                DEFAULT_ENDPOINT_POLL_INTERVAL,
+                self.publish_wait_timeout(),
+                self.auth_rejection.as_ref(),
+                &request.local_connect_endpoint,
+                port.port,
+            )?;
+            (target, RemoteNodeVia::Mesh)
+        } else if profile.relay_role {
             self.bootstrapper
                 .wait_remote_relay_node_online(
                     &plan,
@@ -639,6 +663,7 @@ where
                 endpoint_uri: endpoint_uri.clone(),
                 tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
                 via: Some(RemoteNodeVia::Relay),
+                mesh_node_id: profile.mesh_node_id.clone(),
             };
             initiate_outbound_dial(relay_request)
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
@@ -662,6 +687,7 @@ where
                 endpoint_uri: endpoint_uri.clone(),
                 tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
                 via: request_via(resolved_via),
+                mesh_node_id: profile.mesh_node_id.clone(),
             };
             ERROR_LOG.log(format!(
                 "[remote-host-connect] queuing bootstrap dial for {}:{} node={}",
@@ -806,6 +832,7 @@ where
             endpoint_uri: endpoint_uri.clone(),
             tls_pin_sha256: Some(tls_pin_sha256),
             via: request_via(resolved_via),
+            mesh_node_id: profile.mesh_node_id.clone(),
         };
 
         ERROR_LOG.log(format!(
@@ -1129,6 +1156,7 @@ fn profile_from_direct_args(
         // the file-level absent-means-auto default cannot change CLI
         // semantics (issue #156 slice 2).
         via: Some("direct".to_string()),
+        mesh_node_id: None,
         last_via_used: None,
     })
 }
@@ -3655,6 +3683,7 @@ mod tests {
             // resolver never probes the network here. Auto behavior has
             // dedicated tests below with an injected resolver.
             via: Some("direct".to_string()),
+            mesh_node_id: None,
             ..RemoteHostProfile::default()
         }
     }

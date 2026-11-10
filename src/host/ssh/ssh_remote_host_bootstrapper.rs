@@ -3268,6 +3268,8 @@ mod tests {
         plan
     }
 
+    static FALLBACK_MARKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn fallback_marker_count() -> usize {
         crate::infra::error_log::ERROR_LOG
             .recent_entries(200)
@@ -3280,6 +3282,9 @@ mod tests {
 
     #[test]
     fn remote_download_failure_with_cached_artifact_falls_back() {
+        let _marker_guard = FALLBACK_MARKER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cache = prime_artifact_cache();
         let calls = Rc::new(RefCell::new(Vec::new()));
         // Pop order: start, daemon check (not running), credentials, upload
@@ -3334,6 +3339,9 @@ mod tests {
 
     #[test]
     fn remote_download_failure_without_cached_artifact_propagates_original_error() {
+        let _marker_guard = FALLBACK_MARKER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cache = LocalArtifactCache::new(format!(
             "{}/waitagent-empty-cache-{}",
             std::env::temp_dir().display(),

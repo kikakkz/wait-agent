@@ -257,6 +257,7 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
                     server_can_reach_peer,
                     // Inbound-connect authorities are dialed directly.
                     via: None,
+                    mesh_node_id: None,
                 },
             });
         Ok(())
